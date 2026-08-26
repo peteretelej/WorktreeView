@@ -1085,14 +1085,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gitcompare"
-version = "0.1.0"
-dependencies = [
- "tauri",
- "tauri-build",
-]
-
-[[package]]
 name = "glib"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4337,6 +4329,14 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "worktreeview"
+version = "0.1.0"
+dependencies = [
+ "tauri",
+ "tauri-build",
+]
 
 [[package]]
 name = "writeable"

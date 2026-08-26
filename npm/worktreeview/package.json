@@ -1,0 +1,33 @@
+{
+  "name": "worktreeview",
+  "version": "0.0.1",
+  "description": "Code review UI for Git worktrees",
+  "main": "index.js",
+  "exports": "./index.js",
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "keywords": [
+    "git",
+    "worktree",
+    "code-review",
+    "developer-tools"
+  ],
+  "author": "Peter Etelej",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/peteretelej/GitCompare.git",
+    "directory": "npm/worktreeview"
+  },
+  "bugs": {
+    "url": "https://github.com/peteretelej/GitCompare/issues"
+  },
+  "homepage": "https://github.com/peteretelej/GitCompare#readme",
+  "publishConfig": {
+    "access": "public"
+  }
+}

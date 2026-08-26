@@ -1,8 +1,11 @@
-# GitCompare
+# WorktreeView
 
-Open-source, local-first, non-mutating Git worktree review inbox.
+**Code review UI for Git worktrees**
 
-GitCompare uses Tauri 2, React, and the native Git CLI. The Rust backend will
+An open-source desktop app for reviewing code across local and remote Git
+worktrees. Built for developers running multiple coding agents in parallel.
+
+WorktreeView uses Tauri 2, React, and the native Git CLI. The Rust backend will
 own Git process orchestration, output parsing, persistence, and typed IPC. The
 React webview owns presentation and interaction only.
 
@@ -28,8 +31,8 @@ explicit Tauri commands without giving the webview shell access.
 
 ## Safety
 
-- The review flow must never mutate Git state.
+- Review flows never stage, commit, switch, merge, or delete worktrees.
 - Native Git remains the semantic authority; no libgit2.
 - The local review path makes no network requests.
-- Remote/SSH support is out of scope until its trust and execution model is
-  settled.
+- Remote/SSH support is planned, but implementation waits until its trust and
+  execution model is settled.

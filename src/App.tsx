@@ -94,15 +94,15 @@ const projects: Project[] = [
     ],
   },
   {
-    id: "gitcompare",
+    id: "worktreeview",
     owner: "peteretelej",
-    name: "gitcompare",
-    path: "~/code/peteretelej/gitcompare",
+    name: "worktreeview",
+    path: "~/code/peteretelej/worktreeview",
     worktrees: [
       {
         id: "main",
         branch: "main",
-        path: "~/code/peteretelej/gitcompare",
+        path: "~/code/peteretelej/worktreeview",
         summary: "Bootstrap Tauri desktop shell",
         state: "In progress",
         files: 12,
@@ -240,8 +240,8 @@ function App() {
     <div className={`app-shell ${collapsed ? "nav-collapsed" : ""}`}>
       <aside className="sidebar">
         <div className="brand-row">
-          <span className="brand-mark">gc</span>
-          <span className="brand-name">GitCompare</span>
+          <span className="brand-mark">wv</span>
+          <span className="brand-name">WorktreeView</span>
           <button
             className="icon-button collapse-button"
             type="button"

@@ -1,10 +1,10 @@
-# GitCompare
+# WorktreeView
 
 ## Product
 
-GitCompare is an open-source, local-first, read-only Git worktree review inbox.
-It helps developers review parallel human and agent work without mutating Git
-state.
+WorktreeView is an open-source desktop app for reviewing code across local and
+remote Git worktrees. It is built for developers running multiple coding agents
+in parallel.
 
 ## Architecture
 
