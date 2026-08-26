@@ -20,13 +20,13 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/peteretelej/GitCompare.git",
+    "url": "git+https://github.com/peteretelej/WorktreeView.git",
     "directory": "npm/worktreeview"
   },
   "bugs": {
-    "url": "https://github.com/peteretelej/GitCompare/issues"
+    "url": "https://github.com/peteretelej/WorktreeView/issues"
   },
-  "homepage": "https://github.com/peteretelej/GitCompare#readme",
+  "homepage": "https://github.com/peteretelej/WorktreeView#readme",
   "publishConfig": {
     "access": "public"
   }

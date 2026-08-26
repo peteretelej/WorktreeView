@@ -10,4 +10,4 @@ This package establishes the official npm package name while WorktreeView is in
 pre-release development. It does not install the desktop application yet.
 
 Follow development at
-[github.com/peteretelej/GitCompare](https://github.com/peteretelej/GitCompare).
+[github.com/peteretelej/WorktreeView](https://github.com/peteretelej/WorktreeView).
