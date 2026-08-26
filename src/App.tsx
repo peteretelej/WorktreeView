@@ -1,4 +1,9 @@
-import { useEffect, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import {
   AlertTriangle,
   Check,
@@ -39,6 +44,11 @@ type Project = {
   name: string;
   path: string;
   worktrees: Worktree[];
+};
+
+type SearchResult = {
+  project: Project;
+  worktree?: Worktree;
 };
 
 const projects: Project[] = [
@@ -126,6 +136,8 @@ function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const paletteRef = useRef<HTMLDialogElement>(null);
+  const paletteOpenerRef = useRef<HTMLElement | null>(null);
 
   const activeProject =
     projects.find((project) => project.id === activeProjectId) ?? projects[0];
@@ -137,30 +149,83 @@ function App() {
     function handleKeyboard(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setPaletteOpen((open) => !open);
+        if (paletteRef.current?.open) closePalette();
+        else openPalette();
       }
-      if (event.key === "Escape") setPaletteOpen(false);
     }
 
     window.addEventListener("keydown", handleKeyboard);
     return () => window.removeEventListener("keydown", handleKeyboard);
   }, []);
 
-  function selectProject(project: Project) {
-    setActiveProjectId(project.id);
-    setSelectedWorktreeId(project.worktrees[0]?.id ?? "");
+  useEffect(() => {
+    const dialog = paletteRef.current;
+    if (paletteOpen && dialog && !dialog.open) dialog.showModal();
+  }, [paletteOpen]);
+
+  function openPalette(opener?: HTMLElement | null) {
+    paletteOpenerRef.current =
+      opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setPaletteOpen(true);
   }
 
-  const matchingProjects = projects.filter((project) => {
-    const search = query.trim().toLowerCase();
-    return (
-      !search ||
-      `${project.owner}/${project.name}`.toLowerCase().includes(search) ||
-      project.worktrees.some((worktree) =>
-        `${worktree.branch} ${worktree.summary}`.toLowerCase().includes(search),
-      )
+  function closePalette() {
+    if (paletteRef.current?.open) {
+      paletteRef.current.close();
+      return;
+    }
+
+    setPaletteOpen(false);
+    paletteOpenerRef.current?.focus();
+  }
+
+  function handlePaletteClosed() {
+    setPaletteOpen(false);
+    setQuery("");
+    paletteOpenerRef.current?.focus();
+    paletteOpenerRef.current = null;
+  }
+
+  function handlePaletteKeyDown(event: ReactKeyboardEvent<HTMLDialogElement>) {
+    if (event.key !== "Tab") return;
+
+    const focusable = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
     );
-  });
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!first || !last) return;
+
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function selectProject(project: Project, worktreeId = project.worktrees[0]?.id ?? "") {
+    setActiveProjectId(project.id);
+    setSelectedWorktreeId(worktreeId);
+  }
+
+  const search = query.trim().toLowerCase();
+  const matchingResults: SearchResult[] = search
+    ? projects.flatMap((project) => {
+        if (`${project.owner}/${project.name}`.toLowerCase().includes(search)) {
+          return [{ project }];
+        }
+
+        return project.worktrees
+          .filter((worktree) =>
+            `${worktree.branch} ${worktree.summary}`.toLowerCase().includes(search),
+          )
+          .map((worktree) => ({ project, worktree }));
+      })
+    : projects.map((project) => ({ project }));
 
   const attentionCount = projects.reduce(
     (total, project) =>
@@ -188,20 +253,36 @@ function App() {
         </div>
 
         <div className="nav-tabs" aria-label="Workspace views">
-          <button className="nav-tab active" type="button">
+          <button
+            className="nav-tab active"
+            type="button"
+            aria-label="Projects"
+            aria-current="page"
+          >
             <FolderGit2 size={15} />
             <span>Projects</span>
           </button>
-          <button className="nav-tab" type="button">
+          <button
+            className="nav-tab"
+            type="button"
+            aria-label={`Attention, ${attentionCount} items, unavailable in fixture mode`}
+            aria-describedby="fixture-limit"
+            disabled
+          >
             <Inbox size={15} />
             <span>Attention</span>
             <span className="nav-count">{attentionCount}</span>
           </button>
         </div>
 
-        <button className="search-trigger" type="button" onClick={() => setPaletteOpen(true)}>
+        <button
+          className="search-trigger"
+          type="button"
+          aria-label="Find projects and worktrees"
+          onClick={(event) => openPalette(event.currentTarget)}
+        >
           <Search size={14} />
-          <span>Find projects and refs</span>
+          <span>Find projects and worktrees</span>
           <kbd>Ctrl K</kbd>
         </button>
 
@@ -220,6 +301,7 @@ function App() {
                 key={project.id}
                 type="button"
                 title={`${project.owner}/${project.name}`}
+                aria-current={active ? "true" : undefined}
                 onClick={() => selectProject(project)}
               >
                 {active ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -241,6 +323,9 @@ function App() {
       </aside>
 
       <section className="workspace">
+        <p className="visually-hidden" id="fixture-limit">
+          This fixture shell does not yet implement Attention, Settings, or Open review.
+        </p>
         <header className="topbar">
           <div className="breadcrumb">
             <span>{activeProject.owner}</span>
@@ -248,11 +333,23 @@ function App() {
             <strong>{activeProject.name}</strong>
           </div>
           <div className="topbar-actions">
+            <span className="fixture-label">Fixture data</span>
             <span className="safety-label"><Check size={13} /> Read-only</span>
-            <button className="search-button" type="button" onClick={() => setPaletteOpen(true)}>
+            <button
+              className="search-button"
+              type="button"
+              aria-label="Find projects and worktrees"
+              onClick={(event) => openPalette(event.currentTarget)}
+            >
               <Command size={14} /> <span>Search</span> <kbd>Ctrl K</kbd>
             </button>
-            <button className="icon-button" type="button" aria-label="Open settings">
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="Open settings, unavailable in fixture mode"
+              aria-describedby="fixture-limit"
+              disabled
+            >
               <Settings size={16} />
             </button>
           </div>
@@ -290,6 +387,7 @@ function App() {
                     }`}
                     key={worktree.id}
                     type="button"
+                    aria-pressed={worktree.id === selectedWorktreeId}
                     onClick={() => setSelectedWorktreeId(worktree.id)}
                   >
                     <span className="branch-cell">
@@ -340,7 +438,12 @@ function App() {
                   <span>Worktree path</span>
                   <code>{selectedWorktree.path}</code>
                 </div>
-                <button className="primary-button" type="button">
+                <button
+                  className="primary-button"
+                  type="button"
+                  aria-describedby="fixture-limit"
+                  disabled
+                >
                   Open review <ChevronRight size={15} />
                 </button>
                 <p className="bootstrap-note">
@@ -360,12 +463,18 @@ function App() {
       </section>
 
       {paletteOpen && (
-        <div className="palette-backdrop" role="presentation" onMouseDown={() => setPaletteOpen(false)}>
+        <dialog
+          className="palette-backdrop"
+          ref={paletteRef}
+          aria-label="Find projects and worktrees"
+          onClose={handlePaletteClosed}
+          onKeyDown={handlePaletteKeyDown}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closePalette();
+          }}
+        >
           <div
             className="palette"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Find projects and refs"
             onMouseDown={(event) => event.stopPropagation()}
           >
             <div className="palette-input-row">
@@ -376,31 +485,39 @@ function App() {
                 onChange={(event) => setQuery(event.currentTarget.value)}
                 placeholder="Find projects, branches, and worktrees"
               />
-              <button type="button" aria-label="Close search" onClick={() => setPaletteOpen(false)}>
+              <button type="button" aria-label="Close search" onClick={closePalette}>
                 <X size={16} />
               </button>
             </div>
             <div className="palette-results">
-              <div className="nav-section-label">Projects</div>
-              {matchingProjects.map((project) => (
+              <div className="nav-section-label">Projects and worktrees</div>
+              {matchingResults.map((result) => (
                 <button
-                  key={project.id}
+                  key={`${result.project.id}:${result.worktree?.id ?? "project"}`}
                   type="button"
                   onClick={() => {
-                    selectProject(project);
-                    setPaletteOpen(false);
-                    setQuery("");
+                    selectProject(result.project, result.worktree?.id);
+                    closePalette();
                   }}
                 >
-                  <FolderGit2 size={16} />
-                  <span><strong>{project.name}</strong><small>{project.owner}</small></span>
+                  {result.worktree ? <GitBranch size={16} /> : <FolderGit2 size={16} />}
+                  <span>
+                    <strong>{result.worktree?.branch ?? result.project.name}</strong>
+                    <small>
+                      {result.worktree
+                        ? `${result.project.owner}/${result.project.name} - ${result.worktree.summary}`
+                        : result.project.owner}
+                    </small>
+                  </span>
                   <kbd>Enter</kbd>
                 </button>
               ))}
-              {matchingProjects.length === 0 && <p>No projects match "{query}".</p>}
+              {matchingResults.length === 0 && (
+                <p>No projects or worktrees match "{query}".</p>
+              )}
             </div>
           </div>
-        </div>
+        </dialog>
       )}
     </div>
   );

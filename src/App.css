@@ -57,9 +57,22 @@ button {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+dialog:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: -2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  margin: -1px;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 kbd,
@@ -128,7 +141,7 @@ code,
   cursor: pointer;
 }
 
-.icon-button:hover {
+.icon-button:not(:disabled):hover {
   background: var(--surface-2);
   color: var(--foreground);
 }
@@ -157,7 +170,7 @@ code,
   font-size: 12px;
 }
 
-.nav-tab:hover,
+.nav-tab:not(:disabled):hover,
 .nav-tab.active {
   background: var(--surface-2);
   color: var(--foreground);
@@ -356,6 +369,22 @@ kbd {
   gap: 7px;
 }
 
+.fixture-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border: 1px solid var(--warn-soft);
+  border-radius: 3px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .safety-label {
   display: inline-flex;
   align-items: center;
@@ -378,7 +407,7 @@ kbd {
   font-size: 11px;
 }
 
-.search-button:hover {
+.search-button:not(:disabled):hover {
   color: var(--foreground);
 }
 
@@ -657,6 +686,22 @@ h2 {
   font-weight: 650;
 }
 
+button:disabled {
+  cursor: not-allowed;
+}
+
+.icon-button:disabled,
+.nav-tab:disabled {
+  opacity: 0.48;
+}
+
+.primary-button:disabled {
+  border-color: var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+  opacity: 0.72;
+}
+
 .bootstrap-note {
   margin: 12px 0 0;
   color: var(--muted);
@@ -688,11 +733,25 @@ h2 {
   position: fixed;
   z-index: 20;
   inset: 0;
-  display: flex;
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  max-height: none;
   align-items: flex-start;
   justify-content: center;
+  margin: 0;
+  border: 0;
   padding-top: 12vh;
   background: oklch(0.1 0.01 264 / 0.72);
+  color: var(--foreground);
+}
+
+.palette-backdrop[open] {
+  display: flex;
+}
+
+.palette-backdrop::backdrop {
+  background: transparent;
 }
 
 .palette {
