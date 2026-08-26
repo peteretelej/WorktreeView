@@ -9,15 +9,15 @@ React webview owns presentation and interaction only.
 ## Development
 
 ```sh
-bun install
-bun run check
-bun run build
-bun run tauri dev
+npm install
+npm run check
+npm run build
+npm run tauri dev
 ```
 
-Linux desktop development requires the Tauri WebKitGTK and librsvg system
-prerequisites. The frontend build and Rust checks can run without launching a
-desktop window.
+Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/)
+for your platform before desktop development. The frontend build and Rust
+checks can run without launching a desktop window.
 
 ## Current State
 

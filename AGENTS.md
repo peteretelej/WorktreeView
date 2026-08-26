@@ -37,9 +37,9 @@ DOM.
 ## Commands
 
 ```sh
-bun install
-bun run check
-bun run build
+npm install
+npm run check
+npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
-bun run tauri dev
+npm run tauri dev
 ```
