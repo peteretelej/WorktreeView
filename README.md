@@ -23,17 +23,23 @@ nvm use
 npm ci
 ```
 
-Start the frontend on the lab host:
+Start the frontend:
 
 ```sh
 npm run dev
 ```
 
-Open <https://worktreeview.lab.etelej.com/> to reach the frontend over the
-tailnet. Port 1420 is dedicated to WorktreeView. On Linux, free a stale server
-with `fuser -k 1420/tcp`, or use `npm run dev:lab` to free the port and start
-the frontend in one step. Port-freeing convenience for macOS and Windows is
-deferred.
+Open <http://localhost:1420/> to reach it. To serve behind a reverse proxy (e.g.
+a tailnet route or custom domain), set `WORKTREEVIEW_DEV_HOST` to the hostname
+Vite should accept:
+
+```sh
+WORKTREEVIEW_DEV_HOST=worktreeview.example.com npm run dev
+```
+
+Port 1420 is fixed. On Linux, free a stale server with `fuser -k 1420/tcp`, or
+use `npm run dev:lab` to free the port and start the frontend in one step.
+Port-freeing convenience for macOS and Windows is deferred.
 
 Use the Tauri doctor to inspect the local environment:
 

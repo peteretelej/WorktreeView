@@ -16,6 +16,9 @@ export default defineConfig(async () => ({
     port: 1420,
     strictPort: true,
     host: host || false,
+    allowedHosts: process.env.WORKTREEVIEW_DEV_HOST
+      ? process.env.WORKTREEVIEW_DEV_HOST.split(",").map((h) => h.trim())
+      : [],
     hmr: host
       ? {
           protocol: "ws",
