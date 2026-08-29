@@ -407,6 +407,16 @@ kbd {
   overflow: hidden;
 }
 
+.operation-error {
+  margin: 12px 20px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 5px;
+  background: var(--danger-soft);
+  color: var(--foreground);
+  font-size: 11px;
+}
+
 .inbox-pane {
   min-width: 0;
   overflow-y: auto;
@@ -488,6 +498,33 @@ h2 {
 
 .worktree-list {
   min-height: 180px;
+}
+
+.page-controls {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 5px 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.page-controls button {
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.page-controls button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .worktree-row {
@@ -735,6 +772,12 @@ button:disabled {
   color: var(--muted);
   font-size: 11px;
   text-align: center;
+}
+
+.palette-results .page-controls {
+  position: sticky;
+  bottom: -5px;
+  background: var(--elevated);
 }
 
 .nav-collapsed {
