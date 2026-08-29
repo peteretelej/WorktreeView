@@ -60,10 +60,10 @@ The frontend build and Rust checks can run without launching a desktop window.
 
 ## Current State
 
-The repository contains the production shell and local fixture data needed to
-validate the design handoff. Git inspection, SQLite persistence, review state,
-and exports are not implemented yet. Those capabilities must enter through
-explicit Tauri commands without giving the webview shell access.
+The repository persists locally opened Git folders in SQLite and discovers their
+worktrees live through the native Git CLI. Review state, diffs, and exports are
+not implemented yet. Those capabilities must enter through explicit Tauri
+commands without giving the webview shell access.
 
 ## Safety
 
