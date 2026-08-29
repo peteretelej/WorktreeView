@@ -3,8 +3,17 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=24",
+    "npm": ">=11"
+  },
+  "devEngines": {
+    "runtime": { "name": "node", "version": ">=24" },
+    "packageManager": { "name": "npm", "version": ">=11" }
+  },
   "scripts": {
     "dev": "vite",
+    "dev:lab": "fuser -k 1420/tcp 2>/dev/null; npm run dev",
     "build": "npm run check && vite build",
     "check": "tsc --noEmit && tsc -p tsconfig.node.json",
     "preview": "vite preview",

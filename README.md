@@ -11,16 +11,46 @@ React webview owns presentation and interaction only.
 
 ## Development
 
+Install the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/)
+before desktop development. On Debian/Ubuntu, these include
+`libwebkit2gtk-4.1-dev`, `build-essential`, `curl`, `wget`, `file`,
+`libxdo-dev`, `libssl-dev`, `libayatana-appindicator3-dev`, and `librsvg2-dev`.
+
+Select the pinned Node.js toolchain and bootstrap a fresh checkout:
+
 ```sh
-npm install
+nvm use
+npm ci
+```
+
+Start the frontend on the lab host:
+
+```sh
+npm run dev
+```
+
+Open <https://worktreeview.lab.etelej.com/> to reach the frontend over the
+tailnet. Port 1420 is dedicated to WorktreeView. On Linux, free a stale server
+with `fuser -k 1420/tcp`, or use `npm run dev:lab` to free the port and start
+the frontend in one step. Port-freeing convenience for macOS and Windows is
+deferred.
+
+Use the Tauri doctor to inspect the local environment:
+
+```sh
+npm run tauri info
+```
+
+The desktop shell requires a display and runs on a desktop machine, not the
+headless lab host:
+
+```sh
 npm run check
 npm run build
 npm run tauri dev
 ```
 
-Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/)
-for your platform before desktop development. The frontend build and Rust
-checks can run without launching a desktop window.
+The frontend build and Rust checks can run without launching a desktop window.
 
 ## Current State
 
