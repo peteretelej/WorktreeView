@@ -32,6 +32,7 @@ function App() {
   const [loadError, setLoadError] = useState("");
   const [operationError, setOperationError] = useState("");
   const [repoErrors, setRepoErrors] = useState<Record<string, string>>({});
+  const [hydratingRepos, setHydratingRepos] = useState<Record<string, number>>({});
   const [collapsed, setCollapsed] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -49,6 +50,7 @@ function App() {
         if (!mounted) return;
         setRepos(loaded);
         setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? "");
+        setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1])));
         setLoading(false);
         for (let start = 0; start < loaded.length; start += 4) {
           await Promise.all(loaded.slice(start, start + 4).map(async (repo) => {
@@ -57,6 +59,14 @@ function App() {
               if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item));
             } catch (error) {
               if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) }));
+            } finally {
+              if (mounted) setHydratingRepos((current) => {
+                const count = current[repo.path] ?? 0;
+                if (count > 1) return { ...current, [repo.path]: count - 1 };
+                const next = { ...current };
+                delete next[repo.path];
+                return next;
+              });
             }
           }));
         }
@@ -101,10 +111,19 @@ function App() {
       const repo = await invoke<Repo>("open_repo", { path: selected });
       setRepos((current) => [repo, ...current.filter((item) => item.path !== repo.path)]);
       setActiveRepoPath(repo.path); setSelectedWorktreePath("");
+      setRepoErrors((current) => { const next = { ...current }; delete next[repo.path]; return next; });
+      setHydratingRepos((current) => ({ ...current, [repo.path]: (current[repo.path] ?? 0) + 1 }));
       try {
         const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path });
         setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item));
       } catch (error) { setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); }
+      finally {
+        setHydratingRepos((current) => {
+          const count = current[repo.path] ?? 0;
+          if (count > 1) return { ...current, [repo.path]: count - 1 };
+          const next = { ...current }; delete next[repo.path]; return next;
+        });
+      }
     } catch (error) { setOperationError(errorMessage(error)); }
     finally { setOpening(false); }
   }
@@ -114,9 +133,11 @@ function App() {
     if (`${repo.name} ${repo.path}`.toLowerCase().includes(search)) return [{ repo }];
     return repo.worktrees.filter((worktree) => `${worktree.branch} ${worktree.path} ${worktree.head}`.toLowerCase().includes(search)).map((worktree) => ({ repo, worktree }));
   }) : repos.map((repo) => ({ repo }));
-  const statusMessage = loadError || operationError || (loading ? "Loading repositories..." : "");
+  const hydrating = Object.keys(hydratingRepos).length > 0;
+  const activeRepoHydrating = activeRepo ? Boolean(hydratingRepos[activeRepo.path]) : false;
+  const statusMessage = loadError || operationError || (loading ? "Loading repositories..." : hydrating ? "Loading worktrees..." : "");
 
-  return <div className={`app-shell ${collapsed ? "nav-collapsed" : ""}`} aria-busy={loading || opening}>
+  return <div className={`app-shell ${collapsed ? "nav-collapsed" : ""}`} aria-busy={loading || opening || hydrating}>
     <aside className="sidebar">
       <div className="brand-row"><span className="brand-mark">wv</span><span className="brand-name">WorktreeView</span><button className="icon-button collapse-button" type="button" aria-label={collapsed ? "Expand project navigator" : "Collapse project navigator"} onClick={() => setCollapsed((value) => !value)}>{collapsed ? <ChevronRight size={16} /> : <ChevronsLeft size={16} />}</button></div>
       <div className="nav-tabs" aria-label="Workspace views"><button className="nav-tab active" type="button" aria-label="Projects" aria-current="page"><FolderGit2 size={15} /><span>Projects</span></button><button className="nav-tab" type="button" aria-label="Attention, unavailable" disabled><Inbox size={15} /><span>Attention</span></button></div>
@@ -126,9 +147,9 @@ function App() {
     </aside>
     <section className="workspace"><p className="visually-hidden" id="unavailable-features">Attention, Settings, and Open review are unavailable.</p><div className="live-error" role="status" aria-live="polite">{statusMessage}</div>
       <header className="topbar"><div className="breadcrumb"><span>Repositories</span><span>/</span><strong>{activeRepo?.name ?? "No repository"}</strong></div><div className="topbar-actions"><span className="safety-label">Read-only</span><button className="search-button" type="button" aria-label="Find repositories and worktrees" onClick={(event) => openPalette(event.currentTarget)}><Command size={14} /> <span>Search</span> <kbd>Ctrl K</kbd></button><button className="icon-button" type="button" aria-label="Open settings, unavailable" aria-describedby="unavailable-features" disabled><Settings size={16} /></button></div></header>
-      <main className="content"><section className="inbox-pane" aria-labelledby="inbox-heading"><div className="section-heading"><div><p className="eyebrow">Repository</p><h1 id="inbox-heading">Worktrees</h1></div><span className="path-label">{activeRepo?.path}</span></div>
-        {loadError ? <div className="empty-state"><CircleDot size={24} /><strong>Repositories could not be loaded</strong><span>{loadError}</span></div> : !activeRepo ? <div className="empty-state"><FolderGit2 size={24} /><strong>No repositories</strong><span>Open a local Git folder to begin.</span><button className="secondary-button" type="button" onClick={() => void openRepository()} disabled={opening}>Open repository...</button></div> : repoErrors[activeRepo.path] ? <div className="empty-state"><CircleDot size={24} /><strong>Worktrees unavailable</strong><span>{repoErrors[activeRepo.path]}</span></div> : activeRepo.worktrees.length === 0 ? <div className="empty-state"><CircleDot size={24} /><strong>No worktrees</strong><span>This repository has no linked worktrees.</span></div> : <><div className="table-header" aria-hidden="true"><span>Branch</span><span>Path</span><span>HEAD</span></div><div className="worktree-list">{activeRepo.worktrees.map((worktree) => <button className={`worktree-row ${worktree.path === selectedWorktreePath ? "selected" : ""}`} key={worktree.path} type="button" aria-pressed={worktree.path === selectedWorktreePath} onClick={() => setSelectedWorktreePath(worktree.path)}><span className="branch-cell"><span className="branch-title"><GitBranch size={14} /><strong>{worktree.branch}</strong></span><small>{worktree.path}</small></span><span className="worktree-path">{worktree.path}</span><code className="head-cell">{worktree.head}</code></button>)}</div></>}
-      </section><aside className="detail-pane" aria-label="Selected worktree details">{selectedWorktree ? <><div className="detail-heading"><div className="detail-icon"><FileDiff size={18} /></div><div><p className="eyebrow">Selected worktree</p><h2>{selectedWorktree.branch}</h2></div></div><div className="detail-path"><span>Worktree path</span><code>{selectedWorktree.path}</code></div><div className="detail-path"><span>HEAD</span><code>{selectedWorktree.head}</code></div><button className="primary-button" type="button" aria-describedby="unavailable-features" disabled>Open review <ChevronRight size={15} /></button></> : <div className="empty-state detail-empty"><FileDiff size={24} /><strong>Select a worktree</strong><span>Worktree identity will appear here.</span></div>}</aside></main>
+       <main className="content"><section className="inbox-pane" aria-labelledby="inbox-heading" aria-busy={loading || activeRepoHydrating}><div className="section-heading"><div><p className="eyebrow">Repository</p><h1 id="inbox-heading">Worktrees</h1></div><span className="path-label">{activeRepo?.path}</span></div>
+        {loading ? <div className="empty-state"><CircleDot size={24} /><strong>Loading repositories...</strong><span>Reading saved repositories.</span></div> : loadError ? <div className="empty-state"><CircleDot size={24} /><strong>Repositories could not be loaded</strong><span>{loadError}</span></div> : !activeRepo ? <div className="empty-state"><FolderGit2 size={24} /><strong>No repositories</strong><span>Open a local Git folder to begin.</span><button className="secondary-button" type="button" onClick={() => void openRepository()} disabled={opening}>Open repository...</button></div> : activeRepoHydrating ? <div className="empty-state"><CircleDot size={24} /><strong>Loading worktrees...</strong><span>Reading live worktree identity.</span></div> : repoErrors[activeRepo.path] ? <div className="empty-state"><CircleDot size={24} /><strong>Worktrees unavailable</strong><span>{repoErrors[activeRepo.path]}</span></div> : activeRepo.worktrees.length === 0 ? <div className="empty-state"><CircleDot size={24} /><strong>No worktrees</strong><span>This repository has no linked worktrees.</span></div> : <><div className="table-header" aria-hidden="true"><span>Branch</span><span>Path</span><span>HEAD</span></div><div className="worktree-list">{activeRepo.worktrees.map((worktree) => <button className={`worktree-row ${worktree.path === selectedWorktreePath ? "selected" : ""}`} key={worktree.path} type="button" aria-pressed={worktree.path === selectedWorktreePath} onClick={() => setSelectedWorktreePath(worktree.path)}><span className="branch-cell"><span className="branch-title"><GitBranch size={14} /><strong>{worktree.branch}</strong></span><small>{worktree.path}</small></span><span className="worktree-path">{worktree.path}</span><code className="head-cell">{worktree.head}</code></button>)}</div></>}
+      </section><aside className="detail-pane" aria-label="Selected worktree details" aria-busy={activeRepoHydrating}>{selectedWorktree ? <><div className="detail-heading"><div className="detail-icon"><FileDiff size={18} /></div><div><p className="eyebrow">Selected worktree</p><h2>{selectedWorktree.branch}</h2></div></div><div className="detail-path"><span>Worktree path</span><code>{selectedWorktree.path}</code></div><div className="detail-path"><span>HEAD</span><code>{selectedWorktree.head}</code></div><button className="primary-button" type="button" aria-describedby="unavailable-features" disabled>Open review <ChevronRight size={15} /></button></> : activeRepoHydrating ? <div className="empty-state detail-empty"><CircleDot size={24} /><strong>Loading worktrees...</strong><span>Worktree identity will appear when ready.</span></div> : <div className="empty-state detail-empty"><FileDiff size={24} /><strong>Select a worktree</strong><span>Worktree identity will appear here.</span></div>}</aside></main>
     </section>
     {paletteOpen && <dialog className="palette-backdrop" ref={paletteRef} aria-label="Find repositories and worktrees" onClose={handlePaletteClosed} onKeyDown={handlePaletteKeyDown} onMouseDown={(event) => { if (event.target === event.currentTarget) closePalette(); }}><div className="palette" onMouseDown={(event) => event.stopPropagation()}><div className="palette-input-row"><Search size={17} /><input autoFocus value={query} onChange={(event) => setQuery(event.currentTarget.value)} placeholder="Find repositories, branches, and worktrees" /><button type="button" aria-label="Close search" onClick={closePalette}><X size={16} /></button></div><div className="palette-results"><div className="nav-section-label">Repositories and worktrees</div>{matchingResults.map((result) => <button key={`${result.repo.path}:${result.worktree?.path ?? "repo"}`} type="button" onClick={() => { setActiveRepoPath(result.repo.path); if (result.worktree) setSelectedWorktreePath(result.worktree.path); closePalette(); }}>{result.worktree ? <GitBranch size={16} /> : <FolderGit2 size={16} />}<span><strong>{result.worktree?.branch ?? result.repo.name}</strong><small>{result.worktree?.path ?? result.repo.path}</small></span><kbd>Enter</kbd></button>)}{matchingResults.length === 0 && <p>No repositories or worktrees match "{query}".</p>}</div></div></dialog>}
   </div>;

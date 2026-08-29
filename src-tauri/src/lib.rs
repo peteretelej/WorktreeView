@@ -121,13 +121,24 @@ async fn reap_after_kill(child: &mut Child) {
     let _ = child.wait().await;
 }
 
-async fn run_git(path: &Path, args: &[&str]) -> Result<(Vec<u8>, Vec<u8>), CommandError> {
+fn git_execution_error(stderr: &[u8]) -> CommandError {
+    let message = if stderr.is_empty() {
+        "Git command failed.".to_string()
+    } else {
+        String::from_utf8_lossy(stderr).into_owned()
+    };
+    CommandError::new("git_execution", message)
+}
+
+async fn run_git(path: &Path, args: &[&str]) -> Result<(bool, Vec<u8>, Vec<u8>), CommandError> {
     let path = path.to_str().ok_or_else(|| {
         CommandError::new("invalid_path", "The selected path is not valid UTF-8.")
     })?;
     let mut command = Command::new("git");
-    if args.first() == Some(&"-c") {
-        command.args(args).args(["-C", path]);
+    if args.starts_with(&["-c", "core.quotePath=false"]) {
+        command
+            .args(["-c", "core.quotePath=false", "-C", path])
+            .args(&args[2..]);
     } else {
         command.args(["-C", path]).args(args);
     }
@@ -163,15 +174,7 @@ async fn run_git(path: &Path, args: &[&str]) -> Result<(Vec<u8>, Vec<u8>), Comma
     })
     .await;
     match result {
-        Ok(Ok((status, stdout, stderr))) if status.success() => Ok((stdout, stderr)),
-        Ok(Ok((_, _, stderr))) => {
-            let message = if stderr.is_empty() {
-                "Git command failed.".to_string()
-            } else {
-                String::from_utf8_lossy(&stderr).into_owned()
-            };
-            Err(CommandError::new("git_execution", message))
-        }
+        Ok(Ok((status, stdout, stderr))) => Ok((status.success(), stdout, stderr)),
         Ok(Err(error)) => {
             reap_after_kill(&mut child).await;
             Err(error)
@@ -349,11 +352,37 @@ async fn upsert_repo(
     Ok(())
 }
 
+async fn load_repos(pool: &SqlitePool) -> Result<Vec<Repo>, CommandError> {
+    let rows = sqlx::query(
+        "SELECT path, name FROM repos ORDER BY last_opened_at DESC, created_at DESC, path ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(Repo {
+                path: row.try_get("path")?,
+                name: row.try_get("name")?,
+                worktrees: Vec::new(),
+            })
+        })
+        .collect::<Result<_, sqlx::Error>>()
+        .map_err(Into::into)
+}
+
 #[tauri::command]
 async fn open_repo(path: String, state: tauri::State<'_, AppState>) -> Result<Repo, CommandError> {
     let canonical = canonical_path(&path)?;
-    let (stdout, _) = run_git(&canonical, &["rev-parse", "--is-inside-work-tree"]).await?;
-    if std::str::from_utf8(&stdout).map(|value| value.trim()) != Ok("true") {
+    let (success, stdout, stderr) =
+        run_git(&canonical, &["rev-parse", "--is-inside-work-tree"]).await?;
+    if !success
+        && !String::from_utf8_lossy(&stderr)
+            .to_ascii_lowercase()
+            .contains("not a git repository")
+    {
+        return Err(git_execution_error(&stderr));
+    }
+    if !success || std::str::from_utf8(&stdout).map(|value| value.trim()) != Ok("true") {
         return Err(CommandError::new(
             "not_git_repository",
             "The selected folder is not a Git repository and was not added.",
@@ -378,27 +407,13 @@ async fn open_repo(path: String, state: tauri::State<'_, AppState>) -> Result<Re
 
 #[tauri::command]
 async fn list_repos(state: tauri::State<'_, AppState>) -> Result<Vec<Repo>, CommandError> {
-    let rows = sqlx::query(
-        "SELECT path, name FROM repos ORDER BY last_opened_at DESC, created_at DESC, path ASC",
-    )
-    .fetch_all(&state.pool)
-    .await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(Repo {
-                path: row.try_get("path")?,
-                name: row.try_get("name")?,
-                worktrees: Vec::new(),
-            })
-        })
-        .collect::<Result<_, sqlx::Error>>()
-        .map_err(Into::into)
+    load_repos(&state.pool).await
 }
 
 #[tauri::command]
 async fn list_worktrees(path: String) -> Result<Vec<Worktree>, CommandError> {
     let path = canonical_path(&path)?;
-    let (stdout, _) = run_git(
+    let (success, stdout, stderr) = run_git(
         &path,
         &[
             "-c",
@@ -409,6 +424,9 @@ async fn list_worktrees(path: String) -> Result<Vec<Worktree>, CommandError> {
         ],
     )
     .await?;
+    if !success {
+        return Err(git_execution_error(&stderr));
+    }
     parse_worktrees(&stdout)
 }
 
@@ -534,5 +552,17 @@ bare
         assert_eq!(row.get::<String, _>("name"), "new");
         assert_eq!(row.get::<i64, _>("last_opened_at"), 102);
         assert_eq!(row.get::<i64, _>("created_at"), created);
+
+        sqlx::query("INSERT INTO repos (path, name, last_opened_at, created_at) VALUES ('/d', 'd', 50, 40), ('/c', 'c', 50, 40), ('/e', 'e', 50, 41)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let paths: Vec<_> = load_repos(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|repo| repo.path)
+            .collect();
+        assert_eq!(paths, ["/a", "/b", "/e", "/c", "/d"]);
     }
 }
