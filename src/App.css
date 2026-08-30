@@ -791,6 +791,7 @@ button:disabled {
 .nav-collapsed .nav-section-label,
 .nav-collapsed .project-copy,
 .nav-collapsed .sidebar-footer span,
+.nav-collapsed .open-repository-button span,
 .nav-collapsed .project-row > svg {
   display: none;
 }
@@ -800,7 +801,8 @@ button:disabled {
 }
 
 .nav-collapsed .nav-tab,
-.nav-collapsed .search-trigger {
+.nav-collapsed .search-trigger,
+.nav-collapsed .open-repository-button {
   justify-content: center;
 }
 
@@ -828,6 +830,7 @@ button:disabled {
   .nav-section-label,
   .project-copy,
   .sidebar-footer span,
+  .open-repository-button span,
   .project-row > svg {
     display: none;
   }
@@ -837,7 +840,8 @@ button:disabled {
   }
 
   .nav-tab,
-  .search-trigger {
+  .search-trigger,
+  .open-repository-button {
     justify-content: center;
   }
 
