@@ -293,8 +293,10 @@ if ! iidfile=$(run_preflight mktemp "${TMPDIR:-/tmp}/worktreeview-e2e-iid.XXXXXX
 fi
 trap cleanup EXIT
 
-run_preflight docker info >/dev/null
-run_preflight docker buildx version >/dev/null
+run_preflight \
+  docker info >/dev/null
+run_preflight \
+  docker buildx version >/dev/null
 
 # 30s preflight + 30m5s build + 10m5s runtime + 2m cleanup = 42m40s.
 docker_resources_possible=1
