@@ -77,8 +77,9 @@ SQLite reload and restart flows, failure handling, and bounded collection checks
 inside Docker. It writes bounded diagnostics to one
 `artifacts/tauri-e2e/<run-id>/` directory. The runtime is offline, non-root,
 capability-dropped, and resource-bounded. Cleanup removes only the recorded
-container ID and immutable loaded image ID, while retaining the shared BuildKit
-cache.
+owned container and immutable loaded image, while retaining the shared BuildKit
+cache. The complete inner deadline is 42 minutes 40 seconds; CI allows 43 minutes
+for the command so runner-owned cleanup and evidence finalization finish first.
 
 The frontend preview remains useful for presentation work, but it is not native
 desktop validation. Use `npm run tauri dev` on a display-capable development

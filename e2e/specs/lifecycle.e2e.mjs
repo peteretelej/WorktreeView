@@ -118,12 +118,12 @@ describe("bundled desktop lifecycle", () => {
     await proveBackendStderr();
 
     select(fixture);
-    const branch = git(["branch", "--show-current"], fixture);
+    const branch = git(["branch", "--show-current"], fixture) || "detached";
     const head = git(["rev-parse", "HEAD"], fixture);
     await openSelectedRepository();
     await $(".worktree-row").waitForDisplayed();
     await expect($("body")).toHaveText(expect.stringContaining(fixture));
-    assert.equal(await $(".branch-title strong").getHTML(), `<strong>${branch}</strong>`);
+    await expect($(".branch-title strong")).toHaveText(branch);
     await expect($("body")).toHaveText(expect.stringContaining(head));
 
     await browser.refresh();
@@ -135,6 +135,14 @@ describe("bundled desktop lifecycle", () => {
     expect(browser.sessionId).not.toBe(firstSession);
     await $(".worktree-row").waitForDisplayed();
     await expect($("body")).toHaveText(expect.stringContaining(fixture));
+
+    const detached = path.join(fixtureRoot, "detached-repository");
+    createRepository(detached);
+    git(["checkout", "-q", "--detach"], detached);
+    select(detached);
+    await openSelectedRepository();
+    await browser.waitUntil(async () => (await projectPaths()).includes(detached));
+    await expect($(".branch-title strong")).toHaveText("detached");
 
     const invalid = path.join(fixtureRoot, "not-a-repository");
     mkdirSync(invalid);
