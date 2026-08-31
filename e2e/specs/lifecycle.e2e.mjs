@@ -123,7 +123,7 @@ describe("bundled desktop lifecycle", () => {
     await openSelectedRepository();
     await $(".worktree-row").waitForDisplayed();
     await expect($("body")).toHaveText(expect.stringContaining(fixture));
-    await expect($(".branch-title strong")).toHaveText(branch);
+    await expect($(`strong=${branch}`)).toBeDisplayed();
     await expect($("body")).toHaveText(expect.stringContaining(head));
 
     await browser.refresh();
@@ -142,7 +142,7 @@ describe("bundled desktop lifecycle", () => {
     select(detached);
     await openSelectedRepository();
     await browser.waitUntil(async () => (await projectPaths()).includes(detached));
-    await expect($(".branch-title strong")).toHaveText("detached");
+    await expect($("strong=detached")).toBeDisplayed();
 
     const invalid = path.join(fixtureRoot, "not-a-repository");
     mkdirSync(invalid);
