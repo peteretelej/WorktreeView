@@ -1,0 +1,43 @@
+name: Desktop E2E
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          persist-credentials: false
+          set-safe-directory: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        timeout-minutes: 2
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Run desktop E2E
+        timeout-minutes: 43
+        run: WORKTREEVIEW_E2E_RUN_ID="github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" npm run test:desktop -- "$GITHUB_WORKSPACE"
+
+      - name: Upload desktop diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        timeout-minutes: 2
+        with:
+          name: tauri-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/tauri-e2e/github-${{ github.run_id }}-${{ github.run_attempt }}/
+          retention-days: 14
+          include-hidden-files: false
+          if-no-files-found: warn

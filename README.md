@@ -58,6 +58,44 @@ npm run tauri dev
 
 The frontend build and Rust checks can run without launching a desktop window.
 
+### Linux desktop testing
+
+Headless Linux desktop validation requires Docker Engine with BuildKit/buildx
+support. The host does not need Xvfb, WebKitGTK, DBus, Rust, or display
+configuration. Run the supported test command with an absolute fixture path:
+
+```sh
+npm run test:desktop -- /absolute/path/to/git-repository
+```
+
+The fixture must be a self-contained local Git directory whose Git metadata is
+contained beneath that path. It is mounted read-only. Linked worktrees are
+rejected because their Git metadata is outside the approved single bind.
+
+The command runs the real bundled Tauri app, UI, Rust IPC, native read-only Git,
+SQLite reload and restart flows, failure handling, and bounded collection checks
+inside Docker. It writes bounded diagnostics to one
+`artifacts/tauri-e2e/<run-id>/` directory. The runtime is offline, non-root,
+capability-dropped, and resource-bounded. Cleanup removes only the recorded
+container ID and immutable loaded image ID, while retaining the shared BuildKit
+cache.
+
+The frontend preview remains useful for presentation work, but it is not native
+desktop validation. Use `npm run tauri dev` on a display-capable development
+machine. GitHub Actions runs the same desktop test command only for manual
+dispatches and published releases, and retains failure diagnostics for 14 days.
+
+As a manual release check on a display-capable Linux machine, run the normal
+desktop app and confirm that the real native GTK folder chooser opens. Automated
+tests replace only the chooser result; the UI, backend, Git, and persistence
+behavior after selection remains real.
+
+For troubleshooting, check only that Docker Engine and BuildKit/buildx are
+available, the fixture is an absolute self-contained Git path, and the files in
+the reported run artifact directory. Do not use privileged mode, host display
+sockets, writable fixture mounts, a networked test runtime, or global Docker
+pruning.
+
 ## Current State
 
 The repository persists locally opened Git folders in SQLite and discovers their
