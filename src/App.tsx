@@ -110,7 +110,11 @@ function App() {
   async function openRepository() {
     if (opening) return;
     let selected: string | null;
-    try { selected = await open({ directory: true, multiple: false }); }
+    try {
+      selected = import.meta.env.MODE === "e2e" && import.meta.env.VITE_E2E_PICKER_PATH === "/tmp/worktreeview-e2e-selection"
+        ? "/tmp/worktreeview-e2e-selection"
+        : await open({ directory: true, multiple: false });
+    }
     catch (error) { setOperationError(errorMessage(error)); return; }
     if (!selected || Array.isArray(selected)) return;
     setOpening(true); setOperationError("");

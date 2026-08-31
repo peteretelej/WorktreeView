@@ -372,7 +372,11 @@ async fn load_repos(pool: &SqlitePool) -> Result<Vec<Repo>, CommandError> {
 
 #[tauri::command]
 async fn open_repo(path: String, state: tauri::State<'_, AppState>) -> Result<Repo, CommandError> {
-    let canonical = canonical_path(&path)?;
+    open_repo_path(&path, &state.pool).await
+}
+
+async fn open_repo_path(path: &str, pool: &SqlitePool) -> Result<Repo, CommandError> {
+    let canonical = canonical_path(path)?;
     let (success, stdout, stderr) =
         run_git(&canonical, &["rev-parse", "--is-inside-work-tree"]).await?;
     if !success
@@ -397,7 +401,7 @@ async fn open_repo(path: String, state: tauri::State<'_, AppState>) -> Result<Re
         .ok_or_else(|| {
             CommandError::new("invalid_path", "The selected folder has no valid name.")
         })?;
-    upsert_repo(&state.pool, path, name, now_millis()).await?;
+    upsert_repo(pool, path, name, now_millis()).await?;
     Ok(Repo {
         path: path.into(),
         name: name.into(),
@@ -469,6 +473,30 @@ pub fn run() {
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE repos (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, last_opened_at INTEGER NOT NULL, created_at INTEGER NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    fn test_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "worktreeview-{label}-{}-{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
     #[test]
     fn parses_porcelain_records() {
         let output = br#"worktree /tmp/main
@@ -524,12 +552,7 @@ bare
     }
     #[tokio::test]
     async fn upsert_is_monotonic_and_preserves_creation() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        sqlx::query("CREATE TABLE repos (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, last_opened_at INTEGER NOT NULL, created_at INTEGER NOT NULL)").execute(&pool).await.unwrap();
+        let pool = test_pool().await;
         upsert_repo(&pool, "/a", "a", 100).await.unwrap();
         upsert_repo(&pool, "/b", "b", 99).await.unwrap();
         let created: i64 = sqlx::query_scalar("SELECT created_at FROM repos WHERE path = '/a'")
@@ -564,5 +587,25 @@ bare
             .map(|repo| repo.path)
             .collect();
         assert_eq!(paths, ["/a", "/b", "/e", "/c", "/d"]);
+    }
+
+    #[tokio::test]
+    async fn invalid_repositories_are_not_persisted() {
+        let pool = test_pool().await;
+        let non_git = test_path("non-git");
+        std::fs::create_dir(&non_git).unwrap();
+        let missing = test_path("missing");
+
+        let non_git_error = open_repo_path(non_git.to_str().unwrap(), &pool)
+            .await
+            .unwrap_err();
+        let missing_error = open_repo_path(missing.to_str().unwrap(), &pool)
+            .await
+            .unwrap_err();
+
+        assert_eq!(non_git_error.code, "not_git_repository");
+        assert_eq!(missing_error.code, "invalid_path");
+        assert!(load_repos(&pool).await.unwrap().is_empty());
+        std::fs::remove_dir(non_git).unwrap();
     }
 }

@@ -21,9 +21,11 @@
     "dev": "vite",
     "dev:lab": "fuser -k 1420/tcp 2>/dev/null; npm run dev",
     "build": "npm run check && vite build",
+    "build:e2e": "npm run check && vite build --mode e2e",
     "check": "tsc --noEmit && tsc -p tsconfig.node.json",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:desktop": "bash scripts/test-desktop.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -38,7 +40,12 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "@wdio/cli": "9.31.5",
+    "@wdio/local-runner": "9.31.5",
+    "@wdio/mocha-framework": "9.31.5",
+    "@wdio/spec-reporter": "9.31.2",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "webdriverio": "9.31.5"
   }
 }

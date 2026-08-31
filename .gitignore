@@ -11,6 +11,7 @@ node_modules
 dist
 dist-ssr
 *.local
+artifacts/tauri-e2e/
 
 # Editor directories and files
 .vscode/*
