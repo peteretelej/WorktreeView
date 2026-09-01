@@ -33,6 +33,32 @@ pub struct Worktree {
     head: String,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct BranchInventory {
+    branches: Vec<String>,
+    default_base: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ChangedFile {
+    path: String,
+    status: String,
+    untracked: bool,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ReviewIndex {
+    files: Vec<ChangedFile>,
+    additions: i64,
+    deletions: i64,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct FilePatch {
+    binary: bool,
+    text: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CommandError {
     code: String,
@@ -130,7 +156,7 @@ fn git_execution_error(stderr: &[u8]) -> CommandError {
     CommandError::new("git_execution", message)
 }
 
-async fn run_git(path: &Path, args: &[&str]) -> Result<(bool, Vec<u8>, Vec<u8>), CommandError> {
+async fn run_git(path: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
     let path = path.to_str().ok_or_else(|| {
         CommandError::new("invalid_path", "The selected path is not valid UTF-8.")
     })?;
@@ -174,7 +200,7 @@ async fn run_git(path: &Path, args: &[&str]) -> Result<(bool, Vec<u8>, Vec<u8>),
     })
     .await;
     match result {
-        Ok(Ok((status, stdout, stderr))) => Ok((status.success(), stdout, stderr)),
+        Ok(Ok((status, stdout, stderr))) => Ok((status.code().unwrap_or(-1), stdout, stderr)),
         Ok(Err(error)) => {
             reap_after_kill(&mut child).await;
             Err(error)
@@ -187,6 +213,185 @@ async fn run_git(path: &Path, args: &[&str]) -> Result<(bool, Vec<u8>, Vec<u8>),
             ))
         }
     }
+}
+
+fn validate_ref(value: &str, name: &str) -> Result<(), CommandError> {
+    if value.starts_with('-') {
+        return Err(CommandError::new(
+            "invalid_path",
+            format!("The {name} must not start with '-'."),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_file(value: &str) -> Result<(), CommandError> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || value.starts_with('-')
+        || !path.is_relative()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(CommandError::new(
+            "invalid_path",
+            "The file must be a relative path without '..' segments.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_untracked_combination(
+    untracked: bool,
+    committed_only: bool,
+    reversed: bool,
+) -> Result<(), CommandError> {
+    if untracked && (committed_only || reversed) {
+        return Err(CommandError::new(
+            "git_execution",
+            "Untracked files cannot be used with committed-only or reversed review data.",
+        ));
+    }
+    Ok(())
+}
+
+fn primary_branch(branches: &[String]) -> Option<&str> {
+    if branches.iter().any(|branch| branch == "main") {
+        Some("main")
+    } else if branches.iter().any(|branch| branch == "master") {
+        Some("master")
+    } else {
+        None
+    }
+}
+
+fn parse_untracked_paths(output: &[u8]) -> Result<Vec<String>, CommandError> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            std::str::from_utf8(path).map(str::to_string).map_err(|_| {
+                CommandError::new(
+                    "git_output_malformed",
+                    "Git returned invalid untracked path data.",
+                )
+            })
+        })
+        .collect()
+}
+
+fn acceptable_diff_exit(exit_code: i32, no_index: bool) -> bool {
+    exit_code == 0 || (no_index && exit_code == 1)
+}
+
+fn is_numstat_record(field: &[u8]) -> bool {
+    let Ok(field) = std::str::from_utf8(field) else {
+        return false;
+    };
+    let Some((added, deleted)) = field.split_once('\t') else {
+        return false;
+    };
+    (added == "-" || added.parse::<i64>().is_ok())
+        && (deleted == "-" || deleted.parse::<i64>().is_ok())
+}
+
+fn git_args<'a>(args: &'a [String]) -> Vec<&'a str> {
+    args.iter().map(String::as_str).collect()
+}
+
+fn parse_name_status(output: &[u8]) -> Result<Vec<ChangedFile>, CommandError> {
+    let mut fields = output.split(|byte| *byte == 0);
+    let mut files = Vec::new();
+    while let Some(status) = fields.next() {
+        if status.is_empty() {
+            continue;
+        }
+        let status = std::str::from_utf8(status).map_err(|_| {
+            CommandError::new("git_output_malformed", "Git returned invalid change data.")
+        })?;
+        let path = fields.next().ok_or_else(|| {
+            CommandError::new(
+                "git_output_malformed",
+                "Git returned incomplete change data.",
+            )
+        })?;
+        let path = std::str::from_utf8(path).map_err(|_| {
+            CommandError::new("git_output_malformed", "Git returned invalid change data.")
+        })?;
+        let path = if status.starts_with('R') || status.starts_with('C') {
+            let new_path = fields.next().ok_or_else(|| {
+                CommandError::new(
+                    "git_output_malformed",
+                    "Git returned incomplete rename data.",
+                )
+            })?;
+            std::str::from_utf8(new_path).map_err(|_| {
+                CommandError::new("git_output_malformed", "Git returned invalid change data.")
+            })?
+        } else {
+            path
+        };
+        files.push(ChangedFile {
+            path: path.to_string(),
+            status: status.to_string(),
+            untracked: false,
+        });
+    }
+    Ok(files)
+}
+
+fn parse_numstat(output: &[u8]) -> Result<(i64, i64, bool), CommandError> {
+    let mut fields = output.split(|byte| *byte == 0).peekable();
+    let mut additions = 0;
+    let mut deletions = 0;
+    let mut binary = false;
+    while let Some(stat) = fields.next() {
+        if stat.is_empty() {
+            continue;
+        }
+        let stat = std::str::from_utf8(stat).map_err(|_| {
+            CommandError::new("git_output_malformed", "Git returned invalid numstat data.")
+        })?;
+        let (added, deleted) = stat.split_once('\t').ok_or_else(|| {
+            CommandError::new(
+                "git_output_malformed",
+                "Git returned malformed numstat data.",
+            )
+        })?;
+        let parse_count = |value: &str| {
+            if value == "-" {
+                Ok(None)
+            } else {
+                value.parse::<i64>().map(Some).map_err(|_| {
+                    CommandError::new(
+                        "git_output_malformed",
+                        "Git returned malformed numstat data.",
+                    )
+                })
+            }
+        };
+        match (parse_count(added)?, parse_count(deleted)?) {
+            (Some(added), Some(deleted)) => {
+                additions += added;
+                deletions += deleted;
+            }
+            _ => binary = true,
+        }
+        fields.next().ok_or_else(|| {
+            CommandError::new(
+                "git_output_malformed",
+                "Git returned incomplete numstat data.",
+            )
+        })?;
+        if fields
+            .peek()
+            .is_some_and(|field| !field.is_empty() && !is_numstat_record(field))
+        {
+            fields.next();
+        }
+    }
+    Ok((additions, deletions, binary))
 }
 
 fn decode_git_path(value: &str) -> Result<String, ()> {
@@ -377,16 +582,16 @@ async fn open_repo(path: String, state: tauri::State<'_, AppState>) -> Result<Re
 
 async fn open_repo_path(path: &str, pool: &SqlitePool) -> Result<Repo, CommandError> {
     let canonical = canonical_path(path)?;
-    let (success, stdout, stderr) =
+    let (exit_code, stdout, stderr) =
         run_git(&canonical, &["rev-parse", "--is-inside-work-tree"]).await?;
-    if !success
+    if exit_code != 0
         && !String::from_utf8_lossy(&stderr)
             .to_ascii_lowercase()
             .contains("not a git repository")
     {
         return Err(git_execution_error(&stderr));
     }
-    if !success || std::str::from_utf8(&stdout).map(|value| value.trim()) != Ok("true") {
+    if exit_code != 0 || std::str::from_utf8(&stdout).map(|value| value.trim()) != Ok("true") {
         return Err(CommandError::new(
             "not_git_repository",
             "The selected folder is not a Git repository and was not added.",
@@ -417,7 +622,7 @@ async fn list_repos(state: tauri::State<'_, AppState>) -> Result<Vec<Repo>, Comm
 #[tauri::command]
 async fn list_worktrees(path: String) -> Result<Vec<Worktree>, CommandError> {
     let path = canonical_path(&path)?;
-    let (success, stdout, stderr) = run_git(
+    let (exit_code, stdout, stderr) = run_git(
         &path,
         &[
             "-c",
@@ -428,10 +633,233 @@ async fn list_worktrees(path: String) -> Result<Vec<Worktree>, CommandError> {
         ],
     )
     .await?;
-    if !success {
+    if exit_code != 0 {
         return Err(git_execution_error(&stderr));
     }
     parse_worktrees(&stdout)
+}
+
+#[tauri::command]
+async fn list_branches(
+    path: String,
+    worktree_branch: String,
+) -> Result<BranchInventory, CommandError> {
+    validate_ref(&worktree_branch, "worktree_branch")?;
+    let path = canonical_path(&path)?;
+    let (exit_code, stdout, stderr) = run_git(
+        &path,
+        &["for-each-ref", "refs/heads", "--format=%(refname:short)"],
+    )
+    .await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    let text = std::str::from_utf8(&stdout).map_err(|_| {
+        CommandError::new("git_output_malformed", "Git returned invalid branch data.")
+    })?;
+    let branches = text.lines().map(str::to_string).collect::<Vec<_>>();
+    let primary = primary_branch(&branches);
+    let default_base = if worktree_branch == "detached" {
+        None
+    } else if let Some(primary) = primary {
+        let verify_args = vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            format!("refs/heads/{worktree_branch}"),
+        ];
+        let verify_args = git_args(&verify_args);
+        if run_git(&path, &verify_args).await?.0 != 0 {
+            return Ok(BranchInventory {
+                branches,
+                default_base: None,
+            });
+        }
+        let args = vec!["merge-base".into(), worktree_branch.clone(), primary.into()];
+        let args = git_args(&args);
+        match run_git(&path, &args).await? {
+            (0, stdout, _) => std::str::from_utf8(&stdout)
+                .ok()
+                .map(|value| value.trim().to_string()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    Ok(BranchInventory {
+        branches,
+        default_base,
+    })
+}
+
+#[tauri::command]
+async fn list_review_changes(
+    path: String,
+    base: String,
+    committed_only: bool,
+    reversed: bool,
+) -> Result<ReviewIndex, CommandError> {
+    validate_ref(&base, "base")?;
+    let path = canonical_path(&path)?;
+    let range = if committed_only {
+        format!("{base}...HEAD")
+    } else {
+        base.clone()
+    };
+    let mut name_args = vec!["diff".into()];
+    if reversed {
+        name_args.push("-R".into());
+    }
+    name_args.extend([
+        "--name-status".into(),
+        "-z".into(),
+        range.clone(),
+        "--".into(),
+    ]);
+    let name_args = git_args(&name_args);
+    let (exit_code, stdout, stderr) = run_git(&path, &name_args).await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    let mut files = parse_name_status(&stdout)?;
+
+    let mut num_args = vec!["diff".into()];
+    if reversed {
+        num_args.push("-R".into());
+    }
+    num_args.extend(["--numstat".into(), "-z".into(), range, "--".into()]);
+    let num_args = git_args(&num_args);
+    let (exit_code, stdout, stderr) = run_git(&path, &num_args).await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    let (additions, deletions, _) = parse_numstat(&stdout)?;
+
+    if !committed_only && !reversed {
+        let (exit_code, stdout, stderr) =
+            run_git(&path, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
+        if exit_code != 0 {
+            return Err(git_execution_error(&stderr));
+        }
+        for file in parse_untracked_paths(&stdout)? {
+            files.push(ChangedFile {
+                path: file.into(),
+                status: "A".into(),
+                untracked: true,
+            });
+        }
+    }
+    Ok(ReviewIndex {
+        files,
+        additions,
+        deletions,
+    })
+}
+
+#[tauri::command]
+async fn read_review_patch(
+    path: String,
+    base: String,
+    committed_only: bool,
+    reversed: bool,
+    file: String,
+    untracked: bool,
+) -> Result<FilePatch, CommandError> {
+    validate_ref(&base, "base")?;
+    validate_file(&file)?;
+    validate_untracked_combination(untracked, committed_only, reversed)?;
+    let path = canonical_path(&path)?;
+    let range = if committed_only {
+        format!("{base}...HEAD")
+    } else {
+        base
+    };
+    let mut num_args = vec![
+        "diff".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+        "--numstat".into(),
+        "-z".into(),
+    ];
+    if reversed {
+        num_args.push("-R".into());
+    }
+    let (exit_code, stdout, stderr) = if untracked {
+        let file_path = path.join(&file);
+        let file_path = file_path.to_str().ok_or_else(|| {
+            CommandError::new("invalid_path", "The selected file path is not valid UTF-8.")
+        })?;
+        let args = vec![
+            "diff".into(),
+            "--no-index".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "--numstat".into(),
+            "-z".into(),
+            "--".into(),
+            "/dev/null".into(),
+            file_path.into(),
+        ];
+        let args = git_args(&args);
+        run_git(&path, &args).await?
+    } else {
+        num_args.extend([range.clone(), "--".into(), file.clone()]);
+        let args = git_args(&num_args);
+        run_git(&path, &args).await?
+    };
+    if !acceptable_diff_exit(exit_code, untracked) {
+        return Err(git_execution_error(&stderr));
+    }
+    let (_, _, binary) = parse_numstat(&stdout)?;
+    if binary {
+        return Ok(FilePatch {
+            binary: true,
+            text: String::new(),
+        });
+    }
+    let mut patch_args = vec![
+        "diff".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+        "--no-color".into(),
+        "-U3".into(),
+    ];
+    if reversed {
+        patch_args.push("-R".into());
+    }
+    let (exit_code, stdout, stderr) = if untracked {
+        let file_path = path.join(&file);
+        let file_path = file_path.to_str().ok_or_else(|| {
+            CommandError::new("invalid_path", "The selected file path is not valid UTF-8.")
+        })?;
+        let args = vec![
+            "diff".into(),
+            "--no-index".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "--no-color".into(),
+            "-U3".into(),
+            "--".into(),
+            "/dev/null".into(),
+            file_path.into(),
+        ];
+        let args = git_args(&args);
+        run_git(&path, &args).await?
+    } else {
+        patch_args.extend([range, "--".into(), file]);
+        let args = git_args(&patch_args);
+        run_git(&path, &args).await?
+    };
+    if !acceptable_diff_exit(exit_code, untracked) {
+        return Err(git_execution_error(&stderr));
+    }
+    let text = String::from_utf8(stdout).map_err(|_| {
+        CommandError::new("git_output_malformed", "Git returned invalid patch text.")
+    })?;
+    Ok(FilePatch {
+        binary: false,
+        text,
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -463,7 +891,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_repo,
             list_repos,
-            list_worktrees
+            list_worktrees,
+            list_branches,
+            list_review_changes,
+            read_review_patch
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -531,6 +962,58 @@ bare
     #[test]
     fn rejects_incomplete_porcelain() {
         assert!(parse_worktrees(b"worktree /tmp/main\nbranch refs/heads/main\n").is_err());
+    }
+    #[test]
+    fn parses_name_status_records_and_renames() {
+        let output = b"A\0new.txt\0M\0changed.txt\0R100\0old.txt\0new.txt\0";
+        let files = parse_name_status(output).unwrap();
+        assert_eq!(files[0].path, "new.txt");
+        assert_eq!(files[1].status, "M");
+        assert_eq!(files[2].path, "new.txt");
+        assert!(parse_name_status(b"A\0\xff\0").is_err());
+    }
+    #[test]
+    fn parses_numstat_records_and_binary_rows() {
+        let output = b"3\t2\0file.txt\00\t0\0old.txt\0new.txt\0-\t-\0image.png\0";
+        assert_eq!(parse_numstat(output).unwrap(), (3, 2, true));
+    }
+    #[test]
+    fn parses_untracked_paths() {
+        assert_eq!(
+            parse_untracked_paths(b"a.txt\0dir/b.txt\0").unwrap(),
+            ["a.txt", "dir/b.txt"]
+        );
+        assert!(parse_untracked_paths(b"a\0\xff\0").is_err());
+    }
+    #[test]
+    fn accepts_only_no_index_difference_exit_code() {
+        assert!(acceptable_diff_exit(0, false));
+        assert!(acceptable_diff_exit(1, true));
+        assert!(!acceptable_diff_exit(1, false));
+        assert!(!acceptable_diff_exit(2, true));
+    }
+    #[test]
+    fn validates_review_arguments() {
+        assert!(validate_ref("-main", "base").is_err());
+        assert!(validate_ref("-branch", "worktree_branch").is_err());
+        assert!(validate_file("-file.txt").is_err());
+        assert!(validate_file("../file.txt").is_err());
+        assert!(validate_file("src/file.txt").is_ok());
+    }
+    #[test]
+    fn selects_main_then_master_as_primary_branch() {
+        assert_eq!(
+            primary_branch(&["master".into(), "main".into()]),
+            Some("main")
+        );
+        assert_eq!(primary_branch(&["master".into()]), Some("master"));
+        assert_eq!(primary_branch(&["develop".into()]), None);
+    }
+    #[test]
+    fn rejects_invalid_untracked_combinations() {
+        assert!(validate_untracked_combination(true, true, false).is_err());
+        assert!(validate_untracked_combination(true, false, true).is_err());
+        assert!(validate_untracked_combination(true, false, false).is_ok());
     }
     #[tokio::test]
     async fn bounded_output_accepts_ceiling_and_rejects_overflow() {
