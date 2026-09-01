@@ -161,6 +161,7 @@ async fn run_git(path: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), 
         CommandError::new("invalid_path", "The selected path is not valid UTF-8.")
     })?;
     let mut command = Command::new("git");
+    command.args(["-c", "core.fsmonitor=false"]);
     if args.starts_with(&["-c", "core.quotePath=false"]) {
         command
             .args(["-c", "core.quotePath=false", "-C", path])
@@ -285,19 +286,25 @@ fn acceptable_diff_exit(exit_code: i32, no_index: bool) -> bool {
     exit_code == 0 || (no_index && exit_code == 1)
 }
 
-fn is_numstat_record(field: &[u8]) -> bool {
-    let Ok(field) = std::str::from_utf8(field) else {
-        return false;
-    };
-    let Some((added, deleted)) = field.split_once('\t') else {
-        return false;
-    };
-    (added == "-" || added.parse::<i64>().is_ok())
-        && (deleted == "-" || deleted.parse::<i64>().is_ok())
-}
-
 fn git_args<'a>(args: &'a [String]) -> Vec<&'a str> {
     args.iter().map(String::as_str).collect()
+}
+
+fn review_index_args(format: &str, range: &str, reversed: bool) -> Vec<String> {
+    let mut args = vec!["diff".into()];
+    if reversed {
+        args.push("-R".into());
+    }
+    args.extend([
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+        "--no-color".into(),
+        format.into(),
+        "-z".into(),
+        range.into(),
+        "--".into(),
+    ]);
+    args
 }
 
 fn parse_name_status(output: &[u8]) -> Result<Vec<ChangedFile>, CommandError> {
@@ -342,33 +349,31 @@ fn parse_name_status(output: &[u8]) -> Result<Vec<ChangedFile>, CommandError> {
 }
 
 fn parse_numstat(output: &[u8]) -> Result<(i64, i64, bool), CommandError> {
-    let mut fields = output.split(|byte| *byte == 0).peekable();
+    let malformed = || {
+        CommandError::new(
+            "git_output_malformed",
+            "Git returned malformed numstat data.",
+        )
+    };
+    let mut fields = output.split(|byte| *byte == 0);
     let mut additions = 0;
     let mut deletions = 0;
     let mut binary = false;
-    while let Some(stat) = fields.next() {
-        if stat.is_empty() {
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
             continue;
         }
-        let stat = std::str::from_utf8(stat).map_err(|_| {
-            CommandError::new("git_output_malformed", "Git returned invalid numstat data.")
-        })?;
-        let (added, deleted) = stat.split_once('\t').ok_or_else(|| {
-            CommandError::new(
-                "git_output_malformed",
-                "Git returned malformed numstat data.",
-            )
-        })?;
+        let mut parts = record.splitn(3, |byte| *byte == b'\t');
+        let added =
+            std::str::from_utf8(parts.next().ok_or_else(malformed)?).map_err(|_| malformed())?;
+        let deleted =
+            std::str::from_utf8(parts.next().ok_or_else(malformed)?).map_err(|_| malformed())?;
+        let path = parts.next().ok_or_else(malformed)?;
         let parse_count = |value: &str| {
             if value == "-" {
                 Ok(None)
             } else {
-                value.parse::<i64>().map(Some).map_err(|_| {
-                    CommandError::new(
-                        "git_output_malformed",
-                        "Git returned malformed numstat data.",
-                    )
-                })
+                value.parse::<i64>().map(Some).map_err(|_| malformed())
             }
         };
         match (parse_count(added)?, parse_count(deleted)?) {
@@ -378,20 +383,61 @@ fn parse_numstat(output: &[u8]) -> Result<(i64, i64, bool), CommandError> {
             }
             _ => binary = true,
         }
-        fields.next().ok_or_else(|| {
-            CommandError::new(
-                "git_output_malformed",
-                "Git returned incomplete numstat data.",
-            )
-        })?;
-        if fields
-            .peek()
-            .is_some_and(|field| !field.is_empty() && !is_numstat_record(field))
-        {
-            fields.next();
+        if path.is_empty() {
+            let old_path = fields.next().ok_or_else(malformed)?;
+            let new_path = fields.next().ok_or_else(malformed)?;
+            if old_path.is_empty() || new_path.is_empty() {
+                return Err(malformed());
+            }
+            std::str::from_utf8(old_path).map_err(|_| malformed())?;
+            std::str::from_utf8(new_path).map_err(|_| malformed())?;
+        } else {
+            std::str::from_utf8(path).map_err(|_| malformed())?;
         }
     }
     Ok((additions, deletions, binary))
+}
+
+fn resolve_untracked_path(root: &Path, file: &str) -> Result<PathBuf, CommandError> {
+    let candidate = root.join(file);
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| CommandError::new("invalid_path", "The selected file path is invalid."))?;
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| CommandError::new("invalid_path", "The selected file path is invalid."))?
+        .canonicalize()
+        .map_err(|_| {
+            CommandError::new(
+                "invalid_path",
+                "The selected file path could not be resolved.",
+            )
+        })?;
+    if !parent.starts_with(root) {
+        return Err(CommandError::new(
+            "invalid_path",
+            "The selected file must remain inside the worktree.",
+        ));
+    }
+    Ok(parent.join(file_name))
+}
+
+async fn verified_untracked_path(root: &Path, file: &str) -> Result<PathBuf, CommandError> {
+    let (exit_code, stdout, stderr) =
+        run_git(root, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    if !parse_untracked_paths(&stdout)?
+        .iter()
+        .any(|untracked| untracked == file)
+    {
+        return Err(CommandError::new(
+            "invalid_path",
+            "The selected file is not an untracked review file.",
+        ));
+    }
+    resolve_untracked_path(root, file)
 }
 
 fn decode_git_path(value: &str) -> Result<String, ()> {
@@ -706,16 +752,7 @@ async fn list_review_changes(
     } else {
         base.clone()
     };
-    let mut name_args = vec!["diff".into()];
-    if reversed {
-        name_args.push("-R".into());
-    }
-    name_args.extend([
-        "--name-status".into(),
-        "-z".into(),
-        range.clone(),
-        "--".into(),
-    ]);
+    let name_args = review_index_args("--name-status", &range, reversed);
     let name_args = git_args(&name_args);
     let (exit_code, stdout, stderr) = run_git(&path, &name_args).await?;
     if exit_code != 0 {
@@ -723,11 +760,7 @@ async fn list_review_changes(
     }
     let mut files = parse_name_status(&stdout)?;
 
-    let mut num_args = vec!["diff".into()];
-    if reversed {
-        num_args.push("-R".into());
-    }
-    num_args.extend(["--numstat".into(), "-z".into(), range, "--".into()]);
+    let num_args = review_index_args("--numstat", &range, reversed);
     let num_args = git_args(&num_args);
     let (exit_code, stdout, stderr) = run_git(&path, &num_args).await?;
     if exit_code != 0 {
@@ -774,6 +807,11 @@ async fn read_review_patch(
     } else {
         base
     };
+    let untracked_path = if untracked {
+        Some(verified_untracked_path(&path, &file).await?)
+    } else {
+        None
+    };
     let mut num_args = vec![
         "diff".into(),
         "--no-ext-diff".into(),
@@ -784,8 +822,7 @@ async fn read_review_patch(
     if reversed {
         num_args.push("-R".into());
     }
-    let (exit_code, stdout, stderr) = if untracked {
-        let file_path = path.join(&file);
+    let (exit_code, stdout, stderr) = if let Some(file_path) = &untracked_path {
         let file_path = file_path.to_str().ok_or_else(|| {
             CommandError::new("invalid_path", "The selected file path is not valid UTF-8.")
         })?;
@@ -827,8 +864,7 @@ async fn read_review_patch(
     if reversed {
         patch_args.push("-R".into());
     }
-    let (exit_code, stdout, stderr) = if untracked {
-        let file_path = path.join(&file);
+    let (exit_code, stdout, stderr) = if let Some(file_path) = &untracked_path {
         let file_path = file_path.to_str().ok_or_else(|| {
             CommandError::new("invalid_path", "The selected file path is not valid UTF-8.")
         })?;
@@ -904,7 +940,10 @@ pub fn run() {
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        process::Command as StdCommand,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -928,6 +967,33 @@ mod tests {
             TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ))
     }
+
+    fn test_git(path: &Path, args: &[&str]) {
+        let output = StdCommand::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn test_repo(label: &str) -> PathBuf {
+        let path = test_path(label);
+        std::fs::create_dir(&path).unwrap();
+        test_git(&path, &["init", "--quiet"]);
+        test_git(&path, &["config", "user.name", "WorktreeView Tests"]);
+        test_git(&path, &["config", "user.email", "tests@example.com"]);
+        std::fs::write(path.join("tracked.txt"), "original\n").unwrap();
+        test_git(&path, &["add", "tracked.txt"]);
+        test_git(&path, &["commit", "--quiet", "-m", "initial"]);
+        path
+    }
+
     #[test]
     fn parses_porcelain_records() {
         let output = br#"worktree /tmp/main
@@ -974,8 +1040,9 @@ bare
     }
     #[test]
     fn parses_numstat_records_and_binary_rows() {
-        let output = b"3\t2\0file.txt\00\t0\0old.txt\0new.txt\0-\t-\0image.png\0";
-        assert_eq!(parse_numstat(output).unwrap(), (3, 2, true));
+        let output = b"3\t2\tfile.txt\00\t0\t\0old.txt\0new.txt\0-\t-\timage.png\01\t0\t\0/dev/null\0new-file.txt\0";
+        assert_eq!(parse_numstat(output).unwrap(), (4, 2, true));
+        assert!(parse_numstat(b"3\t2\t\0old.txt\0").is_err());
     }
     #[test]
     fn parses_untracked_paths() {
@@ -991,6 +1058,36 @@ bare
         assert!(acceptable_diff_exit(1, true));
         assert!(!acceptable_diff_exit(1, false));
         assert!(!acceptable_diff_exit(2, true));
+    }
+    #[test]
+    fn review_index_arguments_disable_repository_diff_helpers() {
+        assert_eq!(
+            review_index_args("--name-status", "base", false),
+            [
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--name-status",
+                "-z",
+                "base",
+                "--"
+            ]
+        );
+        assert_eq!(
+            review_index_args("--numstat", "base...HEAD", true),
+            [
+                "diff",
+                "-R",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--numstat",
+                "-z",
+                "base...HEAD",
+                "--"
+            ]
+        );
     }
     #[test]
     fn validates_review_arguments() {
@@ -1014,6 +1111,139 @@ bare
         assert!(validate_untracked_combination(true, true, false).is_err());
         assert!(validate_untracked_combination(true, false, true).is_err());
         assert!(validate_untracked_combination(true, false, false).is_ok());
+    }
+    #[tokio::test]
+    async fn untracked_patch_requires_current_git_inventory() {
+        let repo = test_repo("untracked-inventory");
+        std::fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(repo.join("ignored.txt"), "ignored\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+
+        let patch = read_review_patch(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            false,
+            false,
+            "new.txt".into(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(patch.text.contains("new.txt"));
+
+        let ignored = read_review_patch(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            false,
+            false,
+            "ignored.txt".into(),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(ignored.code, "invalid_path");
+
+        let arbitrary = test_path("arbitrary-root");
+        std::fs::create_dir(&arbitrary).unwrap();
+        std::fs::write(arbitrary.join("new.txt"), "new\n").unwrap();
+        let error = read_review_patch(
+            arbitrary.to_str().unwrap().into(),
+            "HEAD".into(),
+            false,
+            false,
+            "new.txt".into(),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "git_execution");
+
+        std::fs::remove_dir_all(repo).unwrap();
+        std::fs::remove_dir_all(arbitrary).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untracked_paths_reject_symlinked_parents() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_path("symlink-root");
+        let outside = test_path("symlink-outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("file.txt"), "outside\n").unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        symlink(outside.join("file.txt"), root.join("final-link")).unwrap();
+        let root = root.canonicalize().unwrap();
+
+        assert!(resolve_untracked_path(&root, "escape/file.txt").is_err());
+        assert_eq!(
+            resolve_untracked_path(&root, "final-link").unwrap(),
+            root.join("final-link")
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn review_commands_disable_repository_helpers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = test_repo("repository-helpers");
+        let marker = repo.join("helper-ran");
+        let helper = repo.join("helper.sh");
+        std::fs::write(&helper, format!("#!/bin/sh\n: > '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        test_git(
+            &repo,
+            &["config", "core.fsmonitor", helper.to_str().unwrap()],
+        );
+        test_git(
+            &repo,
+            &["config", "diff.external", helper.to_str().unwrap()],
+        );
+        std::fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
+
+        let _ = StdCommand::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["status", "--short"])
+            .output()
+            .unwrap();
+        assert!(marker.exists());
+        std::fs::remove_file(&marker).unwrap();
+
+        let _ = StdCommand::new("git")
+            .args(["-c", "core.fsmonitor=false", "-C"])
+            .arg(&repo)
+            .args(["diff", "--", "tracked.txt"])
+            .output()
+            .unwrap();
+        assert!(marker.exists());
+        std::fs::remove_file(&marker).unwrap();
+
+        let index = list_review_changes(repo.to_str().unwrap().into(), "HEAD".into(), false, false)
+            .await
+            .unwrap();
+        assert!(index.files.iter().any(|file| file.path == "tracked.txt"));
+        assert!(!marker.exists());
+
+        let patch = read_review_patch(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            false,
+            false,
+            "tracked.txt".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(patch.text.contains("changed"));
+        assert!(!marker.exists());
+
+        std::fs::remove_dir_all(repo).unwrap();
     }
     #[tokio::test]
     async fn bounded_output_accepts_ceiling_and_rejects_overflow() {
