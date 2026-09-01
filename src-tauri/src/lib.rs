@@ -290,6 +290,27 @@ fn git_args<'a>(args: &'a [String]) -> Vec<&'a str> {
     args.iter().map(String::as_str).collect()
 }
 
+async fn reject_configured_filters(path: &Path) -> Result<(), CommandError> {
+    let (exit_code, stdout, stderr) = run_git(
+        path,
+        &[
+            "config",
+            "--get-regexp",
+            r"^filter\..*\.(clean|process)$",
+        ],
+    )
+    .await?;
+    match exit_code {
+        1 => Ok(()),
+        0 if stdout.is_empty() => Ok(()),
+        0 => Err(CommandError::new(
+            "git_filter_unsupported",
+            "This review cannot run because Git conversion filters are configured.",
+        )),
+        _ => Err(git_execution_error(&stderr)),
+    }
+}
+
 fn review_index_args(format: &str, range: &str, reversed: bool) -> Vec<String> {
     let mut args = vec!["diff".into()];
     if reversed {
@@ -747,6 +768,9 @@ async fn list_review_changes(
 ) -> Result<ReviewIndex, CommandError> {
     validate_ref(&base, "base")?;
     let path = canonical_path(&path)?;
+    if !committed_only {
+        reject_configured_filters(&path).await?;
+    }
     let range = if committed_only {
         format!("{base}...HEAD")
     } else {
@@ -802,6 +826,9 @@ async fn read_review_patch(
     validate_file(&file)?;
     validate_untracked_combination(untracked, committed_only, reversed)?;
     let path = canonical_path(&path)?;
+    if !committed_only && !untracked {
+        reject_configured_filters(&path).await?;
+    }
     let range = if committed_only {
         format!("{base}...HEAD")
     } else {
@@ -1160,6 +1187,79 @@ bare
 
         std::fs::remove_dir_all(repo).unwrap();
         std::fs::remove_dir_all(arbitrary).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configured_filters_are_rejected_without_execution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = test_repo("configured-filter");
+        let marker = repo.join("filter-ran");
+        let helper = repo.join("filter.sh");
+        std::fs::write(repo.join(".gitattributes"), "tracked.txt filter=marker\n").unwrap();
+        test_git(&repo, &["add", ".gitattributes"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "attributes"]);
+        std::fs::write(&helper, format!("#!/bin/sh\n: > '{}'\ncat\n", marker.display())).unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        test_git(&repo, &["config", "filter.marker.clean", helper.to_str().unwrap()]);
+        std::fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
+
+        let _ = StdCommand::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["diff", "--no-ext-diff", "--no-textconv", "--", "tracked.txt"])
+            .output()
+            .unwrap();
+        assert!(marker.exists());
+        std::fs::remove_file(&marker).unwrap();
+
+        let index_error = list_review_changes(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(index_error.code, "git_filter_unsupported");
+        assert!(!marker.exists());
+
+        let patch_error = read_review_patch(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            false,
+            false,
+            "tracked.txt".into(),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(patch_error.code, "git_filter_unsupported");
+        assert!(!marker.exists());
+
+        test_git(&repo, &["config", "--unset", "filter.marker.clean"]);
+        test_git(&repo, &["config", "filter.marker.process", helper.to_str().unwrap()]);
+        let _ = StdCommand::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["diff", "--no-ext-diff", "--no-textconv", "--", "tracked.txt"])
+            .output()
+            .unwrap();
+        assert!(marker.exists());
+        std::fs::remove_file(&marker).unwrap();
+        let process_error = list_review_changes(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(process_error.code, "git_filter_unsupported");
+        assert!(!marker.exists());
+
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
     #[cfg(unix)]

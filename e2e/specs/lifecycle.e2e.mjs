@@ -209,7 +209,8 @@ describe("bundled desktop lifecycle", () => {
     git(["-c", "user.name=WorktreeView E2E", "-c", "user.email=e2e@example.invalid", "commit", "-q", "-m", "main file"], repository);
     git(["checkout", "-q", "-b", "feature"], repository);
     writeFileSync(path.join(repository, "feature.txt"), "feature committed\n");
-    git(["add", "feature.txt"], repository);
+    writeFileSync(path.join(repository, "large-hunk.txt"), Array.from({ length: 1200 }, (_, index) => `large line ${index + 1}`).join("\n") + "\n");
+    git(["add", "feature.txt", "large-hunk.txt"], repository);
     git(["-c", "user.name=WorktreeView E2E", "-c", "user.email=e2e@example.invalid", "commit", "-q", "-m", "feature"], repository);
     git(["checkout", "-q", "main"], repository);
     git(["checkout", "-q", "-b", "other"], repository);
@@ -217,6 +218,7 @@ describe("bundled desktop lifecycle", () => {
     git(["add", "other.txt"], repository);
     git(["-c", "user.name=WorktreeView E2E", "-c", "user.email=e2e@example.invalid", "commit", "-q", "-m", "other"], repository);
     git(["checkout", "-q", "main"], repository);
+    for (let index = 1; index <= 120; index += 1) git(["branch", `review-base-${String(index).padStart(3, "0")}`], repository);
     const worktree = path.join(fixtureRoot, "review-feature");
     git(["worktree", "add", "-q", worktree, "feature"], repository);
     writeFileSync(path.join(worktree, "README.md"), "main\nuncommitted\n");
@@ -233,8 +235,20 @@ describe("bundled desktop lifecycle", () => {
     await expect($("span=README.md")).toBeDisplayed();
     await expect($("span=untracked.txt")).toBeDisplayed();
     assert.equal(await $("span=ignored.txt").isExisting(), false);
-    await $('button=Committed only').click();
+    const baseSearch = await $('input[aria-controls="review-base-options"]');
+    await baseSearch.click();
+    await browser.waitUntil(async () => (await $$('#review-base-options > button[role="option"]')).length === 50);
+    await expect($('#review-base-options [aria-label="Review base branch pages"]')).toHaveText(expect.stringContaining("1-50 of 123"));
+    await browser.keys("Escape");
+    await browser.execute(() => {
+      const buttons = Array.from(document.querySelectorAll(".scope-toggle button"));
+      buttons.find((button) => button.textContent === "Committed only")?.click();
+      buttons.find((button) => button.textContent === "All changes")?.click();
+      buttons.find((button) => button.textContent === "Committed only")?.click();
+    });
     await browser.waitUntil(async () => !await $("span=untracked.txt").isExisting());
+    await browser.pause(500);
+    assert.equal(await $("span=untracked.txt").isExisting(), false);
     assert.equal(await $("span=README.md").isExisting(), false);
     await $('button=All changes').click();
     await expect($("span=untracked.txt")).toBeDisplayed();
@@ -242,8 +256,36 @@ describe("bundled desktop lifecycle", () => {
     await expect(trackedFile).toBeDisplayed();
     await trackedFile.click();
     await expect($('//code[contains(., "uncommitted")]')).toBeDisplayed();
-    await $('select[aria-label="Review base"]').selectByAttribute("value", "other");
+    const largeFile = await $('//button[contains(@class, "file-row")][.//span[normalize-space()="large-hunk.txt"]]');
+    await largeFile.click();
+    await browser.waitUntil(async () => (await $$(".diff-line")).length === 500);
+    await expect($('[aria-label="Patch pages"]')).toHaveText(expect.stringContaining("Page 1 of 3"));
+    await browser.executeAsync((done) => {
+      Array.from(document.querySelectorAll(".file-row")).find((row) => row.textContent?.includes("large-hunk.txt"))?.click();
+      setTimeout(() => {
+        Array.from(document.querySelectorAll(".file-row")).find((row) => row.textContent?.includes("README.md"))?.click();
+        done();
+      }, 0);
+    });
+    await browser.waitUntil(async () => await browser.execute(() => document.querySelector(".patch-heading code")?.textContent) === "README.md");
+    await browser.pause(500);
+    await expect($('//code[contains(., "uncommitted")]')).toBeDisplayed();
+    rmSync(path.join(worktree, "untracked.txt"));
+    await $('//button[contains(@class, "file-row")][.//span[normalize-space()="untracked.txt"]]').click();
+    await expect($("strong=Patch not rendered")).toBeDisplayed();
+    await expect($("span=The selected file is not an untracked review file.")).toBeDisplayed();
+    await baseSearch.setValue("other");
+    await $('//div[@id="review-base-options"]//button[normalize-space()="other"]').click();
     await expect($("span=other.txt")).toBeDisplayed();
     await expect($(".review-counts")).toHaveText(expect.stringContaining("files"));
+    const filterMarker = path.join(fixtureRoot, "filter-ran");
+    const filterHelper = path.join(fixtureRoot, "filter-helper.sh");
+    writeFileSync(filterHelper, `#!/bin/sh\n: > ${filterMarker}\ncat\n`, { mode: 0o700 });
+    git(["config", "filter.e2e.clean", filterHelper], repository);
+    await $('button=Committed only').click();
+    await $('button=All changes').click();
+    await expect($("strong=Review unavailable")).toBeDisplayed();
+    await expect($("span=This review cannot run because Git conversion filters are configured.")).toBeDisplayed();
+    expect(existsSync(filterMarker)).toBe(false);
   });
 });
