@@ -222,10 +222,7 @@ async fn run_git(path: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), 
     }
 }
 
-async fn run_git_with_stdin(
-    args: &[&str],
-    input: Vec<u8>,
-) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
+fn stdin_git_command(args: &[&str]) -> Command {
     let mut command = Command::new("git");
     command
         .args(["-c", "core.fsmonitor=false", "-c", "core.attributesFile="])
@@ -237,7 +234,14 @@ async fn run_git_with_stdin(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command
+    command
+}
+
+async fn run_git_with_stdin(
+    args: &[&str],
+    input: Vec<u8>,
+) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
+    let mut child = stdin_git_command(args)
         .spawn()
         .map_err(|_| CommandError::new("git_execution", "Git could not be started."))?;
     let mut stdin = child
@@ -509,6 +513,17 @@ fn parse_numstat(output: &[u8]) -> Result<(i64, i64, bool), CommandError> {
 }
 
 async fn capture_untracked_file(root: &Path, file: &str) -> Result<Vec<u8>, CommandError> {
+    capture_untracked_file_before_open(root, file, || {}).await
+}
+
+async fn capture_untracked_file_before_open<F>(
+    root: &Path,
+    file: &str,
+    before_open: F,
+) -> Result<Vec<u8>, CommandError>
+where
+    F: FnOnce(),
+{
     let (exit_code, stdout, stderr) =
         run_git(root, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
     if exit_code != 0 {
@@ -523,6 +538,7 @@ async fn capture_untracked_file(root: &Path, file: &str) -> Result<Vec<u8>, Comm
             "The selected file is not an untracked review file.",
         ));
     }
+    before_open();
     open_untracked_file(root, file)
 }
 
@@ -1056,6 +1072,7 @@ mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::{
+        ffi::OsStr,
         process::Command as StdCommand,
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -1228,6 +1245,102 @@ bare
             Some("refs/heads/master")
         );
     }
+    #[tokio::test]
+    async fn branch_tag_collision_uses_full_refs_for_review_data() {
+        let repo = test_repo("branch-tag-collision");
+        test_git(&repo, &["branch", "-M", "main"]);
+        test_git(&repo, &["tag", "main", "HEAD"]);
+        std::fs::write(repo.join("main-only.txt"), "main\n").unwrap();
+        test_git(&repo, &["add", "main-only.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "main change"]);
+        test_git(&repo, &["checkout", "--quiet", "-b", "feature"]);
+        std::fs::write(repo.join("feature-only.txt"), "feature\n").unwrap();
+        test_git(&repo, &["add", "feature-only.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "feature change"]);
+
+        let inventory = list_branches(repo.to_str().unwrap().into(), "refs/heads/feature".into())
+            .await
+            .unwrap();
+        assert!(inventory.branches.contains(&"refs/heads/main".into()));
+        assert!(inventory.branches.contains(&"refs/heads/feature".into()));
+        assert!(!inventory.branches.contains(&"refs/tags/main".into()));
+
+        let main_head = StdCommand::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "refs/heads/main"])
+            .output()
+            .unwrap();
+        assert!(main_head.status.success());
+        assert_eq!(
+            inventory.default_base.as_deref(),
+            Some(String::from_utf8_lossy(&main_head.stdout).trim())
+        );
+
+        let review = list_review_changes(
+            repo.to_str().unwrap().into(),
+            "refs/heads/main".into(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(review.files.len(), 1);
+        assert_eq!(review.files[0].path, "feature-only.txt");
+        let patch = read_review_patch(
+            repo.to_str().unwrap().into(),
+            "refs/heads/main".into(),
+            true,
+            false,
+            "feature-only.txt".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(patch.text.contains("+feature"));
+        assert!(!patch.text.contains("main-only"));
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+    #[test]
+    fn stdin_diff_commands_isolate_attribute_environment() {
+        let numstat = [
+            "diff",
+            "--no-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--numstat",
+            "-z",
+            "--",
+            "/dev/null",
+            "-",
+        ];
+        let patch = [
+            "diff",
+            "--no-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "-U3",
+            "--",
+            "/dev/null",
+            "-",
+        ];
+        for args in [&numstat[..], &patch[..]] {
+            let command = stdin_git_command(args);
+            let environments = command.as_std().get_envs().collect::<Vec<_>>();
+            assert_eq!(
+                environments
+                    .iter()
+                    .find(|(name, _)| *name == OsStr::new("GIT_ATTR_NOSYSTEM"))
+                    .and_then(|(_, value)| *value),
+                Some(OsStr::new("1"))
+            );
+            assert!(environments.iter().any(|(name, value)| {
+                *name == OsStr::new("GIT_ATTR_SOURCE") && value.is_none()
+            }));
+        }
+    }
     #[test]
     fn rejects_invalid_untracked_combinations() {
         assert!(validate_untracked_combination(true, true, false).is_err());
@@ -1296,6 +1409,99 @@ bare
 
         std::fs::remove_dir_all(repo).unwrap();
         std::fs::remove_dir_all(arbitrary).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stdin_diffs_ignore_repository_and_configured_attributes() {
+        const CHILD_ENV: &str = "WORKTREEVIEW_ATTRIBUTE_ISOLATION_CHILD";
+        const REPO_ENV: &str = "WORKTREEVIEW_ATTRIBUTE_ISOLATION_REPO";
+        const ATTRS_ENV: &str = "WORKTREEVIEW_ATTRIBUTE_ISOLATION_ATTRS";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let repo = PathBuf::from(std::env::var_os(REPO_ENV).unwrap());
+            let configured_attributes = PathBuf::from(std::env::var_os(ATTRS_ENV).unwrap());
+
+            let force_binary = "* binary\n- binary\ntext.txt binary\n";
+            std::fs::write(repo.join(".gitattributes"), force_binary).unwrap();
+            std::fs::write(&configured_attributes, force_binary).unwrap();
+            let text = read_review_patch(
+                repo.to_str().unwrap().into(),
+                "HEAD".into(),
+                false,
+                false,
+                "text.txt".into(),
+                true,
+            )
+            .await
+            .unwrap();
+            assert!(!text.binary);
+            assert!(text.text.contains("+plain text"));
+
+            let force_text = "* text\n- text\nbinary.bin text\n";
+            std::fs::write(repo.join(".gitattributes"), force_text).unwrap();
+            std::fs::write(&configured_attributes, force_text).unwrap();
+            let binary = read_review_patch(
+                repo.to_str().unwrap().into(),
+                "HEAD".into(),
+                false,
+                false,
+                "binary.bin".into(),
+                true,
+            )
+            .await
+            .unwrap();
+            assert!(binary.binary);
+            assert!(binary.text.is_empty());
+            return;
+        }
+
+        let repo = test_repo("attribute-isolation");
+        std::fs::write(repo.join("text.txt"), "plain text\n").unwrap();
+        std::fs::write(repo.join("binary.bin"), [b'a', 0, b'b']).unwrap();
+        let configured_attributes = repo.join("configured-attributes");
+        std::fs::write(&configured_attributes, "* binary\n").unwrap();
+        let config = repo.join("attributes.gitconfig");
+        std::fs::write(
+            &config,
+            format!(
+                "[core]\n\tattributesFile = {}\n",
+                configured_attributes.display()
+            ),
+        )
+        .unwrap();
+
+        let attr_source_probe = StdCommand::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["check-attr", "diff", "--", "tracked.txt"])
+            .env("GIT_ATTR_SOURCE", "refs/heads/worktreeview-missing")
+            .output()
+            .unwrap();
+        let mut child = StdCommand::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "tests::stdin_diffs_ignore_repository_and_configured_attributes",
+                "--nocapture",
+            ])
+            .current_dir(&repo)
+            .env(CHILD_ENV, "1")
+            .env(REPO_ENV, &repo)
+            .env(ATTRS_ENV, &configured_attributes)
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_CONFIG_SYSTEM", &config);
+        if !attr_source_probe.status.success() {
+            child.env("GIT_ATTR_SOURCE", "refs/heads/worktreeview-missing");
+        }
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "attribute isolation child failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
     #[cfg(unix)]
@@ -1397,6 +1603,9 @@ bare
         std::fs::write(outside.join("file.txt"), "outside\n").unwrap();
         symlink(&outside, root.join("escape")).unwrap();
         symlink(outside.join("file.txt"), root.join("final-link")).unwrap();
+        std::fs::create_dir(root.join("inside-dir")).unwrap();
+        std::fs::write(root.join("inside-dir/file.txt"), "contained\n").unwrap();
+        symlink("inside-dir", root.join("inside-link")).unwrap();
         let root = root.canonicalize().unwrap();
 
         assert!(open_untracked_file(&root, "escape/file.txt").is_err());
@@ -1406,9 +1615,123 @@ bare
             open_untracked_file(&root, "inside.txt").unwrap(),
             b"inside\n"
         );
+        assert_eq!(
+            open_untracked_file(&root, "inside-link/file.txt").unwrap(),
+            b"contained\n"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inventory_to_open_replacements_remain_contained() {
+        use std::os::unix::fs::symlink;
+
+        let repo = test_repo("replacement-containment");
+        let outside = test_path("replacement-outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("file.txt"), "outside\n").unwrap();
+
+        let descendant = repo.join("nested");
+        std::fs::create_dir(&descendant).unwrap();
+        std::fs::write(descendant.join("file.txt"), "inside\n").unwrap();
+        let error = capture_untracked_file_before_open(&repo, "nested/file.txt", || {
+            std::fs::remove_dir_all(&descendant).unwrap();
+            symlink(&outside, &descendant).unwrap();
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_path");
+
+        std::fs::write(repo.join("final.txt"), "inside\n").unwrap();
+        let final_path = repo.join("final.txt");
+        let outside_file = outside.join("file.txt");
+        let error = capture_untracked_file_before_open(&repo, "final.txt", || {
+            std::fs::remove_file(&final_path).unwrap();
+            symlink(&outside_file, &final_path).unwrap();
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_path");
+
+        std::fs::remove_dir_all(repo).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inventory_to_open_fifo_replacement_fails_promptly() {
+        const CHILD_ENV: &str = "WORKTREEVIEW_FIFO_REPLACEMENT_CHILD";
+        const REPO_ENV: &str = "WORKTREEVIEW_FIFO_REPLACEMENT_REPO";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let repo = PathBuf::from(std::env::var_os(REPO_ENV).unwrap());
+            let fifo = repo.join("fifo.txt");
+            let error = capture_untracked_file_before_open(&repo, "fifo.txt", || {
+                std::fs::remove_file(&fifo).unwrap();
+                let status = StdCommand::new("mkfifo").arg(&fifo).status().unwrap();
+                assert!(status.success());
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, "invalid_path");
+            return;
+        }
+
+        let repo = test_repo("fifo-replacement");
+        std::fs::write(repo.join("fifo.txt"), "regular\n").unwrap();
+        let mut child = StdCommand::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::inventory_to_open_fifo_replacement_fails_promptly",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .env(REPO_ENV, &repo)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                let _ = child.wait();
+                panic!("opening a FIFO replacement blocked");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(status.success());
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn inventory_to_open_special_and_missing_files_fail_closed() {
+        let repo = test_repo("special-and-missing");
+        let special = repo.join("special.txt");
+        std::fs::write(&special, "regular\n").unwrap();
+        let error = capture_untracked_file_before_open(&repo, "special.txt", || {
+            std::fs::remove_file(&special).unwrap();
+            std::fs::create_dir(&special).unwrap();
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_path");
+
+        let missing = repo.join("missing.txt");
+        std::fs::write(&missing, "regular\n").unwrap();
+        let error = capture_untracked_file_before_open(&repo, "missing.txt", || {
+            std::fs::remove_file(&missing).unwrap();
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_path");
+
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
     #[cfg(unix)]
