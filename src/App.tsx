@@ -40,8 +40,8 @@ function errorMessage(error: unknown) {
 }
 
 function shortToken(token: string) {
-  const label = token.startsWith("refs/heads/") ? token.slice("refs/heads/".length) : token;
-  return /^[0-9a-f]{40}$/i.test(label) ? label.slice(0, 7) : label;
+  if (token.startsWith("refs/heads/")) return token.slice("refs/heads/".length);
+  return /^[0-9a-f]{40}$/i.test(token) ? token.slice(0, 7) : token;
 }
 function parseHunks(text: string) {
   const lines = text.split("\n");

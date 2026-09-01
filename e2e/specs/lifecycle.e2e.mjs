@@ -226,16 +226,49 @@ describe("bundled desktop lifecycle", () => {
     writeFileSync(path.join(worktree, "README.md"), "main\nuncommitted\n");
     writeFileSync(path.join(worktree, "untracked.txt"), "untracked\n");
     writeFileSync(path.join(worktree, "ignored.txt"), "must not appear\n");
+    const switchRepository = path.join(fixtureRoot, "review-switch-repository");
+    createRepository(switchRepository);
     select(repository);
     await openSelectedRepository(repository);
     const featureRow = await $('//button[contains(@class, "worktree-row")][.//strong[normalize-space()="feature"]]');
     await expect(featureRow).toBeDisplayed();
     await featureRow.click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
-    await expect($("span=feature.txt")).toBeDisplayed();
-    await expect($("span=README.md")).toBeDisplayed();
-    await expect($("span=untracked.txt")).toBeDisplayed();
+    await expect($(".review-counts")).toHaveText("4 files, +1202 -0");
+    const initialFiles = await browser.execute(() => Array.from(document.querySelectorAll(".file-row span"), (file) => file.textContent ?? ""));
+    assert.deepEqual(initialFiles.sort(), ["README.md", "feature.txt", "large-hunk.txt", "untracked.txt"].sort());
     assert.equal(await $("span=ignored.txt").isExisting(), false);
+
+    select(switchRepository);
+    await openSelectedRepository(switchRepository);
+    await expect($("h1=Worktrees")).toBeDisplayed();
+    assert.equal(await $('section[aria-label="Code review"]').isExisting(), false);
+
+    await $('button[aria-label="Find repositories and worktrees"]').click();
+    await $(".palette-input-row input").setValue("review-feature");
+    const worktreePaletteResult = await $(`//div[contains(@class, "palette-results")]/button[.//small[normalize-space()="${worktree}"]]`);
+    await expect(worktreePaletteResult).toBeDisplayed();
+    await worktreePaletteResult.click();
+    await expect($('section[aria-label="Code review"]')).toBeDisplayed();
+    await expect($(".review-heading h1")).toHaveText("feature");
+    await expect($(".review-counts")).toHaveText("4 files, +1202 -0");
+
+    await $('button[aria-label="Find repositories and worktrees"]').click();
+    await $(".palette-input-row input").setValue("review-switch-repository");
+    const repositoryPaletteResult = await $(`//div[contains(@class, "palette-results")]/button[.//small[normalize-space()="${switchRepository}"]]`);
+    await expect(repositoryPaletteResult).toBeDisplayed();
+    await repositoryPaletteResult.click();
+    await expect($("h1=Worktrees")).toBeDisplayed();
+    assert.equal(await $('section[aria-label="Code review"]').isExisting(), false);
+
+    await $('button[aria-label="Find repositories and worktrees"]').click();
+    await $(".palette-input-row input").setValue("review-feature");
+    const reopenedWorktreePaletteResult = await $(`//div[contains(@class, "palette-results")]/button[.//small[normalize-space()="${worktree}"]]`);
+    await expect(reopenedWorktreePaletteResult).toBeDisplayed();
+    await reopenedWorktreePaletteResult.click();
+    await expect($('section[aria-label="Code review"]')).toBeDisplayed();
+    await expect($(".review-counts")).toHaveText("4 files, +1202 -0");
+
     const baseSearch = await $('input[aria-controls="review-base-options"]');
     await baseSearch.click();
     await browser.waitUntil(async () => (await $$('#review-base-options > button[role="option"]')).length === 50);
@@ -251,22 +284,56 @@ describe("bundled desktop lifecycle", () => {
     await browser.pause(500);
     assert.equal(await $("span=untracked.txt").isExisting(), false);
     assert.equal(await $("span=README.md").isExisting(), false);
+    await expect($("span=feature.txt")).toBeDisplayed();
+    await expect($("span=large-hunk.txt")).toBeDisplayed();
     await expect($(".review-counts")).toHaveText("2 files, +1201 -0");
-     await $('button=All changes').click();
-     await expect($("span=untracked.txt")).toBeDisplayed();
-     await expect($(".review-counts")).toHaveText("4 files, +1202 -0");
-     const trackedFile = await $('//button[contains(@class, "file-row")][.//span[normalize-space()="README.md"]]');
+    await $('button=All changes').click();
+    await expect($("span=untracked.txt")).toBeDisplayed();
+    await expect($("span=README.md")).toBeDisplayed();
+    assert.equal(await $("span=ignored.txt").isExisting(), false);
+    await expect($(".review-counts")).toHaveText("4 files, +1202 -0");
+    const trackedFile = await $('//button[contains(@class, "file-row")][.//span[normalize-space()="README.md"]]');
     await expect(trackedFile).toBeDisplayed();
     await trackedFile.click();
     await expect($('//code[contains(., "uncommitted")]')).toBeDisplayed();
-     const largeFile = await $('//button[contains(@class, "file-row")][.//span[normalize-space()="large-hunk.txt"]]');
-     await largeFile.click();
-     await browser.waitUntil(async () => (await $$(".diff-line")).length === 500);
-     await browser.execute(() => Array.from(document.querySelectorAll('.file-row')).find((row) => row.textContent?.includes('large-hunk.txt'))?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true })));
-     await browser.waitUntil(async () => await browser.execute(() => document.querySelector('.file-row[aria-selected="true"] span')?.textContent) === "feature.txt");
-     await browser.execute(() => Array.from(document.querySelectorAll('.file-row')).find((row) => row.textContent?.includes('feature.txt'))?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })));
-     await browser.waitUntil(async () => await browser.execute(() => document.querySelector('.file-row[aria-selected="true"] span')?.textContent) === "large-hunk.txt");
-     await expect($('[aria-label="Patch pages"]')).toHaveText(expect.stringContaining("Page 1 of 3"));
+    const readmeGutters = await browser.execute(() => Array.from(document.querySelectorAll(".diff-line"), (line) =>
+      Array.from(line.querySelectorAll(".line-number"), (gutter) => gutter.textContent?.trim() ?? "")));
+    assert.deepEqual(readmeGutters, [["1", "1"], ["", "2"]]);
+
+    const largeFile = await $('//button[contains(@class, "file-row")][.//span[normalize-space()="large-hunk.txt"]]');
+    await largeFile.click();
+    await browser.waitUntil(async () => (await $$(".diff-line")).length === 500);
+    await browser.execute(() => {
+      const button = Array.from(document.querySelectorAll(".file-row")).find((row) => row.textContent?.includes("large-hunk.txt"));
+      if (button instanceof HTMLElement) button.focus();
+    });
+    await browser.waitUntil(async () => await browser.execute(() => document.activeElement?.querySelector("span")?.textContent) === "large-hunk.txt");
+    await browser.keys("ArrowUp");
+    await browser.waitUntil(async () => await browser.execute(() => document.activeElement?.querySelector("span")?.textContent) === "feature.txt");
+    await expect($('//button[contains(@class, "file-row")][.//span[normalize-space()="feature.txt"]]')).toHaveAttribute("aria-selected", "true");
+    await browser.waitUntil(async () => await browser.execute(() => document.querySelector(".patch-heading code")?.textContent) === "feature.txt");
+    await browser.keys("ArrowDown");
+    await browser.waitUntil(async () => await browser.execute(() => document.activeElement?.querySelector("span")?.textContent) === "large-hunk.txt");
+    await expect(largeFile).toHaveAttribute("aria-selected", "true");
+    await browser.waitUntil(async () => await browser.execute(() => document.querySelector(".patch-heading code")?.textContent) === "large-hunk.txt");
+    await browser.waitUntil(async () => (await $$(".diff-line")).length === 500);
+    await expect($('[aria-label="Patch pages"]')).toHaveText(expect.stringContaining("Page 1 of 3"));
+    let largeGutters = await browser.execute(() => Array.from(document.querySelectorAll(".diff-line"), (line) =>
+      Array.from(line.querySelectorAll(".line-number"), (gutter) => gutter.textContent?.trim() ?? "")));
+    assert.deepEqual(largeGutters[0], ["", "1"]);
+    assert.deepEqual(largeGutters.at(-1), ["", "500"]);
+    await $('//div[@aria-label="Patch pages"]//button[normalize-space()="Next"]').click();
+    await expect($('[aria-label="Patch pages"]')).toHaveText(expect.stringContaining("Page 2 of 3"));
+    largeGutters = await browser.execute(() => Array.from(document.querySelectorAll(".diff-line"), (line) =>
+      Array.from(line.querySelectorAll(".line-number"), (gutter) => gutter.textContent?.trim() ?? "")));
+    assert.deepEqual(largeGutters[0], ["", "501"]);
+    assert.deepEqual(largeGutters.at(-1), ["", "1000"]);
+    await $('//div[@aria-label="Patch pages"]//button[normalize-space()="Next"]').click();
+    await expect($('[aria-label="Patch pages"]')).toHaveText(expect.stringContaining("Page 3 of 3"));
+    largeGutters = await browser.execute(() => Array.from(document.querySelectorAll(".diff-line"), (line) =>
+      Array.from(line.querySelectorAll(".line-number"), (gutter) => gutter.textContent?.trim() ?? "")));
+    assert.deepEqual(largeGutters.at(-1), ["", "1200"]);
+
     await browser.executeAsync((done) => {
       Array.from(document.querySelectorAll(".file-row")).find((row) => row.textContent?.includes("large-hunk.txt"))?.click();
       setTimeout(() => {
@@ -281,16 +348,17 @@ describe("bundled desktop lifecycle", () => {
     await $('//button[contains(@class, "file-row")][.//span[normalize-space()="untracked.txt"]]').click();
     await expect($("strong=Patch not rendered")).toBeDisplayed();
     await expect($("span=The selected file is not an untracked review file.")).toBeDisplayed();
-     await baseSearch.setValue("other");
-     assert.equal(await $("span=other.txt").isExisting(), false);
-      await $('//div[@id="review-base-options"]//button[normalize-space()="other"]').click();
-      await expect($("span=other.txt")).toBeDisplayed();
-      await expect($(".review-counts")).toHaveText("4 files, +1202 -1");
+    await baseSearch.setValue("other");
+    assert.equal(await $("span=other.txt").isExisting(), false);
+    await $('//div[@id="review-base-options"]//button[normalize-space()="other"]').click();
+    await expect($("span=other.txt")).toBeDisplayed();
+    await expect($(".review-counts")).toHaveText("4 files, +1202 -1");
     git(["config", "core.filemode", "true"], repository);
     chmodSync(path.join(worktree, ".gitignore"), 0o755);
     await $('button=Committed only').click();
-     await $('button=All changes').click();
-      await expect($(".review-counts")).toHaveText("5 files, +1202 -1");
+    await $('button=All changes').click();
+    await expect($(".review-counts")).toHaveText("5 files, +1202 -1");
+    assert.equal(await $("span=ignored.txt").isExisting(), false);
     await $('//button[contains(@class, "file-row")][.//span[normalize-space()=".gitignore"]]').click();
     await expect($('pre.patch-metadata')).toHaveText(expect.stringContaining("old mode 100644"));
     await expect($('pre.patch-metadata')).toHaveText(expect.stringContaining("new mode 100755"));
