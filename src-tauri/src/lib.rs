@@ -1,13 +1,19 @@
+use cap_fs_ext::OpenOptionsSyncExt;
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions},
+};
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use std::{
+    io::Read,
     path::{Path, PathBuf},
     process::Stdio,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
     time::{timeout, Duration},
 };
@@ -216,6 +222,93 @@ async fn run_git(path: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), 
     }
 }
 
+async fn run_git_with_stdin(
+    args: &[&str],
+    input: Vec<u8>,
+) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
+    let mut command = Command::new("git");
+    command
+        .args(["-c", "core.fsmonitor=false", "-c", "core.attributesFile="])
+        .args(args)
+        .env("GIT_DIR", "")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env_remove("GIT_ATTR_SOURCE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|_| CommandError::new("git_execution", "Git could not be started."))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| CommandError::new("git_execution", "Git stdin was unavailable."))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| CommandError::new("git_execution", "Git stdout was unavailable."))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| CommandError::new("git_execution", "Git stderr was unavailable."))?;
+    let mut stdin_task = tokio::spawn(async move {
+        stdin
+            .write_all(&input)
+            .await
+            .map_err(|_| CommandError::new("git_execution", "Git stdin could not be written."))?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|_| CommandError::new("git_execution", "Git stdin could not be closed."))
+    });
+    let mut stdout_task = tokio::spawn(read_bounded(stdout));
+    let mut stderr_task = tokio::spawn(read_bounded(stderr));
+    let result = timeout(GIT_TIMEOUT, async {
+        let status = child
+            .wait()
+            .await
+            .map_err(|_| CommandError::new("git_execution", "Git did not finish."))?;
+        (&mut stdin_task)
+            .await
+            .map_err(|_| CommandError::new("git_execution", "Git stdin failed."))??;
+        let stdout = (&mut stdout_task)
+            .await
+            .map_err(|_| CommandError::new("git_execution", "Git stdout failed."))??;
+        let stderr = (&mut stderr_task)
+            .await
+            .map_err(|_| CommandError::new("git_execution", "Git stderr failed."))??;
+        Ok::<_, CommandError>((status, stdout, stderr))
+    })
+    .await;
+    match result {
+        Ok(Ok((status, stdout, stderr))) => Ok((status.code().unwrap_or(-1), stdout, stderr)),
+        Ok(Err(error)) => {
+            stdin_task.abort();
+            stdout_task.abort();
+            stderr_task.abort();
+            let _ = stdin_task.await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            reap_after_kill(&mut child).await;
+            Err(error)
+        }
+        Err(_) => {
+            stdin_task.abort();
+            stdout_task.abort();
+            stderr_task.abort();
+            let _ = stdin_task.await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            reap_after_kill(&mut child).await;
+            Err(CommandError::new(
+                "git_timeout",
+                "Git did not respond within 10 seconds.",
+            ))
+        }
+    }
+}
+
 fn validate_ref(value: &str, name: &str) -> Result<(), CommandError> {
     if value.starts_with('-') {
         return Err(CommandError::new(
@@ -258,10 +351,10 @@ fn validate_untracked_combination(
 }
 
 fn primary_branch(branches: &[String]) -> Option<&str> {
-    if branches.iter().any(|branch| branch == "main") {
-        Some("main")
-    } else if branches.iter().any(|branch| branch == "master") {
-        Some("master")
+    if branches.iter().any(|branch| branch == "refs/heads/main") {
+        Some("refs/heads/main")
+    } else if branches.iter().any(|branch| branch == "refs/heads/master") {
+        Some("refs/heads/master")
     } else {
         None
     }
@@ -293,11 +386,7 @@ fn git_args<'a>(args: &'a [String]) -> Vec<&'a str> {
 async fn reject_configured_filters(path: &Path) -> Result<(), CommandError> {
     let (exit_code, stdout, stderr) = run_git(
         path,
-        &[
-            "config",
-            "--get-regexp",
-            r"^filter\..*\.(clean|process)$",
-        ],
+        &["config", "--get-regexp", r"^filter\..*\.(clean|process)$"],
     )
     .await?;
     match exit_code {
@@ -419,31 +508,7 @@ fn parse_numstat(output: &[u8]) -> Result<(i64, i64, bool), CommandError> {
     Ok((additions, deletions, binary))
 }
 
-fn resolve_untracked_path(root: &Path, file: &str) -> Result<PathBuf, CommandError> {
-    let candidate = root.join(file);
-    let file_name = candidate
-        .file_name()
-        .ok_or_else(|| CommandError::new("invalid_path", "The selected file path is invalid."))?;
-    let parent = candidate
-        .parent()
-        .ok_or_else(|| CommandError::new("invalid_path", "The selected file path is invalid."))?
-        .canonicalize()
-        .map_err(|_| {
-            CommandError::new(
-                "invalid_path",
-                "The selected file path could not be resolved.",
-            )
-        })?;
-    if !parent.starts_with(root) {
-        return Err(CommandError::new(
-            "invalid_path",
-            "The selected file must remain inside the worktree.",
-        ));
-    }
-    Ok(parent.join(file_name))
-}
-
-async fn verified_untracked_path(root: &Path, file: &str) -> Result<PathBuf, CommandError> {
+async fn capture_untracked_file(root: &Path, file: &str) -> Result<Vec<u8>, CommandError> {
     let (exit_code, stdout, stderr) =
         run_git(root, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
     if exit_code != 0 {
@@ -458,7 +523,41 @@ async fn verified_untracked_path(root: &Path, file: &str) -> Result<PathBuf, Com
             "The selected file is not an untracked review file.",
         ));
     }
-    resolve_untracked_path(root, file)
+    open_untracked_file(root, file)
+}
+
+fn open_untracked_file(root: &Path, file: &str) -> Result<Vec<u8>, CommandError> {
+    let root = Dir::open_ambient_dir(root, ambient_authority()).map_err(|_| {
+        CommandError::new("invalid_path", "The selected folder could not be opened.")
+    })?;
+    let mut options = OpenOptions::new();
+    options.read(true).nonblock(true);
+    let mut opened = root
+        .open_with(file, &options)
+        .map_err(|_| CommandError::new("invalid_path", "The selected file could not be opened."))?;
+    if !opened
+        .metadata()
+        .map_err(|_| CommandError::new("invalid_path", "The selected file could not be read."))?
+        .file_type()
+        .is_file()
+    {
+        return Err(CommandError::new(
+            "invalid_path",
+            "The selected path is not a regular file.",
+        ));
+    }
+    let mut output = Vec::new();
+    (&mut opened)
+        .take((MAX_OUTPUT + 1) as u64)
+        .read_to_end(&mut output)
+        .map_err(|_| CommandError::new("invalid_path", "The selected file could not be read."))?;
+    if output.len() > MAX_OUTPUT {
+        return Err(CommandError::new(
+            "git_output_too_large",
+            "Git output was too large.",
+        ));
+    }
+    Ok(output)
 }
 
 fn decode_git_path(value: &str) -> Result<String, ()> {
@@ -564,12 +663,7 @@ fn parse_worktrees(output: &[u8]) -> Result<Vec<Worktree>, CommandError> {
                         "Git returned an empty worktree branch.",
                     ));
                 }
-                branch = Some(
-                    value
-                        .strip_prefix("refs/heads/")
-                        .unwrap_or(value)
-                        .to_string(),
-                );
+                branch = Some(value.to_string());
             } else if line == "detached" {
                 detached = true;
             } else if line == "locked"
@@ -715,7 +809,7 @@ async fn list_branches(
     let path = canonical_path(&path)?;
     let (exit_code, stdout, stderr) = run_git(
         &path,
-        &["for-each-ref", "refs/heads", "--format=%(refname:short)"],
+        &["for-each-ref", "refs/heads", "--format=%(refname)"],
     )
     .await?;
     if exit_code != 0 {
@@ -733,7 +827,7 @@ async fn list_branches(
             "rev-parse".into(),
             "--verify".into(),
             "--quiet".into(),
-            format!("refs/heads/{worktree_branch}"),
+            worktree_branch.clone(),
         ];
         let verify_args = git_args(&verify_args);
         if run_git(&path, &verify_args).await?.0 != 0 {
@@ -834,8 +928,8 @@ async fn read_review_patch(
     } else {
         base
     };
-    let untracked_path = if untracked {
-        Some(verified_untracked_path(&path, &file).await?)
+    let untracked_input = if untracked {
+        Some(capture_untracked_file(&path, &file).await?)
     } else {
         None
     };
@@ -849,10 +943,7 @@ async fn read_review_patch(
     if reversed {
         num_args.push("-R".into());
     }
-    let (exit_code, stdout, stderr) = if let Some(file_path) = &untracked_path {
-        let file_path = file_path.to_str().ok_or_else(|| {
-            CommandError::new("invalid_path", "The selected file path is not valid UTF-8.")
-        })?;
+    let (exit_code, stdout, stderr) = if let Some(input) = &untracked_input {
         let args = vec![
             "diff".into(),
             "--no-index".into(),
@@ -862,10 +953,10 @@ async fn read_review_patch(
             "-z".into(),
             "--".into(),
             "/dev/null".into(),
-            file_path.into(),
+            "-".into(),
         ];
         let args = git_args(&args);
-        run_git(&path, &args).await?
+        run_git_with_stdin(&args, input.clone()).await?
     } else {
         num_args.extend([range.clone(), "--".into(), file.clone()]);
         let args = git_args(&num_args);
@@ -891,10 +982,7 @@ async fn read_review_patch(
     if reversed {
         patch_args.push("-R".into());
     }
-    let (exit_code, stdout, stderr) = if let Some(file_path) = &untracked_path {
-        let file_path = file_path.to_str().ok_or_else(|| {
-            CommandError::new("invalid_path", "The selected file path is not valid UTF-8.")
-        })?;
+    let (exit_code, stdout, stderr) = if let Some(input) = &untracked_input {
         let args = vec![
             "diff".into(),
             "--no-index".into(),
@@ -904,10 +992,10 @@ async fn read_review_patch(
             "-U3".into(),
             "--".into(),
             "/dev/null".into(),
-            file_path.into(),
+            "-".into(),
         ];
         let args = git_args(&args);
-        run_git(&path, &args).await?
+        run_git_with_stdin(&args, input.clone()).await?
     } else {
         patch_args.extend([range, "--".into(), file]);
         let args = git_args(&patch_args);
@@ -1041,7 +1129,7 @@ bare
             vec![
                 Worktree {
                     path: "/tmp/main".into(),
-                    branch: "main".into(),
+                    branch: "refs/heads/main".into(),
                     head: "abc123".into()
                 },
                 Worktree {
@@ -1127,11 +1215,18 @@ bare
     #[test]
     fn selects_main_then_master_as_primary_branch() {
         assert_eq!(
-            primary_branch(&["master".into(), "main".into()]),
-            Some("main")
+            primary_branch(&["refs/heads/master".into(), "refs/heads/main".into()]),
+            Some("refs/heads/main")
         );
-        assert_eq!(primary_branch(&["master".into()]), Some("master"));
-        assert_eq!(primary_branch(&["develop".into()]), None);
+        assert_eq!(
+            primary_branch(&["refs/heads/master".into()]),
+            Some("refs/heads/master")
+        );
+        assert_eq!(primary_branch(&["refs/heads/develop".into()]), None);
+        assert_eq!(
+            primary_branch(&["refs/tags/main".into(), "refs/heads/master".into()]),
+            Some("refs/heads/master")
+        );
     }
     #[test]
     fn rejects_invalid_untracked_combinations() {
@@ -1145,6 +1240,7 @@ bare
         std::fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(repo.join("ignored.txt"), "ignored\n").unwrap();
         std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+        std::fs::write(repo.join("binary.bin"), [b'a', 0, b'b']).unwrap();
 
         let patch = read_review_patch(
             repo.to_str().unwrap().into(),
@@ -1156,7 +1252,20 @@ bare
         )
         .await
         .unwrap();
-        assert!(patch.text.contains("new.txt"));
+        assert!(patch.text.contains("new"));
+
+        let binary = read_review_patch(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            false,
+            false,
+            "binary.bin".into(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(binary.binary);
+        assert!(binary.text.is_empty());
 
         let ignored = read_review_patch(
             repo.to_str().unwrap().into(),
@@ -1200,28 +1309,37 @@ bare
         std::fs::write(repo.join(".gitattributes"), "tracked.txt filter=marker\n").unwrap();
         test_git(&repo, &["add", ".gitattributes"]);
         test_git(&repo, &["commit", "--quiet", "-m", "attributes"]);
-        std::fs::write(&helper, format!("#!/bin/sh\n: > '{}'\ncat\n", marker.display())).unwrap();
+        std::fs::write(
+            &helper,
+            format!("#!/bin/sh\n: > '{}'\ncat\n", marker.display()),
+        )
+        .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        test_git(&repo, &["config", "filter.marker.clean", helper.to_str().unwrap()]);
+        test_git(
+            &repo,
+            &["config", "filter.marker.clean", helper.to_str().unwrap()],
+        );
         std::fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
 
         let _ = StdCommand::new("git")
             .arg("-C")
             .arg(&repo)
-            .args(["diff", "--no-ext-diff", "--no-textconv", "--", "tracked.txt"])
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--",
+                "tracked.txt",
+            ])
             .output()
             .unwrap();
         assert!(marker.exists());
         std::fs::remove_file(&marker).unwrap();
 
-        let index_error = list_review_changes(
-            repo.to_str().unwrap().into(),
-            "HEAD".into(),
-            false,
-            false,
-        )
-        .await
-        .unwrap_err();
+        let index_error =
+            list_review_changes(repo.to_str().unwrap().into(), "HEAD".into(), false, false)
+                .await
+                .unwrap_err();
         assert_eq!(index_error.code, "git_filter_unsupported");
         assert!(!marker.exists());
 
@@ -1239,23 +1357,28 @@ bare
         assert!(!marker.exists());
 
         test_git(&repo, &["config", "--unset", "filter.marker.clean"]);
-        test_git(&repo, &["config", "filter.marker.process", helper.to_str().unwrap()]);
+        test_git(
+            &repo,
+            &["config", "filter.marker.process", helper.to_str().unwrap()],
+        );
         let _ = StdCommand::new("git")
             .arg("-C")
             .arg(&repo)
-            .args(["diff", "--no-ext-diff", "--no-textconv", "--", "tracked.txt"])
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--",
+                "tracked.txt",
+            ])
             .output()
             .unwrap();
         assert!(marker.exists());
         std::fs::remove_file(&marker).unwrap();
-        let process_error = list_review_changes(
-            repo.to_str().unwrap().into(),
-            "HEAD".into(),
-            false,
-            false,
-        )
-        .await
-        .unwrap_err();
+        let process_error =
+            list_review_changes(repo.to_str().unwrap().into(), "HEAD".into(), false, false)
+                .await
+                .unwrap_err();
         assert_eq!(process_error.code, "git_filter_unsupported");
         assert!(!marker.exists());
 
@@ -1264,7 +1387,7 @@ bare
 
     #[cfg(unix)]
     #[test]
-    fn untracked_paths_reject_symlinked_parents() {
+    fn opened_untracked_files_remain_inside_the_root() {
         use std::os::unix::fs::symlink;
 
         let root = test_path("symlink-root");
@@ -1276,10 +1399,12 @@ bare
         symlink(outside.join("file.txt"), root.join("final-link")).unwrap();
         let root = root.canonicalize().unwrap();
 
-        assert!(resolve_untracked_path(&root, "escape/file.txt").is_err());
+        assert!(open_untracked_file(&root, "escape/file.txt").is_err());
+        assert!(open_untracked_file(&root, "final-link").is_err());
+        std::fs::write(root.join("inside.txt"), "inside\n").unwrap();
         assert_eq!(
-            resolve_untracked_path(&root, "final-link").unwrap(),
-            root.join("final-link")
+            open_untracked_file(&root, "inside.txt").unwrap(),
+            b"inside\n"
         );
 
         std::fs::remove_dir_all(root).unwrap();
@@ -1362,6 +1487,20 @@ bare
                 .code,
             "git_output_too_large"
         );
+
+        let root = test_path("bounded-input");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("exact"), vec![0; MAX_OUTPUT]).unwrap();
+        std::fs::write(root.join("overflow"), vec![0; MAX_OUTPUT + 1]).unwrap();
+        assert_eq!(
+            open_untracked_file(&root, "exact").unwrap().len(),
+            MAX_OUTPUT
+        );
+        assert_eq!(
+            open_untracked_file(&root, "overflow").unwrap_err().code,
+            "git_output_too_large"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn upsert_is_monotonic_and_preserves_creation() {
