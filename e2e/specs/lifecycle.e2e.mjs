@@ -55,8 +55,15 @@ function select(directory) {
   renameSync(replacement, selector);
 }
 
-async function openSelectedRepository() {
+async function openSelectedRepository(expectedPath) {
   await $('button[aria-label="Open repository"]').click();
+  if (!expectedPath) return;
+  await browser.waitUntil(async () => {
+    const active = await $('nav.project-list button[aria-current="true"]');
+    if (!await active.isExisting()) return false;
+    return await active.getAttribute("title") === expectedPath
+      && await $(".inbox-pane").getAttribute("aria-busy") === "false";
+  }, { timeoutMsg: `repository did not finish opening: ${expectedPath}` });
 }
 
 async function projectPaths() {
@@ -120,28 +127,27 @@ describe("bundled desktop lifecycle", () => {
     select(fixture);
     const branch = git(["branch", "--show-current"], fixture) || "detached";
     const head = git(["rev-parse", "HEAD"], fixture);
-    await openSelectedRepository();
+    await openSelectedRepository(fixture);
     await $(".worktree-row").waitForDisplayed();
-    await expect($("body")).toHaveText(expect.stringContaining(fixture));
+    await expect($(`small=${fixture}`)).toBeDisplayed();
     await expect($(`strong=${branch}`)).toBeDisplayed();
-    await expect($("body")).toHaveText(expect.stringContaining(head));
+    await expect($(`code=${head}`)).toBeDisplayed();
 
     await browser.refresh();
     await $(".worktree-row").waitForDisplayed();
-    await expect($("body")).toHaveText(expect.stringContaining(fixture));
+    await expect($(`small=${fixture}`)).toBeDisplayed();
 
     const firstSession = browser.sessionId;
     await browser.reloadSession();
     expect(browser.sessionId).not.toBe(firstSession);
     await $(".worktree-row").waitForDisplayed();
-    await expect($("body")).toHaveText(expect.stringContaining(fixture));
+    await expect($(`small=${fixture}`)).toBeDisplayed();
 
     const detached = path.join(fixtureRoot, "detached-repository");
     createRepository(detached);
     git(["checkout", "-q", "--detach"], detached);
     select(detached);
-    await openSelectedRepository();
-    await browser.waitUntil(async () => (await projectPaths()).includes(detached));
+    await openSelectedRepository(detached);
     await expect($("strong=detached")).toBeDisplayed();
 
     const invalid = path.join(fixtureRoot, "not-a-repository");
@@ -154,8 +160,7 @@ describe("bundled desktop lifecycle", () => {
     const removed = path.join(fixtureRoot, "removed-repository");
     createRepository(removed);
     select(removed);
-    await openSelectedRepository();
-    await browser.waitUntil(async () => (await projectPaths()).includes(removed));
+    await openSelectedRepository(removed);
     rmSync(removed, { recursive: true });
     await browser.refresh();
     await expect($("strong=Worktrees unavailable")).toBeDisplayed();
@@ -173,7 +178,7 @@ describe("bundled desktop lifecycle", () => {
     }
     expect(existsSync(hookMarker)).toBe(false);
     select(large);
-    await openSelectedRepository();
+    await openSelectedRepository(large);
     await browser.waitUntil(async () => (await $$(".worktree-row")).length === 100);
     await expect($('[aria-label="Worktree pages"]')).toHaveText(expect.stringContaining("1-100 of 101"));
 
@@ -219,34 +224,26 @@ describe("bundled desktop lifecycle", () => {
     writeFileSync(path.join(worktree, ".gitignore"), "ignored.txt\n");
     writeFileSync(path.join(worktree, "ignored.txt"), "must not appear\n");
     select(repository);
-    await openSelectedRepository();
-    await $(".worktree-row").waitForDisplayed();
-    let row;
-    for (const item of await $$(".worktree-row")) {
-      if ((await item.getText()).includes("feature")) { row = item; break; }
-    }
-    assert.ok(row, "feature worktree row should be present");
-    await row.click();
+    await openSelectedRepository(repository);
+    const featureRow = await $('//button[contains(@class, "worktree-row")][.//strong[normalize-space()="feature"]]');
+    await expect(featureRow).toBeDisplayed();
+    await featureRow.click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
-    await browser.waitUntil(async () => (await $(".file-index").getText()).includes("feature.txt"));
-    const initialIndex = await $(".file-index").getText();
-    assert.match(initialIndex, /README\.md/);
-    assert.match(initialIndex, /untracked\.txt/);
-    assert.doesNotMatch(initialIndex, /ignored\.txt/);
+    await expect($("span=feature.txt")).toBeDisplayed();
+    await expect($("span=README.md")).toBeDisplayed();
+    await expect($("span=untracked.txt")).toBeDisplayed();
+    assert.equal(await $("span=ignored.txt").isExisting(), false);
     await $('button=Committed only').click();
-    await browser.waitUntil(async () => !(await $(".file-index").getText()).includes("untracked.txt"));
-    assert.doesNotMatch(await $(".file-index").getText(), /README\.md/);
+    await browser.waitUntil(async () => !await $("span=untracked.txt").isExisting());
+    assert.equal(await $("span=README.md").isExisting(), false);
     await $('button=All changes').click();
-    await browser.waitUntil(async () => (await $(".file-index").getText()).includes("untracked.txt"));
-    let file;
-    for (const item of await $$(".file-row")) {
-      if ((await item.getText()).includes("README.md")) { file = item; break; }
-    }
-    assert.ok(file, "tracked modification should be selectable");
-    await file.click();
-    await browser.waitUntil(async () => (await $(".patch-pane").getText()).includes("uncommitted"));
+    await expect($("span=untracked.txt")).toBeDisplayed();
+    const trackedFile = await $('//button[contains(@class, "file-row")][.//span[normalize-space()="README.md"]]');
+    await expect(trackedFile).toBeDisplayed();
+    await trackedFile.click();
+    await expect($('//code[contains(., "uncommitted")]')).toBeDisplayed();
     await $('select[aria-label="Review base"]').selectByAttribute("value", "other");
-    await browser.waitUntil(async () => (await $(".file-index").getText()).includes("other.txt"));
+    await expect($("span=other.txt")).toBeDisplayed();
     await expect($(".review-counts")).toHaveText(expect.stringContaining("files"));
   });
 });
