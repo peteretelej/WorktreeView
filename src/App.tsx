@@ -1,16 +1,22 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, ChevronRight, ChevronsLeft, CircleDot, Command, FileDiff, FolderGit2, GitBranch, HardDrive, Inbox, Search, Settings, X } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, ChevronsLeft, CircleDot, Command, FileDiff, FolderGit2, GitBranch, HardDrive, Inbox, Search, Settings, X } from "lucide-react";
 import "./App.css";
 
 type Worktree = { path: string; branch: string; head: string };
 type Repo = { path: string; name: string; worktrees: Worktree[] };
 type CommandError = { code: string; message: string };
 type SearchResult = { repo: Repo; worktree?: Worktree };
+type BranchInventory = { branches: string[]; default_base: string | null };
+type ChangedFile = { path: string; status: string; untracked: boolean };
+type ReviewIndex = { files: ChangedFile[]; additions: number; deletions: number };
+type FilePatch = { binary: boolean; text: string };
+type ReviewScope = "all" | "committed";
 
 const WORKTREE_PAGE_SIZE = 100;
 const SEARCH_PAGE_SIZE = 50;
+const HUNKS_PAGE_SIZE = 50;
 
 function errorMessage(error: unknown) {
   if (typeof error === "object" && error !== null && "code" in error) {
@@ -26,150 +32,55 @@ function errorMessage(error: unknown) {
   return "The repository operation failed.";
 }
 
+function shortToken(token: string) { return /^[0-9a-f]{40}$/i.test(token) ? token.slice(0, 7) : token; }
+function parseHunks(text: string) {
+  const lines = text.split("\n");
+  const hunks: string[][] = [];
+  let current: string[] | null = null;
+  for (const line of lines) {
+    if (line.startsWith("@@")) { current = [line]; hunks.push(current); }
+    else if (current) current.push(line);
+  }
+  return hunks;
+}
+
 function App() {
-  const [repos, setRepos] = useState<Repo[]>([]);
-  const [activeRepoPath, setActiveRepoPath] = useState("");
-  const [selectedWorktreePath, setSelectedWorktreePath] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [opening, setOpening] = useState(false);
-  const [loadError, setLoadError] = useState("");
-  const [operationError, setOperationError] = useState("");
-  const [repoErrors, setRepoErrors] = useState<Record<string, string>>({});
-  const [hydratingRepos, setHydratingRepos] = useState<Record<string, number>>({});
-  const [collapsed, setCollapsed] = useState(false);
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const [worktreePage, setWorktreePage] = useState(0);
-  const [searchPage, setSearchPage] = useState(0);
-  const paletteRef = useRef<HTMLDialogElement>(null);
-  const paletteOpenerRef = useRef<HTMLElement | null>(null);
+  const [repos, setRepos] = useState<Repo[]>([]); const [activeRepoPath, setActiveRepoPath] = useState(""); const [selectedWorktreePath, setSelectedWorktreePath] = useState("");
+  const [loading, setLoading] = useState(true); const [opening, setOpening] = useState(false); const [loadError, setLoadError] = useState(""); const [operationError, setOperationError] = useState(""); const [repoErrors, setRepoErrors] = useState<Record<string, string>>({}); const [hydratingRepos, setHydratingRepos] = useState<Record<string, number>>({});
+  const [collapsed, setCollapsed] = useState(false); const [paletteOpen, setPaletteOpen] = useState(false); const [query, setQuery] = useState(""); const [worktreePage, setWorktreePage] = useState(0); const [searchPage, setSearchPage] = useState(0);
+  const [reviewWorktree, setReviewWorktree] = useState<Worktree | null>(null); const [branches, setBranches] = useState<string[]>([]); const [base, setBase] = useState(""); const [scope, setScope] = useState<ReviewScope>("all"); const [reversed, setReversed] = useState(false); const [reviewIndex, setReviewIndex] = useState<ReviewIndex | null>(null); const [reviewLoading, setReviewLoading] = useState(false); const [selectedFile, setSelectedFile] = useState<ChangedFile | null>(null); const [patch, setPatch] = useState<FilePatch | null>(null); const [patchError, setPatchError] = useState(""); const [patchLoading, setPatchLoading] = useState(false); const [filePage, setFilePage] = useState(0); const [hunkPage, setHunkPage] = useState(0);
+  const paletteRef = useRef<HTMLDialogElement>(null); const paletteOpenerRef = useRef<HTMLElement | null>(null);
+  const activeRepo = repos.find((repo) => repo.path === activeRepoPath); const hydrating = Object.keys(hydratingRepos).length > 0; const activeRepoHydrating = activeRepo ? Boolean(hydratingRepos[activeRepo.path]) : false;
 
-  const activeRepo = repos.find((repo) => repo.path === activeRepoPath);
-  const selectedWorktree = activeRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath);
-
-  useEffect(() => {
-    let mounted = true;
-    async function load() {
-      try {
-        const loaded = await invoke<Repo[]>("list_repos");
-        if (!mounted) return;
-        setRepos(loaded);
-        setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? "");
-        setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1])));
-        setLoading(false);
-        for (let start = 0; start < loaded.length; start += 4) {
-          await Promise.all(loaded.slice(start, start + 4).map(async (repo) => {
-            try {
-              const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path });
-              if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item));
-            } catch (error) {
-              if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) }));
-            } finally {
-              if (mounted) setHydratingRepos((current) => {
-                const count = current[repo.path] ?? 0;
-                if (count > 1) return { ...current, [repo.path]: count - 1 };
-                const next = { ...current };
-                delete next[repo.path];
-                return next;
-              });
-            }
-          }));
-        }
-      } catch (error) {
-        if (mounted) { setLoadError(errorMessage(error)); setLoading(false); }
-      }
-    }
-    void load();
-    return () => { mounted = false; };
-  }, []);
-
-  useEffect(() => {
-    if (!activeRepo) { setSelectedWorktreePath(""); return; }
-    setSelectedWorktreePath((current) => activeRepo.worktrees.some((worktree) => worktree.path === current) ? current : activeRepo.worktrees[0]?.path ?? "");
-  }, [activeRepo]);
-
+  useEffect(() => { let mounted = true; async function load() { try { const loaded = await invoke<Repo[]>("list_repos"); if (!mounted) return; setRepos(loaded); setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? ""); setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1]))); setLoading(false); for (let start = 0; start < loaded.length; start += 4) await Promise.all(loaded.slice(start, start + 4).map(async (repo) => { try { const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path }); if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item)); } catch (error) { if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); } finally { if (mounted) setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } })); } catch (error) { if (mounted) { setLoadError(errorMessage(error)); setLoading(false); } } } void load(); return () => { mounted = false; }; }, []);
+  useEffect(() => { if (!activeRepo) { setSelectedWorktreePath(""); return; } setSelectedWorktreePath((current) => activeRepo.worktrees.some((worktree) => worktree.path === current) ? current : activeRepo.worktrees[0]?.path ?? ""); }, [activeRepo]);
   useEffect(() => { setWorktreePage(0); }, [activeRepoPath]);
-
-  useEffect(() => {
-    function handleKeyboard(event: KeyboardEvent) { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); paletteRef.current?.open ? closePalette() : openPalette(); } }
-    window.addEventListener("keydown", handleKeyboard); return () => window.removeEventListener("keydown", handleKeyboard);
-  }, []);
-
+  useEffect(() => { function handleKeyboard(event: KeyboardEvent) { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); paletteRef.current?.open ? closePalette() : openPalette(); } } window.addEventListener("keydown", handleKeyboard); return () => window.removeEventListener("keydown", handleKeyboard); }, []);
   useEffect(() => { const dialog = paletteRef.current; if (paletteOpen && dialog && !dialog.open) dialog.showModal(); }, [paletteOpen]);
 
   function openPalette(opener?: HTMLElement | null) { paletteOpenerRef.current = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null); setPaletteOpen(true); }
   function closePalette() { if (paletteRef.current?.open) paletteRef.current.close(); else handlePaletteClosed(); }
   function handlePaletteClosed() { setPaletteOpen(false); setQuery(""); setSearchPage(0); paletteOpenerRef.current?.focus(); paletteOpenerRef.current = null; }
-  function handlePaletteKeyDown(event: ReactKeyboardEvent<HTMLDialogElement>) {
-    if (event.key !== "Tab") return;
-    const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'));
-    const first = focusable[0], last = focusable[focusable.length - 1]; if (!first || !last) return;
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-  }
+  function handlePaletteKeyDown(event: ReactKeyboardEvent<HTMLDialogElement>) { if (event.key !== "Tab") return; const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])')); const first = focusable[0], last = focusable[focusable.length - 1]; if (!first || !last) return; if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); } }
+  async function openRepository() { if (opening) return; let selected: string | null; try { selected = import.meta.env.MODE === "e2e" && import.meta.env.VITE_E2E_PICKER_PATH === "/tmp/worktreeview-e2e-selection" ? "/tmp/worktreeview-e2e-selection" : await open({ directory: true, multiple: false }); } catch (error) { setOperationError(errorMessage(error)); return; } if (!selected || Array.isArray(selected)) return; setOpening(true); setOperationError(""); try { const repo = await invoke<Repo>("open_repo", { path: selected }); setRepos((current) => [repo, ...current.filter((item) => item.path !== repo.path)]); setActiveRepoPath(repo.path); setSelectedWorktreePath(""); setRepoErrors((current) => { const next = { ...current }; delete next[repo.path]; return next; }); setHydratingRepos((current) => ({ ...current, [repo.path]: (current[repo.path] ?? 0) + 1 })); try { const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path }); setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item)); } catch (error) { setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); } finally { setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } } catch (error) { setOperationError(errorMessage(error)); } finally { setOpening(false); } }
 
-  async function openRepository() {
-    if (opening) return;
-    let selected: string | null;
-    try {
-      selected = import.meta.env.MODE === "e2e" && import.meta.env.VITE_E2E_PICKER_PATH === "/tmp/worktreeview-e2e-selection"
-        ? "/tmp/worktreeview-e2e-selection"
-        : await open({ directory: true, multiple: false });
-    }
-    catch (error) { setOperationError(errorMessage(error)); return; }
-    if (!selected || Array.isArray(selected)) return;
-    setOpening(true); setOperationError("");
-    try {
-      const repo = await invoke<Repo>("open_repo", { path: selected });
-      setRepos((current) => [repo, ...current.filter((item) => item.path !== repo.path)]);
-      setActiveRepoPath(repo.path); setSelectedWorktreePath("");
-      setRepoErrors((current) => { const next = { ...current }; delete next[repo.path]; return next; });
-      setHydratingRepos((current) => ({ ...current, [repo.path]: (current[repo.path] ?? 0) + 1 }));
-      try {
-        const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path });
-        setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item));
-      } catch (error) { setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); }
-      finally {
-        setHydratingRepos((current) => {
-          const count = current[repo.path] ?? 0;
-          if (count > 1) return { ...current, [repo.path]: count - 1 };
-          const next = { ...current }; delete next[repo.path]; return next;
-        });
-      }
-    } catch (error) { setOperationError(errorMessage(error)); }
-    finally { setOpening(false); }
-  }
+  async function openReview(worktree: Worktree) { setReviewWorktree(worktree); setReviewIndex(null); setSelectedFile(null); setPatch(null); setOperationError(""); setReviewLoading(true); try { const inventory = await invoke<BranchInventory>("list_branches", { path: worktree.path, worktree_branch: worktree.branch }); setBranches(inventory.branches); if (!inventory.default_base) { setBase(""); return; } setBase(inventory.default_base); await fetchIndex(worktree, inventory.default_base, scope, reversed); } catch (error) { setOperationError(errorMessage(error)); } finally { setReviewLoading(false); } }
+  async function fetchIndex(worktree: Worktree, nextBase: string, nextScope: ReviewScope, nextReversed: boolean) { setReviewLoading(true); setReviewIndex(null); setSelectedFile(null); setPatch(null); setFilePage(0); try { const index = await invoke<ReviewIndex>("list_review_changes", { path: worktree.path, base: nextBase, committed_only: nextScope === "committed", reversed: nextReversed }); setReviewIndex(index); } catch (error) { setOperationError(errorMessage(error)); } finally { setReviewLoading(false); } }
+  function changeReviewSetting(nextBase: string, nextScope = scope, nextReversed = reversed) { if (!reviewWorktree || !nextBase) return; setBase(nextBase); setScope(nextScope); setReversed(nextReversed); void fetchIndex(reviewWorktree, nextBase, nextScope, nextReversed); }
+  async function selectFile(file: ChangedFile) { if (!reviewWorktree || !base) return; setSelectedFile(file); setPatch(null); setPatchError(""); setPatchLoading(true); setHunkPage(0); try { setPatch(await invoke<FilePatch>("read_review_patch", { path: reviewWorktree.path, base, committed_only: scope === "committed", reversed, file: file.path, untracked: file.untracked })); } catch (error) { const code = typeof error === "object" && error !== null && "code" in error ? String((error as CommandError).code) : ""; if (code === "git_output_too_large") setPatchError("This file's patch exceeds the 4 MiB output bound and was not rendered."); else setOperationError(errorMessage(error)); } finally { setPatchLoading(false); } }
 
-  const search = query.trim().toLowerCase();
-  const matchingResults: SearchResult[] = search ? repos.flatMap((repo) => {
-    if (`${repo.name} ${repo.path}`.toLowerCase().includes(search)) return [{ repo }];
-    return repo.worktrees.filter((worktree) => `${worktree.branch} ${worktree.path} ${worktree.head}`.toLowerCase().includes(search)).map((worktree) => ({ repo, worktree }));
-  }) : repos.map((repo) => ({ repo }));
-  const hydrating = Object.keys(hydratingRepos).length > 0;
-  const activeRepoHydrating = activeRepo ? Boolean(hydratingRepos[activeRepo.path]) : false;
-  const statusMessage = loadError || operationError || (loading ? "Loading repositories..." : hydrating ? "Loading worktrees..." : "");
-  const worktreePageCount = Math.max(1, Math.ceil((activeRepo?.worktrees.length ?? 0) / WORKTREE_PAGE_SIZE));
-  const visibleWorktreePage = Math.min(worktreePage, worktreePageCount - 1);
-  const visibleWorktrees = activeRepo?.worktrees.slice(visibleWorktreePage * WORKTREE_PAGE_SIZE, (visibleWorktreePage + 1) * WORKTREE_PAGE_SIZE) ?? [];
-  const searchPageCount = Math.max(1, Math.ceil(matchingResults.length / SEARCH_PAGE_SIZE));
-  const visibleSearchPage = Math.min(searchPage, searchPageCount - 1);
-  const visibleSearchResults = matchingResults.slice(visibleSearchPage * SEARCH_PAGE_SIZE, (visibleSearchPage + 1) * SEARCH_PAGE_SIZE);
+  const search = query.trim().toLowerCase(); const matchingResults: SearchResult[] = search ? repos.flatMap((repo) => `${repo.name} ${repo.path}`.toLowerCase().includes(search) ? [{ repo }] : repo.worktrees.filter((worktree) => `${worktree.branch} ${worktree.path} ${worktree.head}`.toLowerCase().includes(search)).map((worktree) => ({ repo, worktree }))) : repos.map((repo) => ({ repo }));
+  const statusMessage = loadError || operationError || (loading ? "Loading repositories..." : hydrating ? "Loading worktrees..." : ""); const worktreePageCount = Math.max(1, Math.ceil((activeRepo?.worktrees.length ?? 0) / WORKTREE_PAGE_SIZE)); const visibleWorktreePage = Math.min(worktreePage, worktreePageCount - 1); const visibleWorktrees = activeRepo?.worktrees.slice(visibleWorktreePage * WORKTREE_PAGE_SIZE, (visibleWorktreePage + 1) * WORKTREE_PAGE_SIZE) ?? []; const searchPageCount = Math.max(1, Math.ceil(matchingResults.length / SEARCH_PAGE_SIZE)); const visibleSearchPage = Math.min(searchPage, searchPageCount - 1); const visibleSearchResults = matchingResults.slice(visibleSearchPage * SEARCH_PAGE_SIZE, (visibleSearchPage + 1) * SEARCH_PAGE_SIZE);
 
-  return <div className={`app-shell ${collapsed ? "nav-collapsed" : ""}`} aria-busy={loading || opening || hydrating}>
-    <aside className="sidebar">
-      <div className="brand-row"><span className="brand-mark">wv</span><span className="brand-name">WorktreeView</span><button className="icon-button collapse-button" type="button" aria-label={collapsed ? "Expand project navigator" : "Collapse project navigator"} onClick={() => setCollapsed((value) => !value)}>{collapsed ? <ChevronRight size={16} /> : <ChevronsLeft size={16} />}</button></div>
-      <div className="nav-tabs" aria-label="Workspace views"><button className="nav-tab active" type="button" aria-label="Projects" aria-current="page"><FolderGit2 size={15} /><span>Projects</span></button><button className="nav-tab" type="button" aria-label="Attention, unavailable" disabled><Inbox size={15} /><span>Attention</span></button></div>
-      <button className="search-trigger" type="button" aria-label="Find repositories and worktrees" onClick={(event) => openPalette(event.currentTarget)}><Search size={14} /><span>Find repositories and worktrees</span><kbd>Ctrl K</kbd></button>
-      <nav className="project-list" aria-label="Repositories"><div className="nav-section-label">Repositories</div>{repos.map((repo) => <button className={`project-row ${repo.path === activeRepoPath ? "active" : ""}`} key={repo.path} type="button" title={repo.path} aria-current={repo.path === activeRepoPath ? "true" : undefined} onClick={() => setActiveRepoPath(repo.path)}>{repo.path === activeRepoPath ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<span className="project-avatar">{repo.name.slice(0, 2)}</span><span className="project-copy"><strong>{repo.name}</strong><small>{repo.path}</small></span></button>)}</nav>
-      <button className="open-repository-button" type="button" aria-label="Open repository" title="Open repository" onClick={() => void openRepository()} disabled={opening}><FolderGit2 size={14} /><span>Open repository...</span></button><div className="sidebar-footer"><HardDrive size={13} /><span>read-only / local</span></div>
-    </aside>
-    <section className="workspace"><p className="visually-hidden" id="unavailable-features">Attention, Settings, and Open review are unavailable.</p><div className="live-error" role="status" aria-live="polite">{statusMessage}</div>
-      <header className="topbar"><div className="breadcrumb"><span>Repositories</span><span>/</span><strong>{activeRepo?.name ?? "No repository"}</strong></div><div className="topbar-actions"><span className="safety-label">Read-only</span><button className="search-button" type="button" aria-label="Find repositories and worktrees" onClick={(event) => openPalette(event.currentTarget)}><Command size={14} /> <span>Search</span> <kbd>Ctrl K</kbd></button><button className="icon-button" type="button" aria-label="Open settings, unavailable" aria-describedby="unavailable-features" disabled><Settings size={16} /></button></div></header>
-       <main className="content"><section className="inbox-pane" aria-labelledby="inbox-heading" aria-busy={loading || activeRepoHydrating}>{operationError && <div className="operation-error">{operationError}</div>}<div className="section-heading"><div><p className="eyebrow">Repository</p><h1 id="inbox-heading">Worktrees</h1></div><span className="path-label">{activeRepo?.path}</span></div>
-         {loading ? <div className="empty-state"><CircleDot size={24} /><strong>Loading repositories...</strong><span>Reading saved repositories.</span></div> : loadError ? <div className="empty-state"><CircleDot size={24} /><strong>Repositories could not be loaded</strong><span>{loadError}</span></div> : !activeRepo ? <div className="empty-state"><FolderGit2 size={24} /><strong>No repositories</strong><span>Open a local Git folder to begin.</span><button className="secondary-button" type="button" onClick={() => void openRepository()} disabled={opening}>Open repository...</button></div> : activeRepoHydrating ? <div className="empty-state"><CircleDot size={24} /><strong>Loading worktrees...</strong><span>Reading live worktree identity.</span></div> : repoErrors[activeRepo.path] ? <div className="empty-state"><CircleDot size={24} /><strong>Worktrees unavailable</strong><span>{repoErrors[activeRepo.path]}</span></div> : activeRepo.worktrees.length === 0 ? <div className="empty-state"><CircleDot size={24} /><strong>No worktrees</strong><span>This repository has no linked worktrees.</span></div> : <><div className="table-header" aria-hidden="true"><span>Branch</span><span>Path</span><span>HEAD</span></div><div className="worktree-list">{visibleWorktrees.map((worktree) => <button className={`worktree-row ${worktree.path === selectedWorktreePath ? "selected" : ""}`} key={worktree.path} type="button" aria-pressed={worktree.path === selectedWorktreePath} onClick={() => setSelectedWorktreePath(worktree.path)}><span className="branch-cell"><span className="branch-title"><GitBranch size={14} /><strong>{worktree.branch}</strong></span><small>{worktree.path}</small></span><span className="worktree-path">{worktree.path}</span><code className="head-cell">{worktree.head}</code></button>)}</div>{worktreePageCount > 1 && <div className="page-controls" role="group" aria-label="Worktree pages"><button type="button" disabled={visibleWorktreePage === 0} onClick={() => setWorktreePage((page) => Math.max(0, page - 1))}>Previous</button><span>{visibleWorktreePage * WORKTREE_PAGE_SIZE + 1}-{Math.min((visibleWorktreePage + 1) * WORKTREE_PAGE_SIZE, activeRepo.worktrees.length)} of {activeRepo.worktrees.length}</span><button type="button" disabled={visibleWorktreePage === worktreePageCount - 1} onClick={() => setWorktreePage((page) => Math.min(worktreePageCount - 1, page + 1))}>Next</button></div>}</>}
-      </section><aside className="detail-pane" aria-label="Selected worktree details" aria-busy={activeRepoHydrating}>{selectedWorktree ? <><div className="detail-heading"><div className="detail-icon"><FileDiff size={18} /></div><div><p className="eyebrow">Selected worktree</p><h2>{selectedWorktree.branch}</h2></div></div><div className="detail-path"><span>Worktree path</span><code>{selectedWorktree.path}</code></div><div className="detail-path"><span>HEAD</span><code>{selectedWorktree.head}</code></div><button className="primary-button" type="button" aria-describedby="unavailable-features" disabled>Open review <ChevronRight size={15} /></button></> : activeRepoHydrating ? <div className="empty-state detail-empty"><CircleDot size={24} /><strong>Loading worktrees...</strong><span>Worktree identity will appear when ready.</span></div> : <div className="empty-state detail-empty"><FileDiff size={24} /><strong>Select a worktree</strong><span>Worktree identity will appear here.</span></div>}</aside></main>
-    </section>
-    {paletteOpen && <dialog className="palette-backdrop" ref={paletteRef} aria-label="Find repositories and worktrees" onClose={handlePaletteClosed} onKeyDown={handlePaletteKeyDown} onMouseDown={(event) => { if (event.target === event.currentTarget) closePalette(); }}><div className="palette" onMouseDown={(event) => event.stopPropagation()}><div className="palette-input-row"><Search size={17} /><input autoFocus value={query} onChange={(event) => { setQuery(event.currentTarget.value); setSearchPage(0); }} placeholder="Find repositories, branches, and worktrees" /><button type="button" aria-label="Close search" onClick={closePalette}><X size={16} /></button></div><div className="palette-results"><div className="nav-section-label">Repositories and worktrees</div>{visibleSearchResults.map((result) => <button key={`${result.repo.path}:${result.worktree?.path ?? "repo"}`} type="button" onClick={() => { setActiveRepoPath(result.repo.path); if (result.worktree) setSelectedWorktreePath(result.worktree.path); closePalette(); }}>{result.worktree ? <GitBranch size={16} /> : <FolderGit2 size={16} />}<span><strong>{result.worktree?.branch ?? result.repo.name}</strong><small>{result.worktree?.path ?? result.repo.path}</small></span><kbd>Enter</kbd></button>)}{matchingResults.length === 0 && <p>No repositories or worktrees match "{query}".</p>}{searchPageCount > 1 && <div className="page-controls" role="group" aria-label="Search result pages"><button type="button" disabled={visibleSearchPage === 0} onClick={() => setSearchPage((page) => Math.max(0, page - 1))}>Previous</button><span>{visibleSearchPage * SEARCH_PAGE_SIZE + 1}-{Math.min((visibleSearchPage + 1) * SEARCH_PAGE_SIZE, matchingResults.length)} of {matchingResults.length}</span><button type="button" disabled={visibleSearchPage === searchPageCount - 1} onClick={() => setSearchPage((page) => Math.min(searchPageCount - 1, page + 1))}>Next</button></div>}</div></div></dialog>}
-  </div>;
+  return <div className={`app-shell ${collapsed ? "nav-collapsed" : ""}`} aria-busy={loading || opening || hydrating}><aside className="sidebar"><div className="brand-row"><span className="brand-mark">wv</span><span className="brand-name">WorktreeView</span><button className="icon-button collapse-button" type="button" aria-label={collapsed ? "Expand project navigator" : "Collapse project navigator"} onClick={() => setCollapsed((value) => !value)}>{collapsed ? <ChevronRight size={16} /> : <ChevronsLeft size={16} />}</button></div><div className="nav-tabs" aria-label="Workspace views"><button className="nav-tab active" type="button" aria-label="Projects" aria-current="page"><FolderGit2 size={15} /><span>Projects</span></button><button className="nav-tab" type="button" aria-label="Attention, unavailable" disabled><Inbox size={15} /><span>Attention</span></button></div><button className="search-trigger" type="button" aria-label="Find repositories and worktrees" onClick={(event) => openPalette(event.currentTarget)}><Search size={14} /><span>Find repositories and worktrees</span><kbd>Ctrl K</kbd></button><nav className="project-list" aria-label="Repositories"><div className="nav-section-label">Repositories</div>{repos.map((repo) => <button className={`project-row ${repo.path === activeRepoPath ? "active" : ""}`} key={repo.path} type="button" title={repo.path} aria-current={repo.path === activeRepoPath ? "true" : undefined} onClick={() => { setActiveRepoPath(repo.path); setReviewWorktree(null); }}>{repo.path === activeRepoPath ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<span className="project-avatar">{repo.name.slice(0, 2)}</span><span className="project-copy"><strong>{repo.name}</strong><small>{repo.path}</small></span></button>)}</nav><button className="open-repository-button" type="button" aria-label="Open repository" title="Open repository" onClick={() => void openRepository()} disabled={opening}><FolderGit2 size={14} /><span>Open repository...</span></button><div className="sidebar-footer"><HardDrive size={13} /><span>read-only / local</span></div></aside><section className="workspace"><p className="visually-hidden" id="unavailable-features">Attention and Settings are unavailable.</p><div className="live-error" role="status" aria-live="polite">{statusMessage}</div><header className="topbar"><div className="breadcrumb"><span>Repositories</span><span>/</span><strong>{activeRepo?.name ?? "No repository"}</strong>{reviewWorktree && <><span>/</span><strong>{reviewWorktree.branch}</strong></>}</div><div className="topbar-actions"><span className="safety-label">Read-only</span><button className="search-button" type="button" aria-label="Find repositories and worktrees" onClick={(event) => openPalette(event.currentTarget)}><Command size={14} /> <span>Search</span> <kbd>Ctrl K</kbd></button><button className="icon-button" type="button" aria-label="Open settings, unavailable" aria-describedby="unavailable-features" disabled><Settings size={16} /></button></div></header><main className="content">{reviewWorktree ? <ReviewView worktree={reviewWorktree} branches={branches} base={base} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} filePage={filePage} hunkPage={hunkPage} onBack={() => setReviewWorktree(null)} onBaseChange={(value) => changeReviewSetting(value)} onScopeChange={(value) => changeReviewSetting(base, value)} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFilePage={setFilePage} onHunkPage={setHunkPage} onFile={selectFile} /> : <section className="inbox-pane" aria-labelledby="inbox-heading" aria-busy={loading || activeRepoHydrating}>{operationError && <div className="operation-error">{operationError}</div>}<div className="section-heading"><div><p className="eyebrow">Repository</p><h1 id="inbox-heading">Worktrees</h1></div><span className="path-label">{activeRepo?.path}</span></div>{loading ? <Empty icon={<CircleDot size={24} />} title="Loading repositories..." detail="Reading saved repositories." /> : loadError ? <Empty icon={<CircleDot size={24} />} title="Repositories could not be loaded" detail={loadError} /> : !activeRepo ? <Empty icon={<FolderGit2 size={24} />} title="No repositories" detail="Open a local Git folder to begin." action={<button className="secondary-button" type="button" onClick={() => void openRepository()} disabled={opening}>Open repository...</button>} /> : activeRepoHydrating ? <Empty icon={<CircleDot size={24} />} title="Loading worktrees..." detail="Reading live worktree identity." /> : repoErrors[activeRepo.path] ? <Empty icon={<CircleDot size={24} />} title="Worktrees unavailable" detail={repoErrors[activeRepo.path]} /> : activeRepo.worktrees.length === 0 ? <Empty icon={<CircleDot size={24} />} title="No worktrees" detail="This repository has no linked worktrees." /> : <><div className="table-header" aria-hidden="true"><span>Branch</span><span>Path</span><span>HEAD</span></div><div className="worktree-list">{visibleWorktrees.map((worktree) => <button className={`worktree-row ${worktree.path === selectedWorktreePath ? "selected" : ""}`} key={worktree.path} type="button" aria-pressed={worktree.path === selectedWorktreePath} onClick={() => { setSelectedWorktreePath(worktree.path); void openReview(worktree); }}><span className="branch-cell"><span className="branch-title"><GitBranch size={14} /><strong>{worktree.branch}</strong></span><small>{worktree.path}</small></span><span className="worktree-path">{worktree.path}</span><code className="head-cell">{worktree.head}</code></button>)}</div>{worktreePageCount > 1 && <Pager label="Worktree pages" page={visibleWorktreePage} pages={worktreePageCount} total={activeRepo.worktrees.length} size={WORKTREE_PAGE_SIZE} onPage={setWorktreePage} />}</>}</section>}</main></section>{paletteOpen && <dialog className="palette-backdrop" ref={paletteRef} aria-label="Find repositories and worktrees" onClose={handlePaletteClosed} onKeyDown={handlePaletteKeyDown} onMouseDown={(event) => { if (event.target === event.currentTarget) closePalette(); }}><div className="palette" onMouseDown={(event) => event.stopPropagation()}><div className="palette-input-row"><Search size={17} /><input autoFocus value={query} onChange={(event) => { setQuery(event.currentTarget.value); setSearchPage(0); }} placeholder="Find repositories, branches, and worktrees" /><button type="button" aria-label="Close search" onClick={closePalette}><X size={16} /></button></div><div className="palette-results"><div className="nav-section-label">Repositories and worktrees</div>{visibleSearchResults.map((result) => <button key={`${result.repo.path}:${result.worktree?.path ?? "repo"}`} type="button" onClick={() => { setActiveRepoPath(result.repo.path); if (result.worktree) { setSelectedWorktreePath(result.worktree.path); void openReview(result.worktree); } closePalette(); }}>{result.worktree ? <GitBranch size={16} /> : <FolderGit2 size={16} />}<span><strong>{result.worktree?.branch ?? result.repo.name}</strong><small>{result.worktree?.path ?? result.repo.path}</small></span><kbd>Enter</kbd></button>)}{matchingResults.length === 0 && <p>No repositories or worktrees match "{query}".</p>}{searchPageCount > 1 && <Pager label="Search result pages" page={visibleSearchPage} pages={searchPageCount} total={matchingResults.length} size={SEARCH_PAGE_SIZE} onPage={setSearchPage} />}</div></div></dialog>}</div>;
+}
+
+function Empty({ icon, title, detail, action }: { icon: React.ReactNode; title: string; detail: string; action?: React.ReactNode }) { return <div className="empty-state">{icon}<strong>{title}</strong><span>{detail}</span>{action}</div>; }
+function Pager({ label, page, pages, total, size, onPage }: { label: string; page: number; pages: number; total: number; size: number; onPage: (page: number) => void }) { return <div className="page-controls" role="group" aria-label={label}><button type="button" disabled={page === 0} onClick={() => onPage(Math.max(0, page - 1))}>Previous</button><span>{page * size + 1}-{Math.min((page + 1) * size, total)} of {total}</span><button type="button" disabled={page === pages - 1} onClick={() => onPage(Math.min(pages - 1, page + 1))}>Next</button></div>; }
+
+function ReviewView({ worktree, branches, base, scope, reversed, index, loading, selectedFile, patch, patchError, patchLoading, filePage, hunkPage, onBack, onBaseChange, onScopeChange, onReverse, onFilePage, onHunkPage, onFile }: { worktree: Worktree; branches: string[]; base: string; scope: ReviewScope; reversed: boolean; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; filePage: number; hunkPage: number; onBack: () => void; onBaseChange: (value: string) => void; onScopeChange: (value: ReviewScope) => void; onReverse: () => void; onFilePage: (page: number) => void; onHunkPage: (page: number) => void; onFile: (file: ChangedFile) => void }) {
+  const files = index?.files ?? []; const pages = Math.max(1, Math.ceil(files.length / WORKTREE_PAGE_SIZE)); const page = Math.min(filePage, pages - 1); const visibleFiles = files.slice(page * WORKTREE_PAGE_SIZE, (page + 1) * WORKTREE_PAGE_SIZE); const hunks = patch && !patch.binary ? parseHunks(patch.text) : []; const hunkPages = Math.max(1, Math.ceil(hunks.length / HUNKS_PAGE_SIZE)); const visibleHunks = hunks.slice(Math.min(hunkPage, hunkPages - 1) * HUNKS_PAGE_SIZE, (Math.min(hunkPage, hunkPages - 1) + 1) * HUNKS_PAGE_SIZE);
+  return <section className="review-view" aria-label="Code review"><header className="review-header"><div className="review-heading"><button className="back-button" type="button" onClick={onBack}><ArrowLeft size={15} /> Worktrees</button><p className="eyebrow">Review</p><h1>{worktree.branch}</h1><div className="review-meta"><code>{worktree.path}</code><code>HEAD {worktree.head}</code></div></div><div className="review-controls"><label>Base<select aria-label="Review base" value={branches.includes(base) ? base : ""} onChange={(event) => onBaseChange(event.currentTarget.value)}><option value="">{base ? shortToken(base) : "Choose base"}</option>{branches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}</select></label><button className="swap-button" type="button" aria-label="Swap review direction" title="Swap review direction" onClick={onReverse}>↔ <code>{reversed ? "HEAD" : shortToken(base)}...{reversed ? shortToken(base) : "HEAD"}</code></button><div className="scope-toggle" role="group" aria-label="Review scope"><button className={scope === "all" ? "active" : ""} type="button" onClick={() => onScopeChange("all")}>All changes</button><button className={scope === "committed" ? "active" : ""} type="button" onClick={() => onScopeChange("committed")}>Committed only</button></div></div><div className="review-counts"><code>{index ? `${files.length} files, +${index.additions} -${index.deletions}` : "Loading review index..."}</code></div></header>{!base && !loading ? <Empty icon={<GitBranch size={24} />} title="Choose a base branch to review" detail="This worktree has no merge-base default." action={<label className="base-prompt">Base<select aria-label="Choose review base" value="" onChange={(event) => onBaseChange(event.currentTarget.value)}><option value="">Choose base</option>{branches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}</select></label>} /> : <div className="review-body"><aside className="file-index" aria-label="Changed files"><div className="pane-heading"><strong>Changed files</strong><span>{files.length}</span></div>{loading ? <div className="index-skeleton">{Array.from({ length: 7 }, (_, i) => <i key={i} />)}</div> : files.length === 0 ? <Empty icon={<CircleDot size={20} />} title={`No changes vs ${shortToken(base)}`} detail="Try a different base branch." /> : <><div className="file-list" role="listbox" aria-label="Changed files">{visibleFiles.map((file) => <button key={file.path} type="button" role="option" aria-selected={selectedFile?.path === file.path} className={`file-row status-${file.status.toLowerCase()} ${selectedFile?.path === file.path ? "selected" : ""}`} onClick={() => onFile(file)} onKeyDown={(event) => { const current = visibleFiles.findIndex((item) => item.path === file.path); if (event.key === "ArrowDown" && current < visibleFiles.length - 1) { event.preventDefault(); (event.currentTarget.nextElementSibling as HTMLElement)?.focus(); } if (event.key === "ArrowUp" && current > 0) { event.preventDefault(); (event.currentTarget.previousElementSibling as HTMLElement)?.focus(); } if (event.key === "Enter") onFile(file); }}><b>{file.status}</b><span>{file.path}</span></button>)}</div>{pages > 1 && <Pager label="Changed file pages" page={page} pages={pages} total={files.length} size={WORKTREE_PAGE_SIZE} onPage={onFilePage} />}</>}</aside><section className="patch-pane" aria-label="File patch">{selectedFile && <div className="patch-heading"><code>{selectedFile.path}</code><span>{selectedFile.status}</span></div>}{patchLoading ? <div className="patch-skeleton" aria-label="Loading patch"><i /><i /><i /><i /></div> : patchError ? <Empty icon={<FileDiff size={24} />} title="Patch not rendered" detail={patchError} /> : !selectedFile ? <Empty icon={<FileDiff size={24} />} title="Select a changed file" detail="The patch is rendered one file at a time." /> : patch?.binary ? <Empty icon={<FileDiff size={24} />} title="Binary file changed" detail={selectedFile.path} /> : patch?.text === "" ? <Empty icon={<CircleDot size={24} />} title="No changes in this file" detail="The selected file has no renderable patch." /> : <><div className="hunk-list">{visibleHunks.map((hunk, hunkIndex) => <div className="hunk" key={`${hunk[0]}-${hunkIndex}`}><div className="hunk-header">{hunk[0]}</div>{hunk.slice(1).map((line, lineIndex) => <div className={`diff-line ${line.startsWith("+") && !line.startsWith("+++") ? "addition" : line.startsWith("-") && !line.startsWith("---") ? "deletion" : ""}`} key={`${lineIndex}-${line}`}><span className="line-number">{lineIndex + 1}</span><code>{line || " "}</code></div>)}</div>)}</div>{hunkPages > 1 && <Pager label="Patch hunk pages" page={Math.min(hunkPage, hunkPages - 1)} pages={hunkPages} total={hunks.length} size={HUNKS_PAGE_SIZE} onPage={onHunkPage} />}</>}</section></div>}</section>;
 }
 
 export default App;

@@ -195,4 +195,58 @@ describe("bundled desktop lifecycle", () => {
     expect(lstatSync("/artifacts/worktreeview.png").isFile()).toBe(true);
     expect(readlinkSync(selector)).toBe(large);
   });
+
+  it("opens a worktree review and changes scope and base", async () => {
+    const repository = path.join(fixtureRoot, "review-repository");
+    createRepository(repository);
+    writeFileSync(path.join(repository, "README.md"), "main\n");
+    git(["add", "README.md"], repository);
+    git(["-c", "user.name=WorktreeView E2E", "-c", "user.email=e2e@example.invalid", "commit", "-q", "-m", "main file"], repository);
+    git(["checkout", "-q", "-b", "feature"], repository);
+    writeFileSync(path.join(repository, "feature.txt"), "feature committed\n");
+    git(["add", "feature.txt"], repository);
+    git(["-c", "user.name=WorktreeView E2E", "-c", "user.email=e2e@example.invalid", "commit", "-q", "-m", "feature"], repository);
+    git(["checkout", "-q", "main"], repository);
+    git(["checkout", "-q", "-b", "other"], repository);
+    writeFileSync(path.join(repository, "other.txt"), "other committed\n");
+    git(["add", "other.txt"], repository);
+    git(["-c", "user.name=WorktreeView E2E", "-c", "user.email=e2e@example.invalid", "commit", "-q", "-m", "other"], repository);
+    git(["checkout", "-q", "main"], repository);
+    const worktree = path.join(fixtureRoot, "review-feature");
+    git(["worktree", "add", "-q", worktree, "feature"], repository);
+    writeFileSync(path.join(worktree, "README.md"), "main\nuncommitted\n");
+    writeFileSync(path.join(worktree, "untracked.txt"), "untracked\n");
+    writeFileSync(path.join(worktree, ".gitignore"), "ignored.txt\n");
+    writeFileSync(path.join(worktree, "ignored.txt"), "must not appear\n");
+    select(repository);
+    await openSelectedRepository();
+    await $(".worktree-row").waitForDisplayed();
+    let row;
+    for (const item of await $$(".worktree-row")) {
+      if ((await item.getText()).includes("feature")) { row = item; break; }
+    }
+    assert.ok(row, "feature worktree row should be present");
+    await row.click();
+    await expect($('section[aria-label="Code review"]')).toBeDisplayed();
+    await browser.waitUntil(async () => (await $(".file-index").getText()).includes("feature.txt"));
+    const initialIndex = await $(".file-index").getText();
+    assert.match(initialIndex, /README\.md/);
+    assert.match(initialIndex, /untracked\.txt/);
+    assert.doesNotMatch(initialIndex, /ignored\.txt/);
+    await $('button=Committed only').click();
+    await browser.waitUntil(async () => !(await $(".file-index").getText()).includes("untracked.txt"));
+    assert.doesNotMatch(await $(".file-index").getText(), /README\.md/);
+    await $('button=All changes').click();
+    await browser.waitUntil(async () => (await $(".file-index").getText()).includes("untracked.txt"));
+    let file;
+    for (const item of await $$(".file-row")) {
+      if ((await item.getText()).includes("README.md")) { file = item; break; }
+    }
+    assert.ok(file, "tracked modification should be selectable");
+    await file.click();
+    await browser.waitUntil(async () => (await $(".patch-pane").getText()).includes("uncommitted"));
+    await $('select[aria-label="Review base"]').selectByAttribute("value", "other");
+    await browser.waitUntil(async () => (await $(".file-index").getText()).includes("other.txt"));
+    await expect($(".review-counts")).toHaveText(expect.stringContaining("files"));
+  });
 });
