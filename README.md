@@ -15,26 +15,38 @@ Install the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites
 before desktop development. On Debian/Ubuntu, these include
 `libwebkit2gtk-4.1-dev`, `build-essential`, `curl`, `wget`, `file`,
 `libxdo-dev`, `libssl-dev`, `libayatana-appindicator3-dev`, and `librsvg2-dev`.
+On Windows, use the MSVC Rust toolchain and install Visual Studio Build Tools
+with the Desktop development with C++ workload. WebView2 is included with
+current Windows releases, and Git for Windows must be available on `PATH`.
 
-Select the pinned Node.js toolchain and bootstrap a fresh checkout:
+Select the pinned Node.js toolchain and bootstrap a fresh checkout. `npm ci` is
+recommended for a reproducible clean install; `npm install` is also valid for
+normal local development.
 
 ```sh
 nvm use
 npm ci
 ```
 
-Start the frontend:
+Start the native desktop app. This starts Vite, compiles the Rust backend, and
+opens the Tauri window:
 
 ```sh
 npm run dev
 ```
 
-Open <http://localhost:1420/> to reach it. To serve behind a reverse proxy (e.g.
-a tailnet route or custom domain), set `WORKTREEVIEW_DEV_HOST` to the hostname
-Vite should accept:
+For browser-only frontend work, start Vite without the native backend:
 
 ```sh
-WORKTREEVIEW_DEV_HOST=worktreeview.example.com npm run dev
+npm run dev:web
+```
+
+Open <http://localhost:1420/> to reach the browser frontend. To serve behind a
+reverse proxy (e.g. a tailnet route or custom domain), set
+`WORKTREEVIEW_DEV_HOST` to the hostname Vite should accept:
+
+```sh
+WORKTREEVIEW_DEV_HOST=worktreeview.example.com npm run dev:web
 ```
 
 Port 1420 is fixed. On Linux, free a stale server with `fuser -k 1420/tcp`, or
@@ -47,16 +59,14 @@ Use the Tauri doctor to inspect the local environment:
 npm run tauri info
 ```
 
-The desktop shell requires a display and runs on a desktop machine, not the
-headless lab host:
+Build the native application and platform bundles:
 
 ```sh
-npm run check
 npm run build
-npm run tauri dev
 ```
 
-The frontend build and Rust checks can run without launching a desktop window.
+The desktop development command requires a display. Frontend-only checks and
+builds can run on a headless host with `npm run check` and `npm run build:web`.
 
 ### Linux desktop testing
 
@@ -82,7 +92,7 @@ cache. The complete inner deadline is 42 minutes 40 seconds; CI allows 43 minute
 for the command so runner-owned cleanup and evidence finalization finish first.
 
 The frontend preview remains useful for presentation work, but it is not native
-desktop validation. Use `npm run tauri dev` on a display-capable development
+desktop validation. Use `npm run dev` on a display-capable development
 machine. GitHub Actions runs the same desktop test command only for manual
 dispatches and published releases, and retains failure diagnostics for 14 days.
 

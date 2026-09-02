@@ -39,7 +39,8 @@ DOM.
 ```sh
 npm install
 npm run check
-npm run build
+npm run build:web
 cargo check --manifest-path src-tauri/Cargo.toml
-npm run tauri dev
+npm run dev
+npm run build
 ```

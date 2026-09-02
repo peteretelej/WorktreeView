@@ -18,9 +18,11 @@
     }
   },
   "scripts": {
-    "dev": "vite",
-    "dev:lab": "fuser -k 1420/tcp 2>/dev/null; npm run dev",
-    "build": "npm run check && vite build",
+    "dev": "tauri dev",
+    "dev:web": "vite",
+    "dev:lab": "fuser -k 1420/tcp 2>/dev/null; npm run dev:web",
+    "build": "tauri build",
+    "build:web": "npm run check && vite build",
     "build:e2e": "npm run check && vite build --mode e2e",
     "check": "tsc --noEmit && tsc -p tsconfig.node.json",
     "preview": "vite preview",
