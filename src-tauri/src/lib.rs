@@ -40,8 +40,10 @@ pub struct Worktree {
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
-pub struct BranchInventory {
-    branches: Vec<String>,
+pub struct RefInventory {
+    heads: Vec<String>,
+    remotes: Vec<String>,
+    tags: Vec<String>,
     default_base: Option<String>,
 }
 
@@ -57,6 +59,8 @@ pub struct ReviewIndex {
     files: Vec<ChangedFile>,
     additions: i64,
     deletions: i64,
+    base_sha: String,
+    target_sha: String,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -359,6 +363,53 @@ fn validate_untracked_combination(
         ));
     }
     Ok(())
+}
+
+fn validate_scope_combination(
+    effective_head_ref: &str,
+    committed_only: bool,
+) -> Result<(), CommandError> {
+    if !committed_only && effective_head_ref != "HEAD" {
+        return Err(CommandError::new(
+            "scope_requires_worktree",
+            "All changes scope requires the worktree's checked-out state.",
+        ));
+    }
+    Ok(())
+}
+
+fn effective_head_ref(head_ref: Option<String>) -> String {
+    head_ref
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "HEAD".into())
+}
+
+async fn resolve_ref(path: &Path, name: &str) -> Result<String, CommandError> {
+    let commit = format!("{name}^{{commit}}");
+    let owned_args = vec![
+        "rev-parse".into(),
+        "--verify".into(),
+        "--quiet".into(),
+        commit,
+    ];
+    let args = git_args(&owned_args);
+    let (exit_code, stdout, _) = run_git(path, &args).await?;
+    if exit_code != 0 || stdout.is_empty() {
+        return Err(CommandError::new(
+            "unresolvable_ref",
+            format!("The ref '{name}' does not resolve to a commit."),
+        ));
+    }
+    let value = std::str::from_utf8(&stdout)
+        .map_err(|_| CommandError::new("git_output_malformed", "Git returned invalid ref data."))?
+        .trim();
+    if value.is_empty() {
+        return Err(CommandError::new(
+            "unresolvable_ref",
+            format!("The ref '{name}' does not resolve to a commit."),
+        ));
+    }
+    Ok(value.to_string())
 }
 
 fn primary_branch(branches: &[String]) -> Option<&str> {
@@ -824,54 +875,76 @@ async fn list_worktrees(path: String) -> Result<Vec<Worktree>, CommandError> {
 }
 
 #[tauri::command]
-async fn list_branches(
+async fn list_refs(
     path: String,
-    worktree_branch: String,
-) -> Result<BranchInventory, CommandError> {
-    validate_ref(&worktree_branch, "worktree_branch")?;
+    worktree_branch: Option<String>,
+) -> Result<RefInventory, CommandError> {
+    if let Some(worktree_branch) = &worktree_branch {
+        validate_ref(worktree_branch, "worktree_branch")?;
+    }
     let path = canonical_path(&path)?;
     let (exit_code, stdout, stderr) = run_git(
         &path,
-        &["for-each-ref", "refs/heads", "--format=%(refname)"],
+        &[
+            "for-each-ref",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+            "--format=%(refname)",
+        ],
     )
     .await?;
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
     }
-    let text = std::str::from_utf8(&stdout).map_err(|_| {
-        CommandError::new("git_output_malformed", "Git returned invalid branch data.")
-    })?;
-    let branches = text.lines().map(str::to_string).collect::<Vec<_>>();
-    let primary = primary_branch(&branches);
-    let default_base = if worktree_branch == "detached" {
-        None
-    } else if let Some(primary) = primary {
-        let verify_args = vec![
-            "rev-parse".into(),
-            "--verify".into(),
-            "--quiet".into(),
-            worktree_branch.clone(),
-        ];
-        let verify_args = git_args(&verify_args);
-        if run_git(&path, &verify_args).await?.0 != 0 {
-            return Ok(BranchInventory {
-                branches,
-                default_base: None,
-            });
+    let text = std::str::from_utf8(&stdout)
+        .map_err(|_| CommandError::new("git_output_malformed", "Git returned invalid ref data."))?;
+    let mut heads = Vec::new();
+    let mut remotes = Vec::new();
+    let mut tags = Vec::new();
+    for reference in text.lines() {
+        if reference.starts_with("refs/heads/") {
+            heads.push(reference.to_string());
+        } else if reference.starts_with("refs/remotes/") {
+            remotes.push(reference.to_string());
+        } else if reference.starts_with("refs/tags/") {
+            tags.push(reference.to_string());
         }
-        let args = vec!["merge-base".into(), worktree_branch.clone(), primary.into()];
-        let args = git_args(&args);
-        match run_git(&path, &args).await? {
-            (0, stdout, _) => std::str::from_utf8(&stdout)
-                .ok()
-                .map(|value| value.trim().to_string()),
-            _ => None,
+    }
+    let primary = primary_branch(&heads);
+    let default_base = if worktree_branch.as_deref() == Some("detached") {
+        None
+    } else if let Some(worktree_branch) = worktree_branch {
+        if let Some(primary) = primary {
+            let verify_args = vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                worktree_branch.clone(),
+            ];
+            let verify_args = git_args(&verify_args);
+            if run_git(&path, &verify_args).await?.0 != 0 {
+                None
+            } else {
+                let args = vec!["merge-base".into(), worktree_branch, primary.into()];
+                let args = git_args(&args);
+                match run_git(&path, &args).await? {
+                    (0, stdout, _) => std::str::from_utf8(&stdout)
+                        .ok()
+                        .map(|value| value.trim().to_string()),
+                    _ => None,
+                }
+            }
+        } else {
+            None
         }
     } else {
-        None
+        primary.map(str::to_string)
     };
-    Ok(BranchInventory {
-        branches,
+    Ok(RefInventory {
+        heads,
+        remotes,
+        tags,
         default_base,
     })
 }
@@ -880,16 +953,22 @@ async fn list_branches(
 async fn list_review_changes(
     path: String,
     base: String,
+    head_ref: Option<String>,
     committed_only: bool,
     reversed: bool,
 ) -> Result<ReviewIndex, CommandError> {
     validate_ref(&base, "base")?;
+    let head_ref = effective_head_ref(head_ref);
+    validate_ref(&head_ref, "head_ref")?;
+    validate_scope_combination(&head_ref, committed_only)?;
     let path = canonical_path(&path)?;
+    let base_sha = resolve_ref(&path, &base).await?;
+    let target_sha = resolve_ref(&path, &head_ref).await?;
     if !committed_only {
         reject_configured_filters(&path).await?;
     }
     let range = if committed_only {
-        format!("{base}...HEAD")
+        format!("{base}...{head_ref}")
     } else {
         base.clone()
     };
@@ -927,6 +1006,8 @@ async fn list_review_changes(
         files,
         additions,
         deletions,
+        base_sha,
+        target_sha,
     })
 }
 
@@ -934,20 +1015,26 @@ async fn list_review_changes(
 async fn read_review_patch(
     path: String,
     base: String,
+    head_ref: Option<String>,
     committed_only: bool,
     reversed: bool,
     file: String,
     untracked: bool,
 ) -> Result<FilePatch, CommandError> {
     validate_ref(&base, "base")?;
+    let head_ref = effective_head_ref(head_ref);
+    validate_ref(&head_ref, "head_ref")?;
+    validate_scope_combination(&head_ref, committed_only)?;
     validate_file(&file)?;
     validate_untracked_combination(untracked, committed_only, reversed)?;
     let path = canonical_path(&path)?;
+    let _base_sha = resolve_ref(&path, &base).await?;
+    let _target_sha = resolve_ref(&path, &head_ref).await?;
     if !committed_only && !untracked {
         reject_configured_filters(&path).await?;
     }
     let range = if committed_only {
-        format!("{base}...HEAD")
+        format!("{base}...{head_ref}")
     } else {
         base
     };
@@ -1066,7 +1153,7 @@ pub fn run() {
             open_repo,
             list_repos,
             list_worktrees,
-            list_branches,
+            list_refs,
             list_review_changes,
             read_review_patch
         ])
@@ -1257,6 +1344,11 @@ bare
         let repo = test_repo("branch-tag-collision");
         test_git(&repo, &["branch", "-M", "main"]);
         test_git(&repo, &["tag", "main", "HEAD"]);
+        test_git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/feature", "HEAD"],
+        );
+        test_git(&repo, &["update-ref", "refs/notes/review", "HEAD"]);
         std::fs::write(repo.join("main-only.txt"), "main\n").unwrap();
         test_git(&repo, &["add", "main-only.txt"]);
         test_git(&repo, &["commit", "--quiet", "-m", "main change"]);
@@ -1265,12 +1357,27 @@ bare
         test_git(&repo, &["add", "feature-only.txt"]);
         test_git(&repo, &["commit", "--quiet", "-m", "feature change"]);
 
-        let inventory = list_branches(repo.to_str().unwrap().into(), "refs/heads/feature".into())
+        let inventory = list_refs(
+            repo.to_str().unwrap().into(),
+            Some("refs/heads/feature".into()),
+        )
+        .await
+        .unwrap();
+        assert!(inventory.heads.contains(&"refs/heads/main".into()));
+        assert!(inventory.heads.contains(&"refs/heads/feature".into()));
+        assert!(inventory.tags.contains(&"refs/tags/main".into()));
+        assert!(inventory
+            .remotes
+            .contains(&"refs/remotes/origin/feature".into()));
+        assert!(!inventory
+            .heads
+            .iter()
+            .any(|reference| reference == "refs/notes/review"));
+
+        let ref_context = list_refs(repo.to_str().unwrap().into(), None)
             .await
             .unwrap();
-        assert!(inventory.branches.contains(&"refs/heads/main".into()));
-        assert!(inventory.branches.contains(&"refs/heads/feature".into()));
-        assert!(!inventory.branches.contains(&"refs/tags/main".into()));
+        assert_eq!(ref_context.default_base.as_deref(), Some("refs/heads/main"));
 
         let main_head = StdCommand::new("git")
             .arg("-C")
@@ -1287,6 +1394,7 @@ bare
         let review = list_review_changes(
             repo.to_str().unwrap().into(),
             "refs/heads/main".into(),
+            Some("refs/heads/feature".into()),
             true,
             false,
         )
@@ -1294,9 +1402,32 @@ bare
         .unwrap();
         assert_eq!(review.files.len(), 1);
         assert_eq!(review.files[0].path, "feature-only.txt");
+        assert_eq!(
+            review.base_sha,
+            main_head
+                .stdout
+                .iter()
+                .map(|byte| *byte as char)
+                .collect::<String>()
+                .trim()
+        );
+        assert_eq!(
+            review.target_sha,
+            String::from_utf8_lossy(&{
+                let output = StdCommand::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .unwrap();
+                output.stdout
+            })
+            .trim()
+        );
         let patch = read_review_patch(
             repo.to_str().unwrap().into(),
             "refs/heads/main".into(),
+            Some("refs/heads/feature".into()),
             true,
             false,
             "feature-only.txt".into(),
@@ -1326,9 +1457,15 @@ bare
             .unwrap();
         drop(tracked);
 
-        list_review_changes(repo.to_str().unwrap().into(), "HEAD".into(), false, false)
-            .await
-            .unwrap();
+        list_review_changes(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(std::fs::read(&index).unwrap(), before);
         std::fs::remove_dir_all(repo).unwrap();
@@ -1351,6 +1488,7 @@ bare
             let error = read_review_patch(
                 repo.to_str().unwrap().into(),
                 base,
+                None,
                 true,
                 false,
                 "tracked.txt".into(),
@@ -1522,6 +1660,29 @@ bare
         assert!(validate_untracked_combination(true, false, true).is_err());
         assert!(validate_untracked_combination(true, false, false).is_ok());
     }
+    #[test]
+    fn rejects_non_worktree_all_changes_scope() {
+        let error = validate_scope_combination("refs/heads/main", false).unwrap_err();
+        assert_eq!(error.code, "scope_requires_worktree");
+        assert!(validate_scope_combination("HEAD", false).is_ok());
+        assert!(validate_scope_combination("refs/heads/main", true).is_ok());
+    }
+    #[tokio::test]
+    async fn rejects_unresolvable_review_refs() {
+        let repo = test_repo("unresolvable-ref");
+        let error = list_review_changes(
+            repo.to_str().unwrap().into(),
+            "refs/heads/missing".into(),
+            None,
+            true,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "unresolvable_ref");
+        assert!(error.message.contains("refs/heads/missing"));
+        std::fs::remove_dir_all(repo).unwrap();
+    }
     #[tokio::test]
     async fn untracked_patch_requires_current_git_inventory() {
         let repo = test_repo("untracked-inventory");
@@ -1533,6 +1694,7 @@ bare
         let patch = read_review_patch(
             repo.to_str().unwrap().into(),
             "HEAD".into(),
+            None,
             false,
             false,
             "new.txt".into(),
@@ -1545,6 +1707,7 @@ bare
         let binary = read_review_patch(
             repo.to_str().unwrap().into(),
             "HEAD".into(),
+            None,
             false,
             false,
             "binary.bin".into(),
@@ -1558,6 +1721,7 @@ bare
         let ignored = read_review_patch(
             repo.to_str().unwrap().into(),
             "HEAD".into(),
+            None,
             false,
             false,
             "ignored.txt".into(),
@@ -1573,6 +1737,7 @@ bare
         let error = read_review_patch(
             arbitrary.to_str().unwrap().into(),
             "HEAD".into(),
+            None,
             false,
             false,
             "new.txt".into(),
@@ -1580,7 +1745,7 @@ bare
         )
         .await
         .unwrap_err();
-        assert_eq!(error.code, "git_execution");
+        assert_eq!(error.code, "unresolvable_ref");
 
         std::fs::remove_dir_all(repo).unwrap();
         std::fs::remove_dir_all(arbitrary).unwrap();
@@ -1602,6 +1767,7 @@ bare
             let text = read_review_patch(
                 repo.to_str().unwrap().into(),
                 "HEAD".into(),
+                None,
                 false,
                 false,
                 "text.txt".into(),
@@ -1618,6 +1784,7 @@ bare
             let binary = read_review_patch(
                 repo.to_str().unwrap().into(),
                 "HEAD".into(),
+                None,
                 false,
                 false,
                 "binary.bin".into(),
@@ -1717,16 +1884,22 @@ bare
         assert!(marker.exists());
         std::fs::remove_file(&marker).unwrap();
 
-        let index_error =
-            list_review_changes(repo.to_str().unwrap().into(), "HEAD".into(), false, false)
-                .await
-                .unwrap_err();
+        let index_error = list_review_changes(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(index_error.code, "git_filter_unsupported");
         assert!(!marker.exists());
 
         let patch_error = read_review_patch(
             repo.to_str().unwrap().into(),
             "HEAD".into(),
+            None,
             false,
             false,
             "tracked.txt".into(),
@@ -1756,10 +1929,15 @@ bare
             .unwrap();
         assert!(marker.exists());
         std::fs::remove_file(&marker).unwrap();
-        let process_error =
-            list_review_changes(repo.to_str().unwrap().into(), "HEAD".into(), false, false)
-                .await
-                .unwrap_err();
+        let process_error = list_review_changes(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(process_error.code, "git_filter_unsupported");
         assert!(!marker.exists());
 
@@ -1947,15 +2125,22 @@ bare
         assert!(marker.exists());
         std::fs::remove_file(&marker).unwrap();
 
-        let index = list_review_changes(repo.to_str().unwrap().into(), "HEAD".into(), false, false)
-            .await
-            .unwrap();
+        let index = list_review_changes(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
         assert!(index.files.iter().any(|file| file.path == "tracked.txt"));
         assert!(!marker.exists());
 
         let patch = read_review_patch(
             repo.to_str().unwrap().into(),
             "HEAD".into(),
+            None,
             false,
             false,
             "tracked.txt".into(),

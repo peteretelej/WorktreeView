@@ -8,9 +8,9 @@ type Worktree = { path: string; branch: string; head: string };
 type Repo = { path: string; name: string; worktrees: Worktree[] };
 type CommandError = { code: string; message: string };
 type SearchResult = { repo: Repo; worktree?: Worktree };
-type BranchInventory = { branches: string[]; default_base: string | null };
+type BranchInventory = { heads: string[]; remotes: string[]; tags: string[]; default_base: string | null };
 type ChangedFile = { path: string; status: string; untracked: boolean };
-type ReviewIndex = { files: ChangedFile[]; additions: number; deletions: number; error?: string };
+type ReviewIndex = { files: ChangedFile[]; additions: number; deletions: number; base_sha: string; target_sha: string; error?: string };
 type FilePatch = { binary: boolean; text: string };
 type ReviewScope = "all" | "committed";
 type ReviewIdentity = { worktreePath: string; base: string; scope: ReviewScope; reversed: boolean };
@@ -34,6 +34,8 @@ function errorMessage(error: unknown) {
     if (commandError.code === "git_output_malformed") return "Git returned malformed worktree data.";
     if (commandError.code === "git_filter_unsupported") return "This review cannot run because Git conversion filters are configured.";
     if (commandError.code === "git_execution") return "Git could not inspect this repository.";
+    if (commandError.code === "scope_requires_worktree") return "All changes scope requires the worktree's checked-out state.";
+    if (commandError.code === "unresolvable_ref") return commandError.message;
   }
   if (typeof error === "object" && error !== null && "message" in error) return String(error.message);
   return "The repository operation failed.";
@@ -140,15 +142,15 @@ function App() {
     patchIdentityRef.current = "";
     setReviewWorktree(worktree); setBranches([]); setBase(""); setReviewIndex(null); setSelectedFile(null); setPatch(null); setPatchError(""); setOperationError(""); setReviewLoading(true); setPatchLoading(false);
     try {
-      const inventory = await invoke<BranchInventory>("list_branches", { path: worktree.path, worktreeBranch: worktree.branch });
+      const inventory = await invoke<BranchInventory>("list_refs", { path: worktree.path, worktreeBranch: worktree.branch });
       if (generation !== indexGenerationRef.current || !sameReview(reviewIdentityRef.current, identity)) return;
-      setBranches(inventory.branches);
+      setBranches(inventory.heads);
       if (!inventory.default_base) return;
       setBase(inventory.default_base);
       await fetchIndex(worktree, inventory.default_base, scope, reversed);
     } catch (error) {
       if (generation === indexGenerationRef.current && sameReview(reviewIdentityRef.current, identity)) {
-        setReviewIndex({ files: [], additions: 0, deletions: 0, error: errorMessage(error) });
+        setReviewIndex({ files: [], additions: 0, deletions: 0, base_sha: "", target_sha: "", error: errorMessage(error) });
       }
     } finally {
       if (generation === indexGenerationRef.current && sameReview(reviewIdentityRef.current, identity)) setReviewLoading(false);
@@ -162,11 +164,11 @@ function App() {
     patchIdentityRef.current = "";
     setReviewLoading(true); setReviewIndex(null); setSelectedFile(null); setPatch(null); setPatchError(""); setPatchLoading(false); setFilePage(0);
     try {
-      const index = await invoke<ReviewIndex>("list_review_changes", { path: worktree.path, base: nextBase, committedOnly: nextScope === "committed", reversed: nextReversed });
+      const index = await invoke<ReviewIndex>("list_review_changes", { path: worktree.path, base: nextBase, headRef: null, committedOnly: nextScope === "committed", reversed: nextReversed });
       if (generation === indexGenerationRef.current && sameReview(reviewIdentityRef.current, identity)) setReviewIndex(index);
     } catch (error) {
       if (generation === indexGenerationRef.current && sameReview(reviewIdentityRef.current, identity)) {
-        setReviewIndex({ files: [], additions: 0, deletions: 0, error: errorMessage(error) });
+        setReviewIndex({ files: [], additions: 0, deletions: 0, base_sha: "", target_sha: "", error: errorMessage(error) });
       }
     } finally {
       if (generation === indexGenerationRef.current && sameReview(reviewIdentityRef.current, identity)) setReviewLoading(false);
@@ -181,7 +183,7 @@ function App() {
     patchIdentityRef.current = patchIdentity;
     setSelectedFile(file); setPatch(null); setPatchError(""); setPatchLoading(true); setHunkPage(0);
     try {
-      const nextPatch = await invoke<FilePatch>("read_review_patch", { path: reviewWorktree.path, base, committedOnly: scope === "committed", reversed, file: file.path, untracked: file.untracked });
+      const nextPatch = await invoke<FilePatch>("read_review_patch", { path: reviewWorktree.path, base, headRef: null, committedOnly: scope === "committed", reversed, file: file.path, untracked: file.untracked });
       if (generation === patchGenerationRef.current && patchIdentityRef.current === patchIdentity && sameReview(reviewIdentityRef.current, identity)) setPatch(nextPatch);
     } catch (error) {
       if (generation !== patchGenerationRef.current || patchIdentityRef.current !== patchIdentity || !sameReview(reviewIdentityRef.current, identity)) return;
