@@ -123,7 +123,7 @@ function App() {
   const [collapsed, setCollapsed] = useState(false); const [paletteOpen, setPaletteOpen] = useState(false); const [query, setQuery] = useState(""); const [worktreePage, setWorktreePage] = useState(0); const [searchPage, setSearchPage] = useState(0);
   const [reviewTarget, setReviewTarget] = useState<ReviewTarget | null>(null); const [refs, setRefs] = useState<RefInventory>({ heads: [], remotes: [], tags: [], default_base: null }); const [base, setBase] = useState(""); const [scope, setScope] = useState<ReviewScope>("all"); const [reversed, setReversed] = useState(false); const [reviewIndex, setReviewIndex] = useState<ReviewIndex | null>(null); const [reviewLoading, setReviewLoading] = useState(false); const [selectedFile, setSelectedFile] = useState<ChangedFile | null>(null); const [patch, setPatch] = useState<FilePatch | null>(null); const [patchError, setPatchError] = useState(""); const [patchLoading, setPatchLoading] = useState(false); const [filePage, setFilePage] = useState(0); const [hunkPage, setHunkPage] = useState(0);
   const paletteRef = useRef<HTMLDialogElement>(null); const paletteOpenerRef = useRef<HTMLElement | null>(null);
-  const indexGenerationRef = useRef(0); const patchGenerationRef = useRef(0); const reviewIdentityRef = useRef<ReviewIdentity | null>(null); const patchIdentityRef = useRef("");
+  const indexGenerationRef = useRef(0); const patchGenerationRef = useRef(0); const reviewIdentityRef = useRef<ReviewIdentity | null>(null); const patchIdentityRef = useRef(""); const reviewRepoPathRef = useRef("");
   const activeRepo = repos.find((repo) => repo.path === activeRepoPath); const hydrating = Object.keys(hydratingRepos).length > 0; const activeRepoHydrating = activeRepo ? Boolean(hydratingRepos[activeRepo.path]) : false;
 
   useEffect(() => { let mounted = true; async function load() { try { const loaded = await invoke<Repo[]>("list_repos"); if (!mounted) return; setRepos(loaded); setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? ""); setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1]))); setLoading(false); for (let start = 0; start < loaded.length; start += 4) await Promise.all(loaded.slice(start, start + 4).map(async (repo) => { try { const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path }); if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item)); } catch (error) { if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); } finally { if (mounted) setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } })); } catch (error) { if (mounted) { setLoadError(errorMessage(error)); setLoading(false); } } } void load(); return () => { mounted = false; }; }, []);
@@ -131,7 +131,7 @@ function App() {
   useEffect(() => { setWorktreePage(0); }, [activeRepoPath]);
   useEffect(() => { function handleKeyboard(event: KeyboardEvent) { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); paletteRef.current?.open ? closePalette() : openPalette(); } } window.addEventListener("keydown", handleKeyboard); return () => window.removeEventListener("keydown", handleKeyboard); }, []);
   useEffect(() => { const dialog = paletteRef.current; if (paletteOpen && dialog && !dialog.open) dialog.showModal(); }, [paletteOpen]);
-  useEffect(() => { if (reviewTarget) return; ++indexGenerationRef.current; ++patchGenerationRef.current; reviewIdentityRef.current = null; patchIdentityRef.current = ""; }, [reviewTarget]);
+  useEffect(() => { if (reviewTarget) return; ++indexGenerationRef.current; ++patchGenerationRef.current; reviewIdentityRef.current = null; patchIdentityRef.current = ""; reviewRepoPathRef.current = ""; }, [reviewTarget]);
 
   function openPalette(opener?: HTMLElement | null) { paletteOpenerRef.current = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null); setPaletteOpen(true); }
   function closePalette() { if (paletteRef.current?.open) paletteRef.current.close(); else handlePaletteClosed(); }
@@ -145,6 +145,7 @@ function App() {
     const generation = ++indexGenerationRef.current;
     ++patchGenerationRef.current;
     reviewIdentityRef.current = identity;
+    reviewRepoPathRef.current = repoPath;
     patchIdentityRef.current = "";
     setReviewTarget(target); setRefs({ heads: [], remotes: [], tags: [], default_base: null }); setBase(""); setScope(nextScope); setReviewIndex(null); setSelectedFile(null); setPatch(null); setPatchError(""); setOperationError(""); setReviewLoading(true); setPatchLoading(false);
     try {
@@ -156,7 +157,7 @@ function App() {
       const nextBase = target.kind === "worktree" && checkedOut.startsWith("refs/heads/") && remoteBases.length === 1 ? remoteBases[0] : target.kind === "ref" && inventory.default_base === target.name ? "" : inventory.default_base ?? "";
       if (!nextBase) return;
       setBase(nextBase);
-      await fetchIndex(target, nextBase, nextScope, reversed);
+      await fetchIndex(target, nextBase, nextScope, reversed, repoPath);
     } catch (error) {
       if (generation === indexGenerationRef.current && sameReview(reviewIdentityRef.current, identity)) {
         setReviewIndex({ files: [], additions: 0, deletions: 0, base_sha: "", target_sha: "", error: errorMessage(error) });
@@ -165,15 +166,15 @@ function App() {
       if (generation === indexGenerationRef.current && sameReview(reviewIdentityRef.current, identity)) setReviewLoading(false);
     }
   }
-  async function fetchIndex(target: ReviewTarget, nextBase: string, nextScope: ReviewScope, nextReversed: boolean) {
-    const identity = { repoPath: activeRepoPath, base: nextBase, target, scope: nextScope, reversed: nextReversed };
+  async function fetchIndex(target: ReviewTarget, nextBase: string, nextScope: ReviewScope, nextReversed: boolean, nextRepoPath: string) {
+    const identity = { repoPath: nextRepoPath, base: nextBase, target, scope: nextScope, reversed: nextReversed };
     const generation = ++indexGenerationRef.current;
     ++patchGenerationRef.current;
     reviewIdentityRef.current = identity;
     patchIdentityRef.current = "";
     setReviewLoading(true); setReviewIndex(null); setSelectedFile(null); setPatch(null); setPatchError(""); setPatchLoading(false); setFilePage(0);
     try {
-      const index = await invoke<ReviewIndex>("list_review_changes", { path: target.kind === "worktree" ? target.worktree.path : activeRepoPath, base: nextBase, headRef: target.kind === "ref" ? target.name : null, committedOnly: nextScope === "committed", reversed: nextReversed });
+      const index = await invoke<ReviewIndex>("list_review_changes", { path: target.kind === "worktree" ? target.worktree.path : nextRepoPath, base: nextBase, headRef: target.kind === "ref" ? target.name : null, committedOnly: nextScope === "committed", reversed: nextReversed });
       if (generation === indexGenerationRef.current && sameReview(reviewIdentityRef.current, identity)) setReviewIndex(index);
     } catch (error) {
       if (generation === indexGenerationRef.current && sameReview(reviewIdentityRef.current, identity)) {
@@ -183,16 +184,17 @@ function App() {
       if (generation === indexGenerationRef.current && sameReview(reviewIdentityRef.current, identity)) setReviewLoading(false);
     }
   }
-  function changeReviewSetting(nextBase: string, nextScope = scope, nextReversed = reversed) { if (!reviewTarget || !nextBase) return; setBase(nextBase); setScope(nextScope); setReversed(nextReversed); void fetchIndex(reviewTarget, nextBase, nextScope, nextReversed); }
+  function changeReviewSetting(nextBase: string, nextScope = scope, nextReversed = reversed) { if (!reviewTarget || !nextBase) return; setBase(nextBase); setScope(nextScope); setReversed(nextReversed); void fetchIndex(reviewTarget, nextBase, nextScope, nextReversed, reviewRepoPathRef.current); }
   async function selectFile(file: ChangedFile) {
     if (!reviewTarget || !base) return;
-    const identity = { repoPath: activeRepoPath, base, target: reviewTarget, scope, reversed };
-    const patchIdentity = `${activeRepoPath}\0${reviewTarget.kind === "ref" ? reviewTarget.name : reviewTarget.worktree.path}\0${base}\0${scope}\0${reversed}\0${file.path}\0${file.untracked}`;
+    const repoPath = reviewRepoPathRef.current;
+    const identity = { repoPath, base, target: reviewTarget, scope, reversed };
+    const patchIdentity = `${repoPath}\0${reviewTarget.kind === "ref" ? reviewTarget.name : reviewTarget.worktree.path}\0${base}\0${scope}\0${reversed}\0${file.path}\0${file.untracked}`;
     const generation = ++patchGenerationRef.current;
     patchIdentityRef.current = patchIdentity;
     setSelectedFile(file); setPatch(null); setPatchError(""); setPatchLoading(true); setHunkPage(0);
     try {
-      const nextPatch = await invoke<FilePatch>("read_review_patch", { path: reviewTarget.kind === "worktree" ? reviewTarget.worktree.path : activeRepoPath, base, headRef: reviewTarget.kind === "ref" ? reviewTarget.name : null, committedOnly: scope === "committed", reversed, file: file.path, untracked: file.untracked });
+      const nextPatch = await invoke<FilePatch>("read_review_patch", { path: reviewTarget.kind === "worktree" ? reviewTarget.worktree.path : repoPath, base, headRef: reviewTarget.kind === "ref" ? reviewTarget.name : null, committedOnly: scope === "committed", reversed, file: file.path, untracked: file.untracked });
       if (generation === patchGenerationRef.current && patchIdentityRef.current === patchIdentity && sameReview(reviewIdentityRef.current, identity)) setPatch(nextPatch);
     } catch (error) {
       if (generation !== patchGenerationRef.current || patchIdentityRef.current !== patchIdentity || !sameReview(reviewIdentityRef.current, identity)) return;
