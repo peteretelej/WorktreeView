@@ -923,7 +923,7 @@ button:disabled {
 .scope-toggle button:last-child { border-right: 0; }
 .scope-toggle button.active { background: var(--primary-soft); color: var(--foreground); }
 .scope-fixed { display: inline-flex; height: 29px; align-items: center; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--muted); font-size: 10px; }
-.review-counts { width: 100%; color: var(--muted); font-size: 11px; }
+.review-counts, .review-identity { width: 100%; color: var(--muted); font-size: 11px; }
 .review-body { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: 300px minmax(0, 1fr); }
 .file-index { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--border); background: var(--surface); }
 .pane-heading { display: flex; height: 36px; flex: none; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
