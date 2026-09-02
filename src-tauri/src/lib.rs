@@ -167,7 +167,14 @@ async fn run_git(path: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), 
         CommandError::new("invalid_path", "The selected path is not valid UTF-8.")
     })?;
     let mut command = Command::new("git");
-    command.args(["-c", "core.fsmonitor=false"]);
+    command
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "diff.autoRefreshIndex=false",
+        ])
+        .env("GIT_NO_LAZY_FETCH", "1");
     if args.starts_with(&["-c", "core.quotePath=false"]) {
         command
             .args(["-c", "core.quotePath=false", "-C", path])
@@ -1300,6 +1307,174 @@ bare
         assert!(patch.text.contains("+feature"));
         assert!(!patch.text.contains("main-only"));
 
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+    #[tokio::test]
+    async fn tracked_review_does_not_refresh_index() {
+        let repo = test_repo("index-refresh");
+        let index = repo.join(".git/index");
+        let before = std::fs::read(&index).unwrap();
+        let tracked = std::fs::OpenOptions::new()
+            .write(true)
+            .open(repo.join("tracked.txt"))
+            .unwrap();
+        tracked
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::SystemTime::now() - Duration::from_secs(60)),
+            )
+            .unwrap();
+        drop(tracked);
+
+        list_review_changes(repo.to_str().unwrap().into(), "HEAD".into(), false, false)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&index).unwrap(), before);
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tracked_review_does_not_lazy_fetch_missing_objects() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_ENV: &str = "WORKTREEVIEW_NO_LAZY_FETCH_CHILD";
+        const REPO_ENV: &str = "WORKTREEVIEW_NO_LAZY_FETCH_REPO";
+        const BASE_ENV: &str = "WORKTREEVIEW_NO_LAZY_FETCH_BASE";
+        const MARKER_ENV: &str = "WORKTREEVIEW_NO_LAZY_FETCH_MARKER";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let repo = PathBuf::from(std::env::var_os(REPO_ENV).unwrap());
+            let base = std::env::var(BASE_ENV).unwrap();
+            let marker = PathBuf::from(std::env::var_os(MARKER_ENV).unwrap());
+            let error = read_review_patch(
+                repo.to_str().unwrap().into(),
+                base,
+                true,
+                false,
+                "tracked.txt".into(),
+                false,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, "git_execution");
+            assert!(!marker.exists());
+            return;
+        }
+
+        let source = test_repo("lazy-fetch-source");
+        let base = StdCommand::new("git")
+            .arg("-C")
+            .arg(&source)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(base.status.success());
+        let base = String::from_utf8(base.stdout).unwrap().trim().to_string();
+        std::fs::write(source.join("tracked.txt"), "changed\n").unwrap();
+        test_git(&source, &["add", "tracked.txt"]);
+        test_git(&source, &["commit", "--quiet", "-m", "changed"]);
+
+        let origin = test_path("lazy-fetch-origin.git");
+        let output = StdCommand::new("git")
+            .args(["clone", "--quiet", "--bare", "--no-hardlinks"])
+            .arg(&source)
+            .arg(&origin)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let repo = test_path("lazy-fetch-clone");
+        let output = StdCommand::new("git")
+            .args(["clone", "--quiet", "--no-hardlinks"])
+            .arg(&origin)
+            .arg(&repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        test_git(&repo, &["config", "remote.origin.promisor", "true"]);
+        test_git(
+            &repo,
+            &["config", "remote.origin.partialclonefilter", "blob:none"],
+        );
+
+        let blob = StdCommand::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", &format!("{base}:tracked.txt")])
+            .output()
+            .unwrap();
+        assert!(blob.status.success());
+        let blob = String::from_utf8(blob.stdout).unwrap().trim().to_string();
+        let object = repo.join(".git/objects").join(&blob[..2]).join(&blob[2..]);
+        assert!(object.exists());
+        std::fs::remove_file(object).unwrap();
+
+        let marker = repo.join("lazy-fetch-ran");
+        let helper = repo.join("upload-pack.sh");
+        std::fs::write(
+            &helper,
+            format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        test_git(
+            &repo,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                helper.to_str().unwrap(),
+            ],
+        );
+
+        let probe = StdCommand::new("git")
+            .args([
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "diff.autoRefreshIndex=false",
+                "-C",
+            ])
+            .arg(&repo)
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--numstat",
+                "-z",
+                &format!("{base}...HEAD"),
+                "--",
+                "tracked.txt",
+            ])
+            .env_remove("GIT_NO_LAZY_FETCH")
+            .output()
+            .unwrap();
+        assert!(!probe.status.success());
+        assert!(marker.exists());
+        std::fs::remove_file(&marker).unwrap();
+
+        let output = StdCommand::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::tracked_review_does_not_lazy_fetch_missing_objects",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .env(REPO_ENV, &repo)
+            .env(BASE_ENV, &base)
+            .env(MARKER_ENV, &marker)
+            .env_remove("GIT_NO_LAZY_FETCH")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "no-lazy-fetch child failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        std::fs::remove_dir_all(source).unwrap();
+        std::fs::remove_dir_all(origin).unwrap();
         std::fs::remove_dir_all(repo).unwrap();
     }
     #[test]
