@@ -30,6 +30,7 @@ pub struct Repo {
     path: String,
     name: String,
     worktrees: Vec<Worktree>,
+    pinned_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -794,7 +795,7 @@ async fn upsert_repo(
 
 async fn load_repos(pool: &SqlitePool) -> Result<Vec<Repo>, CommandError> {
     let rows = sqlx::query(
-        "SELECT path, name FROM repos ORDER BY last_opened_at DESC, created_at DESC, path ASC",
+        "SELECT path, name, pinned_at FROM repos ORDER BY last_opened_at DESC, created_at DESC, path ASC",
     )
     .fetch_all(pool)
     .await?;
@@ -804,6 +805,7 @@ async fn load_repos(pool: &SqlitePool) -> Result<Vec<Repo>, CommandError> {
                 path: row.try_get("path")?,
                 name: row.try_get("name")?,
                 worktrees: Vec::new(),
+                pinned_at: row.try_get("pinned_at")?,
             })
         })
         .collect::<Result<_, sqlx::Error>>()
@@ -842,10 +844,15 @@ async fn open_repo_path(path: &str, pool: &SqlitePool) -> Result<Repo, CommandEr
             CommandError::new("invalid_path", "The selected folder has no valid name.")
         })?;
     upsert_repo(pool, path, name, now_millis()).await?;
+    let pinned_at = sqlx::query_scalar::<_, Option<i64>>("SELECT pinned_at FROM repos WHERE path = ?")
+        .bind(path)
+        .fetch_one(pool)
+        .await?;
     Ok(Repo {
         path: path.into(),
         name: name.into(),
         worktrees: Vec::new(),
+        pinned_at,
     })
 }
 
@@ -872,6 +879,35 @@ async fn list_worktrees(path: String) -> Result<Vec<Worktree>, CommandError> {
         return Err(git_execution_error(&stderr));
     }
     parse_worktrees(&stdout)
+}
+
+#[tauri::command]
+async fn set_repo_pinned(
+    path: String,
+    pinned: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<i64>, CommandError> {
+    set_repo_pinned_in_pool(&state.pool, &path, pinned).await
+}
+
+async fn set_repo_pinned_in_pool(
+    pool: &SqlitePool,
+    path: &str,
+    pinned: bool,
+) -> Result<Option<i64>, CommandError> {
+    let pinned_at = pinned.then(now_millis);
+    let result = sqlx::query("UPDATE repos SET pinned_at = ? WHERE path = ?")
+        .bind(pinned_at)
+        .bind(path)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(CommandError::new(
+            "persistence",
+            "The repository is not stored and cannot be pinned.",
+        ));
+    }
+    Ok(pinned_at)
 }
 
 #[tauri::command]
@@ -1153,6 +1189,7 @@ pub fn run() {
             open_repo,
             list_repos,
             list_worktrees,
+            set_repo_pinned,
             list_refs,
             list_review_changes,
             read_review_patch
@@ -1179,7 +1216,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE repos (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, last_opened_at INTEGER NOT NULL, created_at INTEGER NOT NULL)")
+        sqlx::query("CREATE TABLE repos (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, last_opened_at INTEGER NOT NULL, created_at INTEGER NOT NULL, pinned_at INTEGER)")
             .execute(&pool)
             .await
             .unwrap();
@@ -2242,5 +2279,23 @@ bare
         assert_eq!(missing_error.code, "invalid_path");
         assert!(load_repos(&pool).await.unwrap().is_empty());
         std::fs::remove_dir(non_git).unwrap();
+    }
+
+    #[tokio::test]
+    async fn repo_pins_set_clear_and_load() {
+        let pool = test_pool().await;
+        upsert_repo(&pool, "/pinned", "pinned", 100).await.unwrap();
+        let pinned = set_repo_pinned_in_pool(&pool, "/pinned", true).await.unwrap();
+        assert!(pinned.is_some());
+        assert_eq!(load_repos(&pool).await.unwrap()[0].pinned_at, pinned);
+        assert_eq!(set_repo_pinned_in_pool(&pool, "/pinned", false).await.unwrap(), None);
+        assert_eq!(load_repos(&pool).await.unwrap()[0].pinned_at, None);
+    }
+
+    #[tokio::test]
+    async fn pinning_unknown_repo_returns_persistence_error() {
+        let pool = test_pool().await;
+        let error = set_repo_pinned_in_pool(&pool, "/missing", true).await.unwrap_err();
+        assert_eq!(error.code, "persistence");
     }
 }

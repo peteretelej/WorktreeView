@@ -263,6 +263,18 @@ kbd {
   text-align: left;
 }
 
+.project-row-wrap { position: relative; }
+.project-row-wrap .project-row { padding-right: 30px; }
+.pin-button { position: absolute; top: 50%; right: 5px; display: inline-flex; width: 22px; height: 22px; align-items: center; justify-content: center; transform: translateY(-50%); border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; opacity: 0; }
+.project-row-wrap:hover .pin-button, .pin-button:focus-visible { opacity: 1; }
+.pin-button:hover { background: var(--surface-3); color: var(--foreground); }
+.sidebar-empty { padding: 4px 7px 8px; color: var(--muted); font-size: 10px; }
+.sidebar-children { margin: 0 0 5px 21px; border-left: 1px solid var(--border); }
+.sidebar-worktree-row, .sidebar-branch-row { display: flex; width: calc(100% - 4px); min-height: 28px; align-items: center; gap: 6px; margin-left: 4px; padding: 4px 6px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); cursor: pointer; font: 10px var(--font-mono); text-align: left; }
+.sidebar-worktree-row:hover, .sidebar-branch-row:hover { background: var(--surface-2); color: var(--foreground); }
+.sidebar-worktree-row span, .sidebar-branch-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-children .page-controls { min-height: 30px; padding: 3px; }
+
 .project-row:hover,
 .project-row.active {
   background: var(--surface-2);

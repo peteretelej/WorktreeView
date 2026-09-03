@@ -128,11 +128,32 @@ describe("bundled desktop lifecycle", () => {
     select(fixture);
     const branch = git(["branch", "--show-current"], fixture) || "detached";
     const head = git(["rev-parse", "HEAD"], fixture);
+    git(["branch", "e2e-sidebar-branch"], fixture);
     await openSelectedRepository(fixture);
     await $(".worktree-row").waitForDisplayed();
     await expect($(`small=${fixture}`)).toBeDisplayed();
     await expect($(`strong=${branch}`)).toBeDisplayed();
     await expect($(`code=${head}`)).toBeDisplayed();
+
+    await $(`nav.project-list button[title="${fixture}"]`).click();
+    await expect($(`.sidebar-children button.sidebar-worktree-row`)).toBeDisplayed();
+    await expect($(`.sidebar-children button.sidebar-branch-row`)).toBeDisplayed();
+    await $(`.sidebar-children button.sidebar-branch-row`).click();
+    await expect($('section[aria-label="Code review"]')).toBeDisplayed();
+    await expect($('span[aria-label="Review scope"]')).toHaveText("Committed only");
+    await $('button=Worktrees').click();
+    await $(`nav.project-list button[title="${fixture}"]`).click();
+    await $(`.sidebar-children button.sidebar-worktree-row`).click();
+    await expect($('section[aria-label="Code review"]')).toBeDisplayed();
+    await $('button=Worktrees').click();
+    await $(`nav.project-list button[title="${fixture}"]`).click();
+    await $(`button[aria-label="Pin repository"]`).click();
+    await expect($("div.nav-section-label=Pinned")).toBeDisplayed();
+    await browser.refresh();
+    await expect($("div.nav-section-label=Pinned")).toBeDisplayed();
+    await expect($(`nav.project-list button[title="${fixture}"]`)).toBeDisplayed();
+    await $(`button[aria-label="Unpin repository"]`).click();
+    await expect($("div.nav-section-label=Recent")).toBeDisplayed();
 
     await browser.refresh();
     await $(".worktree-row").waitForDisplayed();
