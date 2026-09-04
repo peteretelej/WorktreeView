@@ -121,3 +121,7 @@ commands without giving the webview shell access.
 - The local review path makes no network requests.
 - Remote/SSH support is planned, but implementation waits until its trust and
   execution model is settled.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
