@@ -33,7 +33,7 @@ function errorMessage(error: unknown) {
     if (commandError.code === "git_timeout") return "Git took too long to respond.";
     if (commandError.code === "git_output_too_large") return "Git returned too much worktree data.";
     if (commandError.code === "git_output_malformed") return "Git returned malformed worktree data.";
-    if (commandError.code === "git_filter_unsupported") return "This review cannot run because Git conversion filters are configured.";
+    if (commandError.code === "git_filter_unsupported") return "This review cannot run because Git conversion filters apply to files in this review.";
     if (commandError.code === "git_execution") return "Git could not inspect this repository.";
     if (commandError.code === "scope_requires_worktree") return "All changes scope requires the worktree's checked-out state.";
     if (commandError.code === "unresolvable_ref") return commandError.message;
