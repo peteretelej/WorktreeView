@@ -70,6 +70,23 @@ pub struct FilePatch {
     text: String,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub subject: String,
+    pub author: String,
+    pub date: String,
+    pub refs: Vec<String>,
+    pub parents: Vec<String>,
+    pub default_base_ancestor: bool,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct CommitPage {
+    pub commits: Vec<CommitInfo>,
+    pub has_more: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CommandError {
     code: String,
@@ -417,6 +434,34 @@ async fn resolve_ref(path: &Path, name: &str) -> Result<String, CommandError> {
     Ok(value.to_string())
 }
 
+// The repository's empty tree object: parentless commits diff against it. The
+// hash is computed inside the repository (not from a temp directory) so it
+// follows the repository's object format, and without `-w` nothing is written.
+async fn resolve_empty_tree(path: &Path) -> Result<String, CommandError> {
+    let (exit_code, stdout, stderr) = run_git_with_stdin(
+        repo_stdin_git_command(path, &["hash-object", "-t", "tree", "--stdin"]),
+        Vec::new(),
+    )
+    .await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    let sha = std::str::from_utf8(&stdout).map_err(|_| {
+        CommandError::new(
+            "git_output_malformed",
+            "Git returned an invalid empty-tree hash.",
+        )
+    })?;
+    let sha = sha.trim();
+    if sha.is_empty() {
+        return Err(CommandError::new(
+            "git_output_malformed",
+            "Git returned no empty-tree hash.",
+        ));
+    }
+    Ok(sha.to_string())
+}
+
 fn primary_branch(branches: &[String]) -> Option<&str> {
     if branches.iter().any(|branch| branch == "refs/heads/main") {
         Some("refs/heads/main")
@@ -681,6 +726,47 @@ fn parse_numstat(output: &[u8]) -> Result<(i64, i64, bool), CommandError> {
         }
     }
     Ok((additions, deletions, binary))
+}
+
+// `list_commits` log records: fields joined by \x1f, each record terminated by
+// \x1e plus a newline. Subjects may contain any character except the
+// separators, so records are never split on lines.
+fn parse_commits(output: &[u8]) -> Result<Vec<CommitInfo>, CommandError> {
+    let malformed = || {
+        CommandError::new(
+            "git_output_malformed",
+            "Git returned malformed commit data.",
+        )
+    };
+    let text = std::str::from_utf8(output).map_err(|_| malformed())?;
+    let mut commits = Vec::new();
+    for record in text.split('\u{1e}') {
+        // Record edges carry git's record-terminating newlines. Edges are the
+        // hex sha and the whitespace-split parents list, so edge whitespace is
+        // never meaningful data.
+        let record = record.trim();
+        if record.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = record.split('\u{1f}').collect();
+        if fields.len() != 6 || fields[0].is_empty() {
+            return Err(malformed());
+        }
+        commits.push(CommitInfo {
+            sha: fields[0].to_string(),
+            subject: fields[1].to_string(),
+            author: fields[2].to_string(),
+            date: fields[3].to_string(),
+            refs: if fields[4].is_empty() {
+                Vec::new()
+            } else {
+                fields[4].split(", ").map(str::to_string).collect()
+            },
+            parents: fields[5].split_whitespace().map(str::to_string).collect(),
+            default_base_ancestor: false,
+        });
+    }
+    Ok(commits)
 }
 
 async fn capture_untracked_file(root: &Path, file: &str) -> Result<Vec<u8>, CommandError> {
@@ -1097,6 +1183,89 @@ async fn list_refs(
     })
 }
 
+// One bounded probe per page: `rev-list --no-walk <page SHAs> --not <against>`
+// lists page commits that are NOT ancestors of `against`; everything absent
+// from the output is an ancestor. A probe failure is an error, never a silent
+// `false` flag, because the frontend default-base heuristic depends on it.
+async fn mark_default_base_ancestors(
+    path: &Path,
+    commits: &mut [CommitInfo],
+    against_sha: &str,
+) -> Result<(), CommandError> {
+    if commits.is_empty() {
+        return Ok(());
+    }
+    let mut owned_args: Vec<String> = Vec::with_capacity(commits.len() + 4);
+    owned_args.push("rev-list".into());
+    owned_args.push("--no-walk".into());
+    owned_args.extend(commits.iter().map(|commit| commit.sha.clone()));
+    owned_args.push("--not".into());
+    owned_args.push(against_sha.into());
+    let args = git_args(&owned_args);
+    let (exit_code, stdout, stderr) = run_git(path, &args).await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    let excluded = std::str::from_utf8(&stdout).map_err(|_| {
+        CommandError::new(
+            "git_output_malformed",
+            "Git returned invalid ancestry data.",
+        )
+    })?;
+    let non_ancestors: Vec<&str> = excluded.split_whitespace().collect();
+    for commit in commits.iter_mut() {
+        commit.default_base_ancestor = !non_ancestors.contains(&commit.sha.as_str());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_commits(
+    path: String,
+    start_ref: Option<String>,
+    against: Option<String>,
+    skip: Option<u32>,
+    limit: Option<u16>,
+) -> Result<CommitPage, CommandError> {
+    if let Some(start_ref) = &start_ref {
+        validate_ref(start_ref, "start_ref")?;
+    }
+    if let Some(against) = &against {
+        validate_ref(against, "against")?;
+    }
+    let path = canonical_path(&path)?;
+    let explicit_start = start_ref.is_some();
+    let start_ref = effective_head_ref(start_ref);
+    let start_sha = resolve_ref(&path, &start_ref).await?;
+    let against_sha = match against {
+        Some(against) => Some(resolve_ref(&path, &against).await?),
+        None => None,
+    };
+    let skip = skip.unwrap_or(0);
+    let limit = usize::from(limit.unwrap_or(100).min(100));
+    let mut owned_args = vec![
+        "log".into(),
+        format!("--skip={skip}"),
+        format!("--max-count={}", limit + 1),
+        "--format=%H%x1f%s%x1f%an%x1f%aI%x1f%D%x1f%P%x1e".into(),
+    ];
+    if explicit_start {
+        owned_args.push(start_sha);
+    }
+    let args = git_args(&owned_args);
+    let (exit_code, stdout, stderr) = run_git(&path, &args).await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    let mut commits = parse_commits(&stdout)?;
+    let has_more = commits.len() > limit;
+    commits.truncate(limit);
+    if let Some(against_sha) = &against_sha {
+        mark_default_base_ancestors(&path, &mut commits, against_sha).await?;
+    }
+    Ok(CommitPage { commits, has_more })
+}
+
 #[tauri::command]
 async fn list_review_changes(
     path: String,
@@ -1110,7 +1279,16 @@ async fn list_review_changes(
     validate_ref(&head_ref, "head_ref")?;
     validate_scope_combination(&head_ref, committed_only)?;
     let path = canonical_path(&path)?;
-    let base_sha = resolve_ref(&path, &base).await?;
+    // "empty-tree" is a reserved base value for parentless commits: it resolves
+    // to the repository's empty tree object (no ^{commit} resolution) and the
+    // committed-only range becomes two-dot, because three-dot computes a
+    // merge-base and cannot accept a tree.
+    let empty_tree_base = base == "empty-tree";
+    let base_sha = if empty_tree_base {
+        resolve_empty_tree(&path).await?
+    } else {
+        resolve_ref(&path, &base).await?
+    };
     let target_sha = resolve_ref(&path, &head_ref).await?;
     // Filters configured in any scope are neutralized for inventory commands so
     // that enumeration never executes them; reviews are refused only when a
@@ -1121,7 +1299,11 @@ async fn list_review_changes(
         configured_filter_names(&path).await?
     };
     let range = if committed_only {
-        format!("{base}...{head_ref}")
+        if empty_tree_base {
+            format!("{base_sha}..{head_ref}")
+        } else {
+            format!("{base}...{head_ref}")
+        }
     } else {
         base.clone()
     };
@@ -1187,14 +1369,25 @@ async fn read_review_patch(
     validate_file(&file)?;
     validate_untracked_combination(untracked, committed_only, reversed)?;
     let path = canonical_path(&path)?;
-    let _base_sha = resolve_ref(&path, &base).await?;
+    // Same reserved base as `list_review_changes`: parentless commits diff the
+    // empty tree via the two-dot committed-only range.
+    let empty_tree_base = base == "empty-tree";
+    let base_sha = if empty_tree_base {
+        resolve_empty_tree(&path).await?
+    } else {
+        resolve_ref(&path, &base).await?
+    };
     let _target_sha = resolve_ref(&path, &head_ref).await?;
     if !committed_only && !untracked {
         let filters = configured_filter_names(&path).await?;
         reject_applicable_filters(&path, std::slice::from_ref(&file), &filters).await?;
     }
     let range = if committed_only {
-        format!("{base}...{head_ref}")
+        if empty_tree_base {
+            format!("{base_sha}..{head_ref}")
+        } else {
+            format!("{base}...{head_ref}")
+        }
     } else {
         base
     };
@@ -1315,6 +1508,7 @@ pub fn run() {
             list_worktrees,
             set_repo_pinned,
             list_refs,
+            list_commits,
             list_review_changes,
             read_review_patch
         ])
@@ -1379,6 +1573,17 @@ mod tests {
         test_git(&path, &["add", "tracked.txt"]);
         test_git(&path, &["commit", "--quiet", "-m", "initial"]);
         path
+    }
+
+    fn test_rev_parse(path: &Path, revision: &str) -> String {
+        let output = StdCommand::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["rev-parse", revision])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
     #[test]
@@ -2553,5 +2758,262 @@ bare
         let pool = test_pool().await;
         let error = set_repo_pinned_in_pool(&pool, "/missing", true).await.unwrap_err();
         assert_eq!(error.code, "persistence");
+    }
+
+    #[test]
+    fn parses_commit_log_records_with_edge_subjects() {
+        let record = |sha: &str, subject: &str, refs: &str, parents: &str| {
+            format!("{sha}\u{1f}{subject}\u{1f}A U Thor\u{1f}2026-01-02T03:04:05+00:00\u{1f}{refs}\u{1f}{parents}\u{1e}\n")
+        };
+        let output = format!(
+            "{}{}{}",
+            record(
+                &"a".repeat(40),
+                "handles, commas, 100% signs and naïve 🌲 subjects",
+                "refs/heads/main, refs/remotes/origin/main",
+                "",
+            ),
+            record(&"b".repeat(40), "merge commit", "", "1111111 2222222 3333333"),
+            record(&"c".repeat(40), "tagged root", "refs/tags/v1", ""),
+        );
+        let commits = parse_commits(output.as_bytes()).unwrap();
+        assert_eq!(commits.len(), 3);
+        assert_eq!(
+            commits[0].subject,
+            "handles, commas, 100% signs and naïve 🌲 subjects"
+        );
+        assert_eq!(
+            commits[0].refs,
+            ["refs/heads/main", "refs/remotes/origin/main"]
+        );
+        assert!(commits[0].parents.is_empty());
+        assert!(!commits[0].default_base_ancestor);
+        assert_eq!(commits[1].parents, ["1111111", "2222222", "3333333"]);
+        assert!(commits[1].refs.is_empty());
+        assert_eq!(commits[2].refs, ["refs/tags/v1"]);
+        assert!(commits[2].parents.is_empty());
+
+        assert!(parse_commits(b"").unwrap().is_empty());
+        assert!(parse_commits(b"\n").unwrap().is_empty());
+        let short_record = format!("{}\u{1f}subject\u{1e}\n", "b".repeat(40));
+        assert!(parse_commits(short_record.as_bytes()).is_err());
+        let extra_record = format!(
+            "{}\u{1f}sub\u{1f}ject\u{1f}author\u{1f}date\u{1f}refs\u{1f}parents\u{1e}\n",
+            "c".repeat(40)
+        );
+        assert!(parse_commits(extra_record.as_bytes()).is_err());
+        let no_fields = b"garbage-without-separators";
+        assert!(parse_commits(no_fields).is_err());
+    }
+
+    #[tokio::test]
+    async fn list_commits_pages_bounded_histories() {
+        let repo = test_repo("commit-paging");
+        for index in 0..104 {
+            std::fs::write(repo.join("tracked.txt"), format!("change {index}\n")).unwrap();
+            test_git(&repo, &["add", "tracked.txt"]);
+            let message = format!("commit {index}");
+            test_git(&repo, &["commit", "--quiet", "-m", &message]);
+        }
+        let head_sha = test_rev_parse(&repo, "HEAD");
+
+        let first = list_commits(repo.to_str().unwrap().into(), None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(first.commits.len(), 100);
+        assert!(first.has_more);
+        assert_eq!(first.commits[0].sha, head_sha);
+
+        let second = list_commits(repo.to_str().unwrap().into(), None, None, Some(100), None)
+            .await
+            .unwrap();
+        assert_eq!(second.commits.len(), 5);
+        assert!(!second.has_more);
+        assert!(!second
+            .commits
+            .iter()
+            .any(|commit| first.commits.iter().any(|page| page.sha == commit.sha)));
+
+        let capped = list_commits(repo.to_str().unwrap().into(), None, None, None, Some(1000))
+            .await
+            .unwrap();
+        assert_eq!(capped.commits.len(), 100);
+        assert!(capped.has_more);
+
+        let window = list_commits(repo.to_str().unwrap().into(), None, None, Some(2), Some(3))
+            .await
+            .unwrap();
+        assert_eq!(window.commits.len(), 3);
+        assert_eq!(window.commits[0].sha, first.commits[2].sha);
+        assert!(window.has_more);
+
+        let exhausted = list_commits(repo.to_str().unwrap().into(), None, None, Some(200), None)
+            .await
+            .unwrap();
+        assert!(exhausted.commits.is_empty());
+        assert!(!exhausted.has_more);
+
+        let unresolvable = list_commits(
+            repo.to_str().unwrap().into(),
+            Some("refs/heads/missing".into()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unresolvable.code, "unresolvable_ref");
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_commits_marks_default_base_ancestry() {
+        let repo = test_repo("commit-ancestry");
+        test_git(&repo, &["branch", "-M", "main"]);
+        let initial_sha = test_rev_parse(&repo, "HEAD");
+        std::fs::write(repo.join("main-only.txt"), "main\n").unwrap();
+        test_git(&repo, &["add", "main-only.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "main change"]);
+        test_git(&repo, &["checkout", "--quiet", "-b", "feature"]);
+        std::fs::write(repo.join("feature-only.txt"), "feature\n").unwrap();
+        test_git(&repo, &["add", "feature-only.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "feature change"]);
+        let main_sha = test_rev_parse(&repo, "refs/heads/main");
+        let feature_sha = test_rev_parse(&repo, "refs/heads/feature");
+
+        let page = list_commits(
+            repo.to_str().unwrap().into(),
+            Some("refs/heads/feature".into()),
+            Some("refs/heads/main".into()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.commits.len(), 3);
+        let marked = |sha: &str| {
+            page.commits
+                .iter()
+                .find(|commit| commit.sha == sha)
+                .unwrap()
+                .default_base_ancestor
+        };
+        assert!(!marked(&feature_sha));
+        assert!(marked(&main_sha));
+        assert!(marked(&initial_sha));
+
+        let unmarked = list_commits(
+            repo.to_str().unwrap().into(),
+            Some("refs/heads/feature".into()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(unmarked
+            .commits
+            .iter()
+            .all(|commit| !commit.default_base_ancestor));
+
+        let unresolvable_against = list_commits(
+            repo.to_str().unwrap().into(),
+            None,
+            Some("refs/heads/missing".into()),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unresolvable_against.code, "unresolvable_ref");
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_tree_base_reviews_root_commits() {
+        let repo = test_repo("empty-tree-base");
+        let root_sha = test_rev_parse(&repo, "HEAD");
+
+        let index = list_review_changes(
+            repo.to_str().unwrap().into(),
+            "empty-tree".into(),
+            Some(root_sha.clone()),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].path, "tracked.txt");
+        assert_eq!(index.files[0].status, "A");
+        assert_eq!(
+            index.base_sha,
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        );
+        assert_eq!(index.target_sha, root_sha);
+
+        let patch = read_review_patch(
+            repo.to_str().unwrap().into(),
+            "empty-tree".into(),
+            Some(root_sha),
+            true,
+            false,
+            "tracked.txt".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!patch.binary);
+        assert!(patch.text.contains("+original"));
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn merge_first_parent_base_reviews_merge_own_changes() {
+        let repo = test_repo("merge-first-parent");
+        test_git(&repo, &["branch", "-M", "main"]);
+        std::fs::write(repo.join("main.txt"), "main\n").unwrap();
+        test_git(&repo, &["add", "main.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "main commit"]);
+        test_git(&repo, &["checkout", "--quiet", "-b", "feature"]);
+        std::fs::write(repo.join("feature.txt"), "feature\n").unwrap();
+        test_git(&repo, &["add", "feature.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "feature commit"]);
+        test_git(&repo, &["checkout", "--quiet", "main"]);
+        test_git(&repo, &["merge", "--no-ff", "--quiet", "-m", "merge feature", "feature"]);
+        let merge_sha = test_rev_parse(&repo, "HEAD");
+        let first_parent = test_rev_parse(&repo, &format!("{merge_sha}^"));
+        let second_parent = test_rev_parse(&repo, &format!("{merge_sha}^2"));
+        assert_ne!(first_parent, second_parent);
+
+        let index = list_review_changes(
+            repo.to_str().unwrap().into(),
+            first_parent.clone(),
+            Some(merge_sha.clone()),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].path, "feature.txt");
+        assert_eq!(index.files[0].status, "A");
+        assert_eq!(index.target_sha, merge_sha);
+
+        let page = list_commits(
+            repo.to_str().unwrap().into(),
+            Some(merge_sha),
+            None,
+            None,
+            Some(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.commits[0].parents, [first_parent, second_parent]);
+
+        std::fs::remove_dir_all(repo).unwrap();
     }
 }
