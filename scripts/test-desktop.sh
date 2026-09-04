@@ -20,6 +20,20 @@ run_preflight() {
   timeout --signal=TERM --kill-after="${termination_grace_seconds}s" "${timeout_seconds}s" "$@"
 }
 
+# Windows hosts run the runner from Git Bash (an MSYS-family host) where host
+# paths and Docker arguments need explicit conversion handling. Detect the
+# host once; every Windows-specific branch below keys on msys_host.
+msys_host=0
+case $(uname -s) in
+  MINGW*|MSYS*|CYGWIN*)
+    if ! command -v cygpath >/dev/null 2>&1; then
+      printf 'cygpath is required on an MSYS-family host but was not found on PATH\n' >&2
+      exit 2
+    fi
+    msys_host=1
+    ;;
+esac
+
 uid=$EUID
 if ! gid=$(run_preflight id -g); then
   printf 'failed to determine the effective GID within the preflight deadline\n' >&2
@@ -37,15 +51,43 @@ fi
 
 # NUL cannot occur inside a Bash argument.
 fixture_input=$1
-if [[ "$fixture_input" != /* || "$fixture_input" == *$'\r'* || "$fixture_input" == *$'\n'* || "$fixture_input" == *:* ]]; then
-  printf 'fixture must be an absolute path without CR, LF, or colon\n' >&2
-  exit 2
+if (( msys_host )); then
+  # MSYS hosts additionally accept Windows drive forms (D:\repo, D:/repo);
+  # the drive-letter separator is the only permitted colon, so scan the
+  # remainder for colons. Drive-relative, UNC, and extended-length forms
+  # stay rejected.
+  fixture_drive_form=0
+  fixture_colon_scan=$fixture_input
+  if [[ "$fixture_colon_scan" =~ ^[A-Za-z]:[\\/] ]]; then
+    fixture_drive_form=1
+    fixture_colon_scan=${fixture_colon_scan:2}
+  fi
+  if [[ "$fixture_input" != /* && "$fixture_drive_form" == 0 ]] ||
+    [[ "$fixture_input" == *$'\r'* || "$fixture_input" == *$'\n'* ]] ||
+    [[ "$fixture_colon_scan" == *:* ]]; then
+    printf 'fixture must be an absolute path without CR, LF, or colon\n' >&2
+    exit 2
+  fi
+else
+  if [[ "$fixture_input" != /* || "$fixture_input" == *$'\r'* || "$fixture_input" == *$'\n'* || "$fixture_input" == *:* ]]; then
+    printf 'fixture must be an absolute path without CR, LF, or colon\n' >&2
+    exit 2
+  fi
 fi
 if [[ ! -d "$fixture_input" ]]; then
   printf 'fixture must be an existing directory\n' >&2
   exit 2
 fi
-if ! fixture=$(run_preflight realpath -e -- "$fixture_input"); then
+fixture_canonicalize_input=$fixture_input
+if (( msys_host )); then
+  # realpath -e preserves the input path family (Windows-form input yields
+  # D:/..., not /d/...), so normalize to the MSYS form before canonicalizing.
+  if ! fixture_canonicalize_input=$(run_preflight cygpath -u -- "$fixture_input"); then
+    printf 'failed to normalize the fixture path within the preflight deadline\n' >&2
+    exit 2
+  fi
+fi
+if ! fixture=$(run_preflight realpath -e -- "$fixture_canonicalize_input"); then
   printf 'failed to canonicalize the fixture within the preflight deadline\n' >&2
   exit 2
 fi
@@ -118,7 +160,15 @@ run_cleanup_docker() {
   timeout_seconds=$(((remaining_ms - termination_grace_seconds * 1000) / 1000))
   (( timeout_seconds > 10 )) && timeout_seconds=10
   (( timeout_seconds > 0 )) || return 124
-  timeout --signal=TERM --kill-after="${termination_grace_seconds}s" "${timeout_seconds}s" "$@"
+  if (( msys_host )); then
+    # MSYS rewrites the anchored container-name filter (name=^/...$) into a
+    # Windows path that silently matches nothing, which would strand the
+    # run's labeled resources. None of these arguments need conversion.
+    env MSYS2_ARG_CONV_EXCL='*' \
+      timeout --signal=TERM --kill-after="${termination_grace_seconds}s" "${timeout_seconds}s" "$@"
+  else
+    timeout --signal=TERM --kill-after="${termination_grace_seconds}s" "${timeout_seconds}s" "$@"
+  fi
 }
 
 remove_owned_container() {
@@ -239,6 +289,17 @@ if ! common_dir=$(run_preflight "${git_env[@]}" git -C "$fixture" rev-parse --pa
   printf 'fixture has no Git common directory\n' >&2
   exit 2
 fi
+if (( msys_host )); then
+  # git rev-parse returns Windows-form paths (D:/...) for MSYS-form -C
+  # arguments; convert the outputs so the exact comparisons below see one
+  # path family instead of weakening them.
+  if ! top_level=$(cygpath -u -- "$top_level") ||
+    ! git_dir=$(cygpath -u -- "$git_dir") ||
+    ! common_dir=$(cygpath -u -- "$common_dir"); then
+    printf 'failed to normalize the fixture Git paths\n' >&2
+    exit 2
+  fi
+fi
 [[ "$inside_work_tree" == "true" ]] || { printf 'bare repositories are not supported\n' >&2; exit 2; }
 [[ "$top_level" == "$fixture" ]] || { printf 'fixture must be the repository top level\n' >&2; exit 2; }
 case "$git_dir" in
@@ -281,6 +342,12 @@ fi
 run_preflight mkdir -- "$run_dir"
 run_dir_owned=1
 run_dir_abs=$(run_preflight realpath -e -- "$run_dir")
+if (( msys_host )); then
+  if ! run_dir_abs=$(run_preflight cygpath -u -- "$run_dir_abs"); then
+    printf 'failed to normalize the artifacts path within the preflight deadline\n' >&2
+    exit 2
+  fi
+fi
 runner_log="$run_dir/runner.log"
 : >"$runner_log"
 : >"$run_dir/backend.log"
@@ -292,6 +359,22 @@ if ! iidfile=$(run_preflight mktemp "${TMPDIR:-/tmp}/worktreeview-e2e-iid.XXXXXX
   exit 2
 fi
 trap cleanup EXIT
+
+# Single host-path normalization point: on MSYS hosts derive the Windows-form
+# strings once (forward slashes avoid backslash-escaping hazards; Docker
+# accepts the form) for every Docker argument carrying a host path. Shell and
+# Git operations keep using the MSYS-internal forms.
+fixture_mount_source=$fixture
+artifacts_mount_source=$run_dir_abs
+iidfile_docker=$iidfile
+if (( msys_host )); then
+  if ! fixture_mount_source=$(cygpath -m -- "$fixture") ||
+    ! artifacts_mount_source=$(cygpath -m -- "$run_dir_abs") ||
+    ! iidfile_docker=$(cygpath -m -- "$iidfile"); then
+    printf 'failed to derive Windows-form Docker paths\n' >&2
+    exit 2
+  fi
+fi
 
 run_preflight \
   docker info >/dev/null
@@ -336,7 +419,7 @@ build_start=$(now_ms)
 build_cmd=(
   timeout --signal=TERM --kill-after=5s 30m
   env DOCKER_BUILDKIT=1 docker buildx build --load
-  --iidfile "$iidfile"
+  --iidfile "$iidfile_docker"
   --label "com.worktreeview.e2e.run-id=$run_id"
   --label "com.worktreeview.e2e.resource-nonce=$resource_nonce"
   -f e2e/Dockerfile .
@@ -389,14 +472,34 @@ create_cmd=(
   --pids-limit 512
   --shm-size 1g
   --user "$uid:$gid"
-  --volume "$fixture:/fixtures/worktreeview:ro"
-  --volume "$run_dir_abs:/artifacts:rw"
+  --volume "$fixture_mount_source:/fixtures/worktreeview:ro"
+  --volume "$artifacts_mount_source:/artifacts:rw"
   --env "WORKTREEVIEW_E2E_RUN_ID=$run_id"
 )
 if [[ "$force_failure" == 1 ]]; then
   create_cmd+=(--env WORKTREEVIEW_E2E_FORCE_FAILURE=1)
 fi
+if (( msys_host )); then
+  # Windows bind mounts surface as root-owned inside the Docker Desktop VM,
+  # so git in the container would reject the read-only fixture as
+  # dubious-ownership for any non-root runtime user. Allow-list the
+  # container fixture path through Git's environment config; system and
+  # global config stay neutralized and hooks stay neutralized by the suite.
+  create_cmd+=(
+    --env GIT_CONFIG_COUNT=1
+    --env GIT_CONFIG_KEY_0=safe.directory
+    --env GIT_CONFIG_VALUE_0=/fixtures/worktreeview
+  )
+fi
 create_cmd+=("$image_id")
+if (( msys_host )); then
+  # Blanket MSYS argument-conversion exclusion for exactly this invocation:
+  # its arguments carry POSIX-form container paths (/fixtures/...,
+  # /artifacts) that MSYS would otherwise rewrite. An env prefix scopes the
+  # variable to the child process; an inline VAR=v assignment on the
+  # run_with_container_deadline wrapper call could persist in the shell.
+  create_cmd=(env MSYS2_ARG_CONV_EXCL='*' "${create_cmd[@]}")
+fi
 container_create_started=1
 created_id=$(run_with_container_deadline "${create_cmd[@]}")
 [[ "$created_id" =~ ^[0-9a-f]{64}$ ]] || { printf 'Docker returned an invalid container ID\n' >&2; exit 1; }
@@ -409,9 +512,23 @@ if (( ${#inspect_json} > 262144 )); then
   exit 1
 fi
 printf '%s\n' "$inspect_json" >"$run_dir/container-inspect.json"
-node - "$run_dir/container-inspect.json" "$fixture" "$run_dir_abs" "$uid" "$gid" "$image_id" "$run_id" "$resource_nonce" <<'NODE'
+node - "$run_dir/container-inspect.json" "$fixture_mount_source" "$artifacts_mount_source" "$uid" "$gid" "$image_id" "$run_id" "$resource_nonce" "$msys_host" <<'NODE'
 const fs = require("node:fs");
-const [inspectPath, fixture, artifacts, uid, gid, imageId, runId, resourceNonce] = process.argv.slice(2);
+const [inspectPath, fixture, artifacts, uid, gid, imageId, runId, resourceNonce, msysHost] = process.argv.slice(2);
+// Docker Desktop daemons may report mount sources in a different form than
+// the CLI sent (slash direction, drive-letter case, or the
+// /run/desktop/mnt/host/<drive>/<rest> translation). On MSYS hosts only,
+// normalize both sides before comparing; Linux stays an exact comparison.
+const normalizeHostPath = (value) => {
+  let path = value.replace(/\\/g, "/");
+  const translated = path.match(/^\/run\/desktop\/mnt\/host\/([A-Za-z])\/(.*)$/);
+  if (translated) path = `${translated[1].toLowerCase()}:/${translated[2]}`;
+  path = path.replace(/^([A-Za-z]):/, (drive) => drive.toLowerCase());
+  while (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+  return path;
+};
+const sameMountSource = (reported, expected) =>
+  msysHost === "1" ? normalizeHostPath(reported) === normalizeHostPath(expected) : reported === expected;
 const parsed = JSON.parse(fs.readFileSync(inspectPath, "utf8"));
 if (!Array.isArray(parsed) || parsed.length !== 1) throw new Error("expected one container inspection");
 const item = parsed[0];
@@ -430,8 +547,8 @@ if (item.Config.Labels?.["com.worktreeview.e2e.resource-nonce"] !== resourceNonc
 if (item.Mounts.length !== 2) throw new Error("unexpected mount count");
 const fixtureMount = item.Mounts.find((mount) => mount.Destination === "/fixtures/worktreeview");
 const artifactMount = item.Mounts.find((mount) => mount.Destination === "/artifacts");
-if (!fixtureMount || fixtureMount.Source !== fixture || fixtureMount.RW !== false) throw new Error("fixture mount");
-if (!artifactMount || artifactMount.Source !== artifacts || artifactMount.RW !== true) throw new Error("artifact mount");
+if (!fixtureMount || !sameMountSource(fixtureMount.Source, fixture) || fixtureMount.RW !== false) throw new Error("fixture mount");
+if (!artifactMount || !sameMountSource(artifactMount.Source, artifacts) || artifactMount.RW !== true) throw new Error("artifact mount");
 for (const mount of item.Mounts) {
   if (/docker\.sock|\.X11-unix|wayland|\.ssh|credentials/i.test(`${mount.Source}\n${mount.Destination}`)) {
     throw new Error("forbidden mount");

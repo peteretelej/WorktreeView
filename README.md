@@ -68,15 +68,21 @@ npm run build
 The desktop development command requires a display. Frontend-only checks and
 builds can run on a headless host with `npm run check` and `npm run build:web`.
 
-### Linux desktop testing
+### Desktop testing
 
-Headless Linux desktop validation requires Docker Engine with BuildKit/buildx
-support. The host does not need Xvfb, WebKitGTK, DBus, Rust, or display
-configuration. Run the supported test command with an absolute fixture path:
+Headless desktop validation runs the real bundled app inside Docker, so the
+host does not need Xvfb, WebKitGTK, DBus, Rust, or display configuration.
+Linux hosts require Docker Engine with BuildKit/buildx support; Windows hosts
+require Git Bash plus Docker Desktop with the WSL2 backend. Run the supported
+test command with an absolute fixture path:
 
 ```sh
 npm run test:desktop -- /absolute/path/to/git-repository
 ```
+
+On Windows, invoke the command from Git Bash and pass the fixture as a Windows
+path (`D:/path/to/git-repository`) or an MSYS path
+(`/d/path/to/git-repository`); both forms are accepted.
 
 The fixture must be a self-contained local Git directory whose Git metadata is
 contained beneath that path. It is mounted read-only. Linked worktrees are
@@ -91,6 +97,13 @@ owned container and immutable loaded image, while retaining the shared BuildKit
 cache. The complete inner deadline is 42 minutes 40 seconds; CI allows 43 minutes
 for the command so runner-owned cleanup and evidence finalization finish first.
 
+Multiple checkouts can run the suite simultaneously. Runs claim no host ports
+(the test container has no network), cleanup matches only the run's own nonce
+labels, and artifacts are written to per-run directories. Each run reserves 2
+CPUs and 4 GB of memory inside the Docker VM, which is the practical
+parallelism ceiling; `.wslconfig` is the knob when more parallelism is needed
+on Windows.
+
 The frontend preview remains useful for presentation work, but it is not native
 desktop validation. Use `npm run dev` on a display-capable development
 machine. GitHub Actions runs the same desktop test command only for manual
@@ -101,11 +114,11 @@ desktop app and confirm that the real native GTK folder chooser opens. Automated
 tests replace only the chooser result; the UI, backend, Git, and persistence
 behavior after selection remains real.
 
-For troubleshooting, check only that Docker Engine and BuildKit/buildx are
-available, the fixture is an absolute self-contained Git path, and the files in
-the reported run artifact directory. Do not use privileged mode, host display
-sockets, writable fixture mounts, a networked test runtime, or global Docker
-pruning.
+For troubleshooting, check only that Docker (Engine on Linux, Docker Desktop
+with the WSL2 backend on Windows) and BuildKit/buildx are available, the
+fixture is an absolute self-contained Git path, and the files in the reported
+run artifact directory. Do not use privileged mode, host display sockets,
+writable fixture mounts, a networked test runtime, or global Docker pruning.
 
 ## Current State
 

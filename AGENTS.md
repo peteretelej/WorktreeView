@@ -43,4 +43,11 @@ npm run build:web
 cargo check --manifest-path src-tauri/Cargo.toml
 npm run dev
 npm run build
+npm run test:desktop -- /absolute/fixture/path
 ```
+
+`test:desktop` runs the real desktop e2e suite in Docker against a fixture
+repository; Linux hosts need Docker Engine with BuildKit, and Windows hosts
+need Git Bash plus Docker Desktop with the WSL2 backend. The fixture must be a
+standalone self-contained local Git repository (a linked worktree cannot be a
+fixture), and evidence lands under `artifacts/tauri-e2e/<run-id>/`.
