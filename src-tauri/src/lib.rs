@@ -388,6 +388,7 @@ fn validate_untracked_combination(
 }
 
 fn validate_scope_combination(
+    base: &str,
     effective_head_ref: &str,
     committed_only: bool,
 ) -> Result<(), CommandError> {
@@ -395,6 +396,12 @@ fn validate_scope_combination(
         return Err(CommandError::new(
             "scope_requires_worktree",
             "All changes scope requires the worktree's checked-out state.",
+        ));
+    }
+    if !committed_only && base == "empty-tree" {
+        return Err(CommandError::new(
+            "unresolvable_ref",
+            "The empty-tree base is only valid for committed-only reviews.",
         ));
     }
     Ok(())
@@ -1277,7 +1284,7 @@ async fn list_review_changes(
     validate_ref(&base, "base")?;
     let head_ref = effective_head_ref(head_ref);
     validate_ref(&head_ref, "head_ref")?;
-    validate_scope_combination(&head_ref, committed_only)?;
+    validate_scope_combination(&base, &head_ref, committed_only)?;
     let path = canonical_path(&path)?;
     // "empty-tree" is a reserved base value for parentless commits: it resolves
     // to the repository's empty tree object (no ^{commit} resolution) and the
@@ -1365,7 +1372,7 @@ async fn read_review_patch(
     validate_ref(&base, "base")?;
     let head_ref = effective_head_ref(head_ref);
     validate_ref(&head_ref, "head_ref")?;
-    validate_scope_combination(&head_ref, committed_only)?;
+    validate_scope_combination(&base, &head_ref, committed_only)?;
     validate_file(&file)?;
     validate_untracked_combination(untracked, committed_only, reversed)?;
     let path = canonical_path(&path)?;
@@ -2071,10 +2078,17 @@ bare
     }
     #[test]
     fn rejects_non_worktree_all_changes_scope() {
-        let error = validate_scope_combination("refs/heads/main", false).unwrap_err();
+        let error =
+            validate_scope_combination("refs/heads/main", "refs/heads/main", false).unwrap_err();
         assert_eq!(error.code, "scope_requires_worktree");
-        assert!(validate_scope_combination("HEAD", false).is_ok());
-        assert!(validate_scope_combination("refs/heads/main", true).is_ok());
+        assert!(validate_scope_combination("refs/heads/main", "HEAD", false).is_ok());
+        assert!(validate_scope_combination("refs/heads/main", "refs/heads/main", true).is_ok());
+    }
+    #[test]
+    fn rejects_empty_tree_base_outside_committed_scope() {
+        let error = validate_scope_combination("empty-tree", "HEAD", false).unwrap_err();
+        assert_eq!(error.code, "unresolvable_ref");
+        assert!(validate_scope_combination("empty-tree", "refs/heads/main", true).is_ok());
     }
     #[tokio::test]
     async fn rejects_unresolvable_review_refs() {
