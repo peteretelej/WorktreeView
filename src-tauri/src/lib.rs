@@ -239,9 +239,13 @@ fn stdin_git_command(args: &[&str]) -> Command {
     command
         .args(["-c", "core.fsmonitor=false", "-c", "core.attributesFile="])
         .args(args)
-        .env("GIT_DIR", "")
+        .env_remove("GIT_DIR")
         .env("GIT_ATTR_NOSYSTEM", "1")
         .env_remove("GIT_ATTR_SOURCE")
+        // Spawn outside the launcher's directory: Git discovers repositories from
+        // the current directory, which would let that repository's .gitattributes
+        // and path prefix leak into these no-repository diffs.
+        .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -250,10 +254,10 @@ fn stdin_git_command(args: &[&str]) -> Command {
 }
 
 async fn run_git_with_stdin(
-    args: &[&str],
+    mut command: Command,
     input: Vec<u8>,
 ) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
-    let mut child = stdin_git_command(args)
+    let mut child = command
         .spawn()
         .map_err(|_| CommandError::new("git_execution", "Git could not be started."))?;
     let mut stdin = child
@@ -446,21 +450,129 @@ fn git_args<'a>(args: &'a [String]) -> Vec<&'a str> {
     args.iter().map(String::as_str).collect()
 }
 
-async fn reject_configured_filters(path: &Path) -> Result<(), CommandError> {
+async fn configured_filter_names(path: &Path) -> Result<Vec<String>, CommandError> {
     let (exit_code, stdout, stderr) = run_git(
         path,
         &["config", "--get-regexp", r"^filter\..*\.(clean|process)$"],
     )
     .await?;
     match exit_code {
-        1 => Ok(()),
-        0 if stdout.is_empty() => Ok(()),
-        0 => Err(CommandError::new(
-            "git_filter_unsupported",
-            "This review cannot run because Git conversion filters are configured.",
-        )),
+        1 => Ok(Vec::new()),
+        0 => Ok(parse_configured_filter_names(&stdout)),
         _ => Err(git_execution_error(&stderr)),
     }
+}
+
+fn parse_configured_filter_names(output: &[u8]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in output.split(|byte| *byte == b'\n') {
+        let line = std::str::from_utf8(line).unwrap_or("");
+        let key = line.split(' ').next().unwrap_or("");
+        let Some(name) = key
+            .strip_prefix("filter.")
+            .and_then(|rest| {
+                rest.strip_suffix(".clean")
+                    .or_else(|| rest.strip_suffix(".process"))
+            })
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        if !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+fn filter_override_args(names: &[String]) -> Vec<String> {
+    let mut args = Vec::with_capacity(names.len() * 6);
+    for name in names {
+        // `cat` keeps worktree content byte-identical: an identity clean filter
+        // means the inventory diff compares raw worktree bytes with no conversion
+        // and no repository-defined code. The process protocol rejects `cat`
+        // during its handshake, so Git falls back to the clean command, and a
+        // non-required filter keeps any fallback silent and non-fatal.
+        args.push("-c".into());
+        args.push(format!("filter.{name}.clean=cat"));
+        args.push("-c".into());
+        args.push(format!("filter.{name}.process=cat"));
+        args.push("-c".into());
+        args.push(format!("filter.{name}.required=false"));
+    }
+    args
+}
+
+async fn reject_applicable_filters(
+    root: &Path,
+    files: &[String],
+    configured: &[String],
+) -> Result<(), CommandError> {
+    if configured.is_empty() || files.is_empty() {
+        return Ok(());
+    }
+    let mut input = Vec::new();
+    for file in files {
+        input.extend_from_slice(file.as_bytes());
+        input.push(0);
+    }
+    let (exit_code, stdout, stderr) = run_git_with_stdin(
+        repo_stdin_git_command(root, &["check-attr", "-z", "--stdin", "filter"]),
+        input,
+    )
+    .await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    let applicable = parse_applicable_filter_paths(&stdout, configured);
+    if applicable.is_empty() {
+        return Ok(());
+    }
+    Err(CommandError::new(
+        "git_filter_unsupported",
+        "This review cannot run because Git conversion filters apply to files in this review.",
+    ))
+}
+
+fn parse_applicable_filter_paths(output: &[u8], configured: &[String]) -> Vec<String> {
+    let mut fields = output.split(|byte| *byte == 0);
+    let mut applicable = Vec::new();
+    while let Some(path) = fields.next() {
+        let Some(attribute) = fields.next() else {
+            break;
+        };
+        let Some(value) = fields.next() else {
+            break;
+        };
+        if attribute != b"filter" {
+            continue;
+        }
+        let Ok(value) = std::str::from_utf8(value) else {
+            continue;
+        };
+        if matches!(value, "unspecified" | "set" | "unset") {
+            continue;
+        }
+        if configured.iter().any(|name| name == value) {
+            if let Ok(path) = std::str::from_utf8(path) {
+                applicable.push(path.to_string());
+            }
+        }
+    }
+    applicable
+}
+
+fn repo_stdin_git_command(root: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command
 }
 
 fn review_index_args(format: &str, range: &str, reversed: bool) -> Vec<String> {
@@ -1000,24 +1112,35 @@ async fn list_review_changes(
     let path = canonical_path(&path)?;
     let base_sha = resolve_ref(&path, &base).await?;
     let target_sha = resolve_ref(&path, &head_ref).await?;
-    if !committed_only {
-        reject_configured_filters(&path).await?;
-    }
+    // Filters configured in any scope are neutralized for inventory commands so
+    // that enumeration never executes them; reviews are refused only when a
+    // changed file's attributes actually map to a configured filter.
+    let filters = if committed_only {
+        Vec::new()
+    } else {
+        configured_filter_names(&path).await?
+    };
     let range = if committed_only {
         format!("{base}...{head_ref}")
     } else {
         base.clone()
     };
-    let name_args = review_index_args("--name-status", &range, reversed);
-    let name_args = git_args(&name_args);
+    let mut name_owned = filter_override_args(&filters);
+    name_owned.extend(review_index_args("--name-status", &range, reversed));
+    let name_args = git_args(&name_owned);
     let (exit_code, stdout, stderr) = run_git(&path, &name_args).await?;
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
     }
     let mut files = parse_name_status(&stdout)?;
+    if !filters.is_empty() {
+        let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+        reject_applicable_filters(&path, &paths, &filters).await?;
+    }
 
-    let num_args = review_index_args("--numstat", &range, reversed);
-    let num_args = git_args(&num_args);
+    let mut num_owned = filter_override_args(&filters);
+    num_owned.extend(review_index_args("--numstat", &range, reversed));
+    let num_args = git_args(&num_owned);
     let (exit_code, stdout, stderr) = run_git(&path, &num_args).await?;
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
@@ -1067,7 +1190,8 @@ async fn read_review_patch(
     let _base_sha = resolve_ref(&path, &base).await?;
     let _target_sha = resolve_ref(&path, &head_ref).await?;
     if !committed_only && !untracked {
-        reject_configured_filters(&path).await?;
+        let filters = configured_filter_names(&path).await?;
+        reject_applicable_filters(&path, std::slice::from_ref(&file), &filters).await?;
     }
     let range = if committed_only {
         format!("{base}...{head_ref}")
@@ -1102,7 +1226,7 @@ async fn read_review_patch(
             "-".into(),
         ];
         let args = git_args(&args);
-        run_git_with_stdin(&args, input.clone()).await?
+        run_git_with_stdin(stdin_git_command(&args), input.clone()).await?
     } else {
         num_args.extend([range.clone(), "--".into(), file.clone()]);
         let args = git_args(&num_args);
@@ -1141,7 +1265,7 @@ async fn read_review_patch(
             "-".into(),
         ];
         let args = git_args(&args);
-        run_git_with_stdin(&args, input.clone()).await?
+        run_git_with_stdin(stdin_git_command(&args), input.clone()).await?
     } else {
         patch_args.extend([range, "--".into(), file]);
         let args = git_args(&patch_args);
@@ -1314,6 +1438,46 @@ bare
             ["a.txt", "dir/b.txt"]
         );
         assert!(parse_untracked_paths(b"a\0\xff\0").is_err());
+    }
+    #[test]
+    fn parses_configured_filter_names() {
+        assert_eq!(
+            parse_configured_filter_names(
+                b"filter.lfs.clean git-lfs clean -- %f\nfilter.lfs.process git-lfs filter-process\nfilter.lfs.process git-lfs filter-process\nother.key value\n"
+            ),
+            ["lfs"]
+        );
+        assert!(parse_configured_filter_names(b"filter..clean x\n").is_empty());
+        assert!(parse_configured_filter_names(b"filter.lfs.smudge x\n").is_empty());
+        assert!(parse_configured_filter_names(b"").is_empty());
+    }
+    #[test]
+    fn builds_filter_override_arguments() {
+        assert_eq!(filter_override_args(&[]), Vec::<String>::new());
+        assert_eq!(
+            filter_override_args(&["lfs".into()]),
+            [
+                "-c",
+                "filter.lfs.clean=cat",
+                "-c",
+                "filter.lfs.process=cat",
+                "-c",
+                "filter.lfs.required=false"
+            ]
+        );
+    }
+    #[test]
+    fn parses_applicable_filter_paths() {
+        let configured = ["lfs".to_string()];
+        assert_eq!(
+            parse_applicable_filter_paths(
+                b"a.bin\0filter\0lfs\0b.txt\0filter\0unspecified\0c.txt\0filter\0set\0d.txt\0filter\0unset\0",
+                &configured
+            ),
+            ["a.bin"]
+        );
+        assert!(parse_applicable_filter_paths(b"a.txt\0filter\0crypt\0", &configured).is_empty());
+        assert!(parse_applicable_filter_paths(b"trailing\0filter\0", &configured).is_empty());
     }
     #[test]
     fn accepts_only_no_index_difference_exit_code() {
@@ -1689,6 +1853,9 @@ bare
             assert!(environments.iter().any(|(name, value)| {
                 *name == OsStr::new("GIT_ATTR_SOURCE") && value.is_none()
             }));
+            assert!(environments
+                .iter()
+                .any(|(name, value)| *name == OsStr::new("GIT_DIR") && value.is_none()));
         }
     }
     #[test]
@@ -1718,6 +1885,80 @@ bare
         .unwrap_err();
         assert_eq!(error.code, "unresolvable_ref");
         assert!(error.message.contains("refs/heads/missing"));
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+    #[tokio::test]
+    async fn filters_only_refuse_matching_changed_files() {
+        let repo = test_repo("applicable-filter-scope");
+        // Add and commit before configuring the filter: `git add` and commit-time
+        // index refresh both run clean filters, and this one is unrunnable.
+        std::fs::write(repo.join("blob.mark"), "base\n").unwrap();
+        std::fs::write(repo.join("plain.txt"), "base\n").unwrap();
+        test_git(&repo, &["add", "blob.mark"]);
+        test_git(&repo, &["add", "plain.txt"]);
+        std::fs::write(repo.join(".gitattributes"), "*.mark filter=marker\n").unwrap();
+        test_git(&repo, &["add", ".gitattributes"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "attributes"]);
+        test_git(&repo, &["config", "filter.marker.required", "true"]);
+        test_git(
+            &repo,
+            &["config", "filter.marker.clean", "wtv-missing-filter-command"],
+        );
+        std::fs::write(repo.join("plain.txt"), "changed\n").unwrap();
+
+        // With the filter-matching blob.mark untouched, the unrelated change
+        // reviews normally despite the configured filter.
+        let review = list_review_changes(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(review.files.iter().any(|file| file.path == "plain.txt"));
+        assert!(!review.files.iter().any(|file| file.path == "blob.mark"));
+
+        let patch = read_review_patch(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            None,
+            false,
+            false,
+            "plain.txt".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(patch.text.contains("+changed"));
+
+        std::fs::write(repo.join("blob.mark"), "changed\n").unwrap();
+
+        let refused = list_review_changes(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code, "git_filter_unsupported");
+
+        let patch_error = read_review_patch(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            None,
+            false,
+            false,
+            "blob.mark".into(),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(patch_error.code, "git_filter_unsupported");
+
         std::fs::remove_dir_all(repo).unwrap();
     }
     #[tokio::test]
@@ -1840,12 +2081,10 @@ bare
         let configured_attributes = repo.join("configured-attributes");
         std::fs::write(&configured_attributes, "* binary\n").unwrap();
         let config = repo.join("attributes.gitconfig");
+        let attributes_file = configured_attributes.to_string_lossy().replace('\\', "/");
         std::fs::write(
             &config,
-            format!(
-                "[core]\n\tattributesFile = {}\n",
-                configured_attributes.display()
-            ),
+            format!("[core]\n\tattributesFile = {attributes_file}\n"),
         )
         .unwrap();
 
@@ -1885,7 +2124,7 @@ bare
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn configured_filters_are_rejected_without_execution() {
+    async fn applicable_filters_are_rejected_without_execution() {
         use std::os::unix::fs::PermissionsExt;
 
         let repo = test_repo("configured-filter");
@@ -1976,6 +2215,23 @@ bare
         .await
         .unwrap_err();
         assert_eq!(process_error.code, "git_filter_unsupported");
+        assert!(!marker.exists());
+
+        std::fs::write(repo.join(".gitattributes"), "other.txt filter=marker\n").unwrap();
+        let review = list_review_changes(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(review.files.iter().any(|file| file.path == "tracked.txt"));
+        assert!(review
+            .files
+            .iter()
+            .any(|file| file.path == ".gitattributes"));
         assert!(!marker.exists());
 
         std::fs::remove_dir_all(repo).unwrap();
