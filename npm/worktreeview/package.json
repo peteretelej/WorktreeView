@@ -6,8 +6,7 @@
   "exports": "./index.js",
   "files": [
     "index.js",
-    "README.md",
-    "LICENSE"
+    "README.md"
   ],
   "sideEffects": false,
   "keywords": [
@@ -17,7 +16,6 @@
     "developer-tools"
   ],
   "author": "Peter Etelej",
-  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/peteretelej/WorktreeView.git",
