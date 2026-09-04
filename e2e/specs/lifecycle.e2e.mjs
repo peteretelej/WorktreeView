@@ -389,11 +389,12 @@ describe("bundled desktop lifecycle", () => {
     const filterMarker = path.join(fixtureRoot, "filter-ran");
     const filterHelper = path.join(fixtureRoot, "filter-helper.sh");
     writeFileSync(filterHelper, `#!/bin/sh\n: > ${filterMarker}\ncat\n`, { mode: 0o700 });
+    writeFileSync(path.join(worktree, ".gitattributes"), "*.txt filter=e2e\n");
     git(["config", "filter.e2e.clean", filterHelper], repository);
     await $('button=Committed only').click();
     await $('button=All changes').click();
     await expect($("strong=Review unavailable")).toBeDisplayed();
-    await expect($("span=This review cannot run because Git conversion filters are configured.")).toBeDisplayed();
+    await expect($("span=This review cannot run because Git conversion filters apply to files in this review.")).toBeDisplayed();
     expect(existsSync(filterMarker)).toBe(false);
   });
 });
