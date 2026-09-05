@@ -11,6 +11,22 @@ export const defaultSettings: Settings = { theme: "system", diff_layout: "unifie
 export function getSettings() { return invoke<Settings>("get_settings"); }
 export function persistSettings(settings: Settings) { return invoke<Settings>("set_settings", { settings }); }
 
+const DARK_MEDIA_QUERY = "(prefers-color-scheme: dark)";
+
+// Resolves the persisted tri-state to the effective palette: light and
+// dark force their palette; system follows the OS color scheme.
+export function resolveTheme(theme: Theme): "light" | "dark" {
+  if (theme !== "system") return theme;
+  return window.matchMedia(DARK_MEDIA_QUERY).matches ? "dark" : "light";
+}
+
+// Applies the resolved palette to the document root; called before the
+// gated first content render and again whenever the preference or the
+// OS scheme changes.
+export function applyTheme(theme: Theme) {
+  document.documentElement.dataset.theme = resolveTheme(theme);
+}
+
 const THEME_OPTIONS: { value: Theme; label: string }[] = [
   { value: "system", label: "System" },
   { value: "light", label: "Light" },
@@ -44,7 +60,7 @@ export function SettingsPage({ settings, saveError, onBack, onChange }: { settin
       <section id="settings-appearance" className="settings-section" aria-labelledby="settings-appearance-heading">
         <h2 id="settings-appearance-heading">Appearance</h2>
         <div className="settings-row">
-          <div className="settings-row-copy"><strong>Theme</strong><span>Interface color scheme; the app stays dark until theming is applied.</span></div>
+          <div className="settings-row-copy"><strong>Theme</strong><span>Interface color scheme; system follows the OS color scheme.</span></div>
           <div className="scope-toggle" role="group" aria-label="Theme">{THEME_OPTIONS.map((option) => <button key={option.value} type="button" className={settings.theme === option.value ? "active" : ""} aria-pressed={settings.theme === option.value} onClick={() => onChange({ ...settings, theme: option.value })}>{option.label}</button>)}</div>
         </div>
       </section>

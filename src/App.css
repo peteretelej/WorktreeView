@@ -1,11 +1,49 @@
+/* Light palette is the base theme; the dark theme overrides it through
+   [data-theme="dark"], and a pre-mount media query applies dark tokens
+   before React resolves the persisted preference on the root. */
 :root {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: oklch(0.947 0.008 264);
-  background: oklch(0.185 0.017 264);
+  color: var(--foreground);
+  background: var(--background);
+  color-scheme: light;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -webkit-text-size-adjust: 100%;
+
+  --background: oklch(0.98 0.003 264);
+  --foreground: oklch(0.23 0.02 264);
+  --surface: oklch(0.955 0.005 264);
+  --surface-2: oklch(0.93 0.007 264);
+  --surface-3: oklch(0.9 0.009 264);
+  --elevated: oklch(0.995 0.002 264);
+  --muted: oklch(0.5 0.02 264);
+  --border: oklch(0.88 0.008 264);
+  --primary: oklch(0.56 0.1 196);
+  --primary-soft: oklch(0.93 0.035 196);
+  --ok: oklch(0.55 0.15 152);
+  --ok-soft: oklch(0.93 0.05 152);
+  --warn: oklch(0.6 0.12 80);
+  --warn-soft: oklch(0.94 0.05 82);
+  --danger: oklch(0.55 0.19 22);
+  --danger-soft: oklch(0.94 0.035 22);
+  --info: oklch(0.52 0.13 255);
+  --info-soft: oklch(0.93 0.04 258);
+  --brand-foreground: oklch(0.985 0.005 220);
+  --scrim: oklch(0.3 0.02 264 / 0.35);
+  --shadow-overlay: 0 20px 70px oklch(0 0 0 / 0.22);
+  --shadow-dropdown: 0 8px 24px oklch(0 0 0 / 0.16);
+  --code-surface: oklch(0.95 0.006 264);
+  --line-number: oklch(0.55 0.02 264);
+  --diff-addition-background: oklch(0.72 0.17 152 / 0.25);
+  --diff-deletion-background: oklch(0.7 0.18 22 / 0.25);
+  --diff-addition-foreground: oklch(0.45 0.13 152);
+  --diff-deletion-foreground: oklch(0.48 0.16 22);
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
 
   --background: oklch(0.185 0.017 264);
   --foreground: oklch(0.947 0.008 264);
@@ -25,7 +63,55 @@
   --danger-soft: oklch(0.35 0.08 22);
   --info: oklch(0.74 0.13 255);
   --info-soft: oklch(0.34 0.07 258);
-  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  --brand-foreground: oklch(0.17 0.03 220);
+  --scrim: oklch(0.1 0.01 264 / 0.72);
+  --shadow-overlay: 0 20px 70px oklch(0 0 0 / 0.48);
+  --shadow-dropdown: 0 8px 24px oklch(0 0 0 / .4);
+  --code-surface: oklch(0.15 0.015 264);
+  --line-number: oklch(0.52 0.018 264);
+  --diff-addition-background: oklch(0.34 0.07 152 / .18);
+  --diff-deletion-background: oklch(0.34 0.08 22 / .18);
+  --diff-addition-foreground: oklch(0.82 0.09 152);
+  --diff-deletion-foreground: oklch(0.8 0.09 22);
+}
+
+/* Pre-mount default: while no preference has been applied to the root
+   yet, follow the OS color scheme so the first paint already matches
+   it. Roots carrying data-theme are excluded so forced themes ignore
+   the OS. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+
+    --background: oklch(0.185 0.017 264);
+    --foreground: oklch(0.947 0.008 264);
+    --surface: oklch(0.213 0.018 264);
+    --surface-2: oklch(0.243 0.019 264);
+    --surface-3: oklch(0.283 0.021 264);
+    --elevated: oklch(0.235 0.02 264);
+    --muted: oklch(0.688 0.021 264);
+    --border: oklch(0.31 0.019 264);
+    --primary: oklch(0.78 0.115 196);
+    --primary-soft: oklch(0.3 0.045 196);
+    --ok: oklch(0.76 0.16 152);
+    --ok-soft: oklch(0.35 0.07 152);
+    --warn: oklch(0.82 0.15 82);
+    --warn-soft: oklch(0.37 0.06 78);
+    --danger: oklch(0.7 0.18 22);
+    --danger-soft: oklch(0.35 0.08 22);
+    --info: oklch(0.74 0.13 255);
+    --info-soft: oklch(0.34 0.07 258);
+    --brand-foreground: oklch(0.17 0.03 220);
+    --scrim: oklch(0.1 0.01 264 / 0.72);
+    --shadow-overlay: 0 20px 70px oklch(0 0 0 / 0.48);
+    --shadow-dropdown: 0 8px 24px oklch(0 0 0 / .4);
+    --code-surface: oklch(0.15 0.015 264);
+    --line-number: oklch(0.52 0.018 264);
+    --diff-addition-background: oklch(0.34 0.07 152 / .18);
+    --diff-deletion-background: oklch(0.34 0.08 22 / .18);
+    --diff-addition-foreground: oklch(0.82 0.09 152);
+    --diff-deletion-foreground: oklch(0.8 0.09 22);
+  }
 }
 
 * {
@@ -650,7 +736,7 @@ h2 {
   border: 1px solid var(--primary);
   border-radius: 5px;
   background: var(--primary);
-  color: oklch(0.17 0.03 220);
+  color: var(--brand-foreground);
   cursor: pointer;
   font-size: 11px;
   font-weight: 650;
@@ -705,7 +791,7 @@ button:disabled {
   margin: 0;
   border: 0;
   padding-top: 12vh;
-  background: oklch(0.1 0.01 264 / 0.72);
+  background: var(--scrim);
   color: var(--foreground);
 }
 
@@ -723,7 +809,7 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--elevated);
-  box-shadow: 0 20px 70px oklch(0 0 0 / 0.48);
+  box-shadow: var(--shadow-overlay);
 }
 
 .palette-input-row {
@@ -934,7 +1020,7 @@ button:disabled {
 .branch-picker label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .branch-selection { overflow: hidden; max-width: 90px; color: var(--foreground); font-size: 9px; text-overflow: ellipsis; text-transform: none; white-space: nowrap; }
 .branch-picker input { grid-column: 1 / -1; width: 100%; height: 29px; padding: 0 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--foreground); font: 11px var(--font-mono); text-transform: none; }
-.branch-options { position: absolute; z-index: 5; top: calc(100% + 4px); left: 0; display: flex; width: min(280px, calc(100vw - 40px)); max-height: 320px; overflow-y: auto; flex-direction: column; padding: 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--elevated); box-shadow: 0 8px 24px oklch(0 0 0 / .4); text-transform: none; }
+.branch-options { position: absolute; z-index: 5; top: calc(100% + 4px); left: 0; display: flex; width: min(280px, calc(100vw - 40px)); max-height: 320px; overflow-y: auto; flex-direction: column; padding: 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--elevated); box-shadow: var(--shadow-dropdown); text-transform: none; }
 .branch-options > button { flex: none; overflow: hidden; padding: 6px 7px; border: 0; border-radius: 3px; background: transparent; color: var(--foreground); cursor: pointer; font: 11px var(--font-mono); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .branch-options > button:hover, .branch-options > button:focus-visible, .branch-options > button[aria-selected="true"] { background: var(--primary-soft); }
 .branch-options > span { padding: 8px; color: var(--muted); font-size: 10px; text-align: center; }
@@ -960,16 +1046,16 @@ button:disabled {
 .patch-heading { display: flex; height: 36px; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .patch-heading code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hunk-list { min-width: max-content; padding: 12px; font: 13px/1.5 var(--font-mono); }
-.hunk { margin-bottom: 12px; border: 1px solid var(--border); background: oklch(0.15 0.015 264); }
+.hunk { margin-bottom: 12px; border: 1px solid var(--border); background: var(--code-surface); }
 .hunk-header { padding: 4px 10px; color: var(--muted); background: var(--surface-2); font-size: 11px; }
 .diff-line { display: grid; grid-template-columns: 42px 42px max-content; min-height: 20px; padding-right: 12px; white-space: pre; }
 .diff-line code { color: var(--foreground); }
-.line-number { padding-right: 9px; color: oklch(0.52 0.018 264); text-align: right; user-select: none; }
-.patch-metadata { margin: 12px; padding: 10px 12px; overflow: auto; border: 1px solid var(--border); background: oklch(0.15 0.015 264); color: var(--muted); font: 12px/1.5 var(--font-mono); white-space: pre; }
-.diff-line.addition { background: oklch(0.34 0.07 152 / .18); }
-.diff-line.deletion { background: oklch(0.34 0.08 22 / .18); }
-.diff-line.addition code { color: oklch(0.82 0.09 152); }
-.diff-line.deletion code { color: oklch(0.8 0.09 22); }
+.line-number { padding-right: 9px; color: var(--line-number); text-align: right; user-select: none; }
+.patch-metadata { margin: 12px; padding: 10px 12px; overflow: auto; border: 1px solid var(--border); background: var(--code-surface); color: var(--muted); font: 12px/1.5 var(--font-mono); white-space: pre; }
+.diff-line.addition { background: var(--diff-addition-background); }
+.diff-line.deletion { background: var(--diff-deletion-background); }
+.diff-line.addition code { color: var(--diff-addition-foreground); }
+.diff-line.deletion code { color: var(--diff-deletion-foreground); }
 .split-rows { display: grid; grid-template-columns: 42px 1fr 42px 1fr; }
 .diff-line.half { grid-column: span 2; grid-template-columns: 42px 1fr; }
 .diff-line.half + .diff-line.half { border-left: 1px solid var(--border); }
