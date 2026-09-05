@@ -916,6 +916,8 @@ button:disabled {
 .review-heading h1 { margin: 0; font-family: var(--font-mono); font-size: 18px; }
 .back-button, .swap-button { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; }
 .back-button { margin-bottom: 10px; padding: 0; }
+.review-nav { display: inline-flex; align-items: center; gap: 4px; margin-bottom: 10px; }
+.review-nav .icon-button { width: 24px; height: 24px; }
 .back-button:hover, .swap-button:hover { color: var(--foreground); }
 .review-meta { display: flex; min-width: 0; gap: 12px; margin-top: 8px; color: var(--muted); font-size: 10px; }
 .review-meta code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

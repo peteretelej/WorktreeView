@@ -28,7 +28,8 @@
     "check": "tsc --noEmit && tsc -p tsconfig.node.json",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test:desktop": "bash scripts/test-desktop.sh"
+    "test:desktop": "bash scripts/test-desktop.sh",
+    "test:unit": "node --test src/navigation.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

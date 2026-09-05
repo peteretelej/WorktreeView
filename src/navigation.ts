@@ -1,0 +1,96 @@
+export type Worktree = { path: string; branch: string; head: string };
+export type ChangedFile = { path: string; status: string; untracked: boolean };
+export type ReviewScope = "all" | "committed";
+export type ReviewTarget = { kind: "worktree"; worktree: Worktree } | { kind: "ref"; name: string } | { kind: "commit"; sha: string; parents: string[]; defaultBaseAncestor: boolean };
+export type ReviewIdentity = { repoPath: string; base: string; target: ReviewTarget; scope: ReviewScope; reversed: boolean };
+export type CommitInfo = { sha: string; subject: string; author: string; date: string; refs: string[]; parents: string[]; default_base_ancestor: boolean };
+
+export type AppLocation =
+  | { kind: "inbox" }
+  | { kind: "settings" }
+  | { kind: "review"; identity: ReviewIdentity; selectedFile: ChangedFile | null; filePage: number; hunkPage: number }
+  | { kind: "commit-history"; repoPath: string; startPointLabel: string; startRef: string | null; worktreePath: string | null; selectedCommit: CommitInfo | null; selectedFile: ChangedFile | null; filePage: number; hunkPage: number };
+
+export type ReviewLocation = Extract<AppLocation, { kind: "review" }>;
+export type CommitHistoryLocation = Extract<AppLocation, { kind: "commit-history" }>;
+
+export function sameReviewTarget(left: ReviewTarget, right: ReviewTarget): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "ref" && right.kind === "ref") return left.name === right.name;
+  if (left.kind === "commit" && right.kind === "commit") return left.sha === right.sha;
+  return left.kind === "worktree" && right.kind === "worktree" && left.worktree.path === right.worktree.path;
+}
+
+function sameChangedFile(left: ChangedFile | null, right: ChangedFile | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.path === right.path && left.untracked === right.untracked;
+}
+
+export function sameAppLocation(left: AppLocation, right: AppLocation): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "review" && right.kind === "review") {
+    return left.identity.repoPath === right.identity.repoPath
+      && left.identity.base === right.identity.base
+      && sameReviewTarget(left.identity.target, right.identity.target)
+      && left.identity.scope === right.identity.scope
+      && left.identity.reversed === right.identity.reversed
+      && sameChangedFile(left.selectedFile, right.selectedFile)
+      && left.filePage === right.filePage
+      && left.hunkPage === right.hunkPage;
+  }
+  if (left.kind === "commit-history" && right.kind === "commit-history") {
+    return left.repoPath === right.repoPath
+      && left.startRef === right.startRef
+      && left.worktreePath === right.worktreePath
+      && (left.selectedCommit === null) === (right.selectedCommit === null)
+      && (left.selectedCommit === null || right.selectedCommit === null || left.selectedCommit.sha === right.selectedCommit.sha)
+      && sameChangedFile(left.selectedFile, right.selectedFile)
+      && left.filePage === right.filePage
+      && left.hunkPage === right.hunkPage;
+  }
+  return true;
+}
+
+export type NavigationListener = () => void;
+
+export type NavigationHistory = {
+  push(entry: AppLocation): void;
+  replace(entry: AppLocation): void;
+  back(): AppLocation;
+  forward(): AppLocation;
+  peekBack(): AppLocation | null;
+  canBack(): boolean;
+  canForward(): boolean;
+  current(): AppLocation;
+  subscribe(listener: NavigationListener): () => void;
+};
+
+const MAX_HISTORY_ENTRIES = 100;
+
+export function createNavigationHistory(): NavigationHistory {
+  let entries: AppLocation[] = [{ kind: "inbox" }];
+  let index = 0;
+  const listeners = new Set<NavigationListener>();
+  function notify() { for (const listener of listeners) listener(); }
+  return {
+    push(entry) {
+      if (sameAppLocation(entries[index], entry)) return;
+      entries = [...entries.slice(0, index + 1), entry];
+      if (entries.length > MAX_HISTORY_ENTRIES) entries = entries.slice(entries.length - MAX_HISTORY_ENTRIES);
+      index = entries.length - 1;
+      notify();
+    },
+    replace(entry) {
+      if (sameAppLocation(entries[index], entry)) return;
+      entries = [...entries.slice(0, index), entry, ...entries.slice(index + 1)];
+      notify();
+    },
+    back() { if (index > 0) { index -= 1; notify(); } return entries[index]; },
+    peekBack() { return index > 0 ? entries[index - 1] : null; },
+    forward() { if (index < entries.length - 1) { index += 1; notify(); } return entries[index]; },
+    canBack() { return index > 0; },
+    canForward() { return index < entries.length - 1; },
+    current() { return entries[index]; },
+    subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+  };
+}
