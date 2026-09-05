@@ -970,6 +970,14 @@ button:disabled {
 .diff-line.deletion { background: oklch(0.34 0.08 22 / .18); }
 .diff-line.addition code { color: oklch(0.82 0.09 152); }
 .diff-line.deletion code { color: oklch(0.8 0.09 22); }
+.split-rows { display: grid; grid-template-columns: 42px 1fr 42px 1fr; }
+.diff-line.half { grid-column: span 2; grid-template-columns: 42px 1fr; }
+.diff-line.half + .diff-line.half { border-left: 1px solid var(--border); }
+.whitespace-glyph { color: var(--muted); }
+.hunk-list.wrap-lines { min-width: 0; }
+.hunk-list.wrap-lines .diff-line { grid-template-columns: 42px 42px minmax(0, 1fr); white-space: pre-wrap; overflow-wrap: anywhere; }
+.hunk-list.wrap-lines .split-rows { grid-template-columns: 42px minmax(0, 1fr) 42px minmax(0, 1fr); }
+.hunk-list.wrap-lines .diff-line.half { grid-template-columns: 42px minmax(0, 1fr); }
 .index-skeleton, .patch-skeleton { padding: 8px; }
 .index-skeleton i, .patch-skeleton i { display: block; height: 25px; margin-bottom: 6px; border-radius: 3px; background: var(--surface-2); opacity: .7; }
 .patch-skeleton { padding: 24px; }
