@@ -272,7 +272,11 @@ function App() {
         setReviewIndex({ files: [], additions: 0, deletions: 0, base_sha: "", target_sha: "", error: errorMessage(error) });
       }
     } finally {
-      if (generation === indexGenerationRef.current && reviewLoadsMatch(identity)) setReviewLoading(false);
+      // Clear the loading flag for the newest generation regardless of the
+      // live location; only the result above is position-sensitive. A
+      // position-gated reset would wedge a review restored via history on
+      // its loading skeleton forever, with no in-surface recovery.
+      if (generation === indexGenerationRef.current) setReviewLoading(false);
     }
   }
   async function toggleRepo(repo: Repo) {
@@ -306,7 +310,10 @@ function App() {
         setReviewIndex({ files: [], additions: 0, deletions: 0, base_sha: "", target_sha: "", error: errorMessage(error) });
       }
     } finally {
-      if (generation === indexGenerationRef.current && reviewLoadsMatch(identity)) setReviewLoading(false);
+      // Same as openReview: the reset is generation-scoped so a load
+      // orphaned by navigation cannot leave the restored review stuck on
+      // its loading skeleton; returning via history re-runs it.
+      if (generation === indexGenerationRef.current) setReviewLoading(false);
     }
   }
   function changeReviewSetting(nextBase: string, nextScope = scope, nextReversed = reversed) {
