@@ -3,7 +3,7 @@ use cap_std::{
     ambient_authority,
     fs::{Dir, OpenOptions},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use std::{
     io::Read,
@@ -85,6 +85,88 @@ pub struct CommitInfo {
 pub struct CommitPage {
     pub commits: Vec<CommitInfo>,
     pub has_more: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    fn as_value(&self) -> &'static str {
+        match self {
+            Theme::System => "system",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        }
+    }
+
+    fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Theme::System),
+            "light" => Some(Theme::Light),
+            "dark" => Some(Theme::Dark),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffLayout {
+    Unified,
+    Split,
+}
+
+impl DiffLayout {
+    fn as_value(&self) -> &'static str {
+        match self {
+            DiffLayout::Unified => "unified",
+            DiffLayout::Split => "split",
+        }
+    }
+
+    fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "unified" => Some(DiffLayout::Unified),
+            "split" => Some(DiffLayout::Split),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct Settings {
+    pub theme: Theme,
+    pub diff_layout: DiffLayout,
+    pub whitespace_visible: bool,
+    pub line_wrap: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: Theme::System,
+            diff_layout: DiffLayout::Unified,
+            whitespace_visible: false,
+            line_wrap: false,
+        }
+    }
+}
+
+fn settings_bool_value(flag: bool) -> &'static str {
+    if flag { "true" } else { "false" }
+}
+
+fn settings_bool_from_value(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1116,6 +1198,84 @@ async fn set_repo_pinned_in_pool(
 }
 
 #[tauri::command]
+async fn get_settings(state: tauri::State<'_, AppState>) -> Result<Settings, CommandError> {
+    get_settings_in_pool(&state.pool).await
+}
+
+// Missing or unparseable rows fall back to defaults; partial or corrupt
+// storage never fails the read.
+async fn get_settings_in_pool(pool: &SqlitePool) -> Result<Settings, CommandError> {
+    let rows = sqlx::query("SELECT key, value FROM settings")
+        .fetch_all(pool)
+        .await?;
+    let mut settings = Settings::default();
+    for row in rows {
+        let key: String = row.try_get("key")?;
+        let value: String = row.try_get("value")?;
+        match key.as_str() {
+            "theme" => {
+                if let Some(theme) = Theme::from_value(&value) {
+                    settings.theme = theme;
+                }
+            }
+            "diff_layout" => {
+                if let Some(diff_layout) = DiffLayout::from_value(&value) {
+                    settings.diff_layout = diff_layout;
+                }
+            }
+            "whitespace_visible" => {
+                if let Some(flag) = settings_bool_from_value(&value) {
+                    settings.whitespace_visible = flag;
+                }
+            }
+            "line_wrap" => {
+                if let Some(flag) = settings_bool_from_value(&value) {
+                    settings.line_wrap = flag;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(settings)
+}
+
+#[tauri::command]
+async fn set_settings(
+    state: tauri::State<'_, AppState>,
+    settings: Settings,
+) -> Result<Settings, CommandError> {
+    set_settings_in_pool(&state.pool, &settings).await
+}
+
+async fn set_settings_in_pool(
+    pool: &SqlitePool,
+    settings: &Settings,
+) -> Result<Settings, CommandError> {
+    let values = [
+        ("theme", settings.theme.as_value()),
+        ("diff_layout", settings.diff_layout.as_value()),
+        (
+            "whitespace_visible",
+            settings_bool_value(settings.whitespace_visible),
+        ),
+        ("line_wrap", settings_bool_value(settings.line_wrap)),
+    ];
+    let mut transaction = pool.begin().await?;
+    for (key, value) in values {
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
 async fn list_refs(
     path: String,
     worktree_branch: Option<String>,
@@ -1517,7 +1677,9 @@ pub fn run() {
             list_refs,
             list_commits,
             list_review_changes,
-            read_review_patch
+            read_review_patch,
+            get_settings,
+            set_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1542,6 +1704,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("CREATE TABLE repos (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, last_opened_at INTEGER NOT NULL, created_at INTEGER NOT NULL, pinned_at INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             .execute(&pool)
             .await
             .unwrap();
@@ -2772,6 +2938,44 @@ bare
         let pool = test_pool().await;
         let error = set_repo_pinned_in_pool(&pool, "/missing", true).await.unwrap_err();
         assert_eq!(error.code, "persistence");
+    }
+
+    #[tokio::test]
+    async fn settings_default_when_table_is_empty() {
+        let pool = test_pool().await;
+        assert_eq!(
+            get_settings_in_pool(&pool).await.unwrap(),
+            Settings::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_round_trip_persists_all_fields() {
+        let pool = test_pool().await;
+        let settings = Settings {
+            theme: Theme::Dark,
+            diff_layout: DiffLayout::Split,
+            whitespace_visible: true,
+            line_wrap: true,
+        };
+        let persisted = set_settings_in_pool(&pool, &settings).await.unwrap();
+        assert_eq!(persisted, settings);
+        assert_eq!(get_settings_in_pool(&pool).await.unwrap(), settings);
+    }
+
+    #[tokio::test]
+    async fn corrupt_settings_rows_fall_back_to_defaults() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES ('theme', 'neon'), ('diff_layout', 'fancy'), ('whitespace_visible', 'maybe'), ('line_wrap', 'sometimes')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            get_settings_in_pool(&pool).await.unwrap(),
+            Settings::default()
+        );
     }
 
     #[test]

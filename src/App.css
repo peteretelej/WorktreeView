@@ -146,8 +146,17 @@ code,
   color: var(--foreground);
 }
 
-.collapse-button {
+.footer-button {
+  width: 26px;
+  height: 26px;
+  flex: none;
+}
+
+.footer-note {
+  display: inline-flex;
   margin-left: auto;
+  align-items: center;
+  gap: 5px;
 }
 
 .nav-tabs {
@@ -835,7 +844,6 @@ button:disabled {
   }
 
   .brand-name,
-  .collapse-button,
   .nav-tab span,
   .search-trigger span,
   .search-trigger kbd,
@@ -1003,4 +1011,28 @@ button:disabled {
   .review-controls { width: 100%; align-items: center; }
   .review-meta { display: none; }
   .review-heading h1 { font-size: 16px; }
+}
+
+.settings-overlay { position: fixed; z-index: 15; inset: 0; display: grid; grid-template-columns: 240px minmax(0, 1fr); background: var(--background); }
+.settings-nav { display: flex; min-width: 0; flex-direction: column; gap: 14px; padding: 14px 12px; border-right: 1px solid var(--border); background: var(--surface); }
+.settings-nav .back-button { margin-bottom: 0; }
+.settings-nav-sections { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.settings-nav-link { display: flex; height: 30px; align-items: center; padding: 0 8px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; text-align: left; }
+.settings-nav-link:hover, .settings-nav-link:focus-visible { background: var(--surface-2); color: var(--foreground); }
+.settings-content { min-width: 0; overflow-y: auto; padding: 28px 32px 44px; }
+.settings-section { max-width: 660px; margin: 0 0 26px; }
+.settings-section h2 { margin-bottom: 8px; }
+.settings-row { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.settings-row-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.settings-row-copy strong { font-size: 12px; font-weight: 600; }
+.settings-row-copy span { color: var(--muted); font-size: 10px; }
+.settings-toggle { cursor: pointer; }
+.settings-toggle input { width: 14px; height: 14px; accent-color: var(--primary); }
+.settings-inline-error { max-width: 660px; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 5px; background: var(--danger-soft); color: var(--foreground); font-size: 11px; }
+
+@media (max-width: 760px) {
+  .settings-overlay { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .settings-nav { flex-direction: row; align-items: center; border-right: 0; border-bottom: 1px solid var(--border); }
+  .settings-nav-sections { flex-direction: row; gap: 4px; }
+  .settings-content { padding: 18px 16px 32px; }
 }
