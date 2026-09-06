@@ -1081,6 +1081,7 @@ button:disabled {
 .commits-bar-heading { display: flex; height: 30px; flex: none; align-items: center; justify-content: space-between; padding: 0 6px 0 10px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
 .commits-bar-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commits-bar-heading .icon-button { width: 22px; height: 22px; flex: none; }
+.commits-bar-actions { display: flex; flex: none; gap: 2px; align-items: center; }
 .commit-list { min-height: 0; flex: 1; overflow-y: auto; padding: 2px 4px 6px; }
 .commit-row { display: flex; width: 100%; flex-direction: column; gap: 2px; padding: 5px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
 .commit-row:hover { background: var(--surface-2); color: var(--foreground); }

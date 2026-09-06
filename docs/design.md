@@ -14,9 +14,12 @@ built for developers running multiple coding agents in parallel.
   the merge-base, including uncommitted and untracked work. A committed-only
   toggle narrows the scope. Non-worktree targets (branches, tags) are
   committed-only by definition.
-- Individual commits are reviewable against their parent, with the empty
-  tree as the base for parentless commits. A paged history view provides
-  commit pickers.
+- Commit history is the default surface for an activated repository: a paged
+  history view for the selected worktree's branch opens alongside the inbox
+  and provides commit pickers. Dismissing it returns to the worktree table
+  until the repository is activated again. Individual commits are reviewable
+  against their parent, with the empty tree as the base for parentless
+  commits.
 - Settings (appearance, diff display, dark and light themes) persist
   locally.
 
