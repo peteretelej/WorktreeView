@@ -43,7 +43,11 @@ pub(crate) fn git_execution_error(stderr: &[u8]) -> CommandError {
     CommandError::new("git_execution", message)
 }
 
-pub(crate) async fn run_git(path: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
+fn dir_git_command(
+    path: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<Command, CommandError> {
     let path = path.to_str().ok_or_else(|| {
         CommandError::new("invalid_path", "The selected path is not valid UTF-8.")
     })?;
@@ -56,6 +60,9 @@ pub(crate) async fn run_git(path: &Path, args: &[&str]) -> Result<(i32, Vec<u8>,
             "diff.autoRefreshIndex=false",
         ])
         .env("GIT_NO_LAZY_FETCH", "1");
+    for (name, value) in env {
+        command.env(name, value);
+    }
     if args.starts_with(&["-c", "core.quotePath=false"]) {
         command
             .args(["-c", "core.quotePath=false", "-C", path])
@@ -63,11 +70,20 @@ pub(crate) async fn run_git(path: &Path, args: &[&str]) -> Result<(i32, Vec<u8>,
     } else {
         command.args(["-C", path]).args(args);
     }
-    let mut child = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    Ok(command)
+}
+
+pub(crate) async fn run_git_with_env(
+    path: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
+    let mut child = dir_git_command(path, args, env)?
         .spawn()
         .map_err(|_| CommandError::new("git_execution", "Git could not be started."))?;
     let stdout = child
@@ -108,6 +124,10 @@ pub(crate) async fn run_git(path: &Path, args: &[&str]) -> Result<(i32, Vec<u8>,
             ))
         }
     }
+}
+
+pub(crate) async fn run_git(path: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
+    run_git_with_env(path, args, &[]).await
 }
 
 pub(crate) fn stdin_git_command(args: &[&str]) -> Command {
@@ -243,6 +263,34 @@ mod tests {
         assert!(acceptable_diff_exit(1, true));
         assert!(!acceptable_diff_exit(1, false));
         assert!(!acceptable_diff_exit(2, true));
+    }
+
+    #[test]
+    fn dir_commands_apply_only_requested_extra_environment() {
+        let dir = std::env::temp_dir();
+        let probe_args = ["rev-parse", "--is-inside-work-tree"];
+        let pinned_command =
+            dir_git_command(&dir, &probe_args, &[("LC_ALL", "C"), ("LANG", "C")]).unwrap();
+        let pinned = pinned_command.as_std().get_envs().collect::<Vec<_>>();
+        assert_eq!(
+            pinned
+                .iter()
+                .find(|(name, _)| *name == OsStr::new("LC_ALL"))
+                .and_then(|(_, value)| *value),
+            Some(OsStr::new("C"))
+        );
+        assert_eq!(
+            pinned
+                .iter()
+                .find(|(name, _)| *name == OsStr::new("LANG"))
+                .and_then(|(_, value)| *value),
+            Some(OsStr::new("C"))
+        );
+        let plain_command = dir_git_command(&dir, &probe_args, &[]).unwrap();
+        let plain = plain_command.as_std().get_envs().collect::<Vec<_>>();
+        assert!(plain
+            .iter()
+            .all(|(name, _)| *name != OsStr::new("LC_ALL") && *name != OsStr::new("LANG")));
     }
 
     #[test]

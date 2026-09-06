@@ -1,8 +1,14 @@
 use super::exec::{
-    git_args, git_execution_error, repo_stdin_git_command, run_git, run_git_with_stdin,
+    git_args, git_execution_error, repo_stdin_git_command, run_git, run_git_with_env,
+    run_git_with_stdin,
 };
 use crate::CommandError;
 use std::path::Path;
+
+// Git localizes diagnostics via gettext, so only invocations whose stderr is
+// machine-parsed run in the C locale; everything else keeps the user's
+// language for human-readable errors.
+const DIAGNOSTIC_ENV: &[(&str, &str)] = &[("LC_ALL", "C"), ("LANG", "C")];
 
 pub(crate) fn validate_ref(value: &str, name: &str) -> Result<(), CommandError> {
     if value.starts_with('-') {
@@ -46,13 +52,13 @@ pub(crate) fn validate_untracked_combination(
 }
 
 pub(crate) async fn ensure_work_tree(canonical: &Path) -> Result<(), CommandError> {
-    let (exit_code, stdout, stderr) =
-        run_git(canonical, &["rev-parse", "--is-inside-work-tree"]).await?;
-    if exit_code != 0
-        && !String::from_utf8_lossy(&stderr)
-            .to_ascii_lowercase()
-            .contains("not a git repository")
-    {
+    let (exit_code, stdout, stderr) = run_git_with_env(
+        canonical,
+        &["rev-parse", "--is-inside-work-tree"],
+        DIAGNOSTIC_ENV,
+    )
+    .await?;
+    if exit_code != 0 && !is_not_a_repository_diagnostic(&stderr) {
         return Err(git_execution_error(&stderr));
     }
     if exit_code != 0 || std::str::from_utf8(&stdout).map(|value| value.trim()) != Ok("true") {
@@ -62,6 +68,12 @@ pub(crate) async fn ensure_work_tree(canonical: &Path) -> Result<(), CommandErro
         ));
     }
     Ok(())
+}
+
+fn is_not_a_repository_diagnostic(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr)
+        .to_ascii_lowercase()
+        .contains("not a git repository")
 }
 
 pub(crate) fn validate_scope_combination(
@@ -169,6 +181,21 @@ mod tests {
         assert!(validate_file("-file.txt").is_err());
         assert!(validate_file("../file.txt").is_err());
         assert!(validate_file("src/file.txt").is_ok());
+    }
+
+    #[test]
+    fn matches_only_not_a_repository_diagnostics() {
+        assert!(is_not_a_repository_diagnostic(
+            b"fatal: not a git repository (or any of the parent directories): .git"
+        ));
+        // Localized output does not match, which is why the probe pins the locale.
+        assert!(!is_not_a_repository_diagnostic(
+            b"fatal: kein Git-Repository (oder eines der \\303\\274bergeordneten Verzeichnisse): .git"
+        ));
+        assert!(!is_not_a_repository_diagnostic(
+            b"fatal: unable to access '.git': Permission denied"
+        ));
+        assert!(!is_not_a_repository_diagnostic(b""));
     }
     #[test]
     fn selects_main_then_master_as_primary_branch() {
