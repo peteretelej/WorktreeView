@@ -7,7 +7,7 @@ Built for developers running multiple coding agents in parallel: open a
 repository, click a worktree, branch, or commit, and see what changed
 against the right base, without checking anything out.
 
-<!-- TODO: screenshot -->
+![WorktreeView reviewing a commit in the git-cache-retrospection worktree](docs/images/screenshot.png)
 
 ## Features
 
