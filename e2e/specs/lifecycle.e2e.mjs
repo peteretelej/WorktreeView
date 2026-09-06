@@ -132,7 +132,7 @@ describe("bundled desktop lifecycle", () => {
     await $(".worktree-row").waitForDisplayed();
     await expect($(`small=${fixture}`)).toBeDisplayed();
     await expect($(`strong=${branch}`)).toBeDisplayed();
-    await expect($(`code=${head}`)).toBeDisplayed();
+    await expect($(`code=${head.slice(0, 7)}`)).toBeDisplayed();
 
     const sidebarRepository = path.join(fixtureRoot, "sidebar-repository");
     createRepository(sidebarRepository);
