@@ -130,7 +130,7 @@ describe("bundled desktop lifecycle", () => {
     const head = git(["rev-parse", "HEAD"], fixture);
     await openSelectedRepository(fixture);
     await $(".worktree-row").waitForDisplayed();
-    await expect($(`small=${fixture}`)).toBeDisplayed();
+    await expect($(`.worktree-row[title="${fixture}"]`)).toBeDisplayed();
     await expect($(`strong=${branch}`)).toBeDisplayed();
     await expect($(`code=${head.slice(0, 7)}`)).toBeDisplayed();
 
@@ -160,13 +160,13 @@ describe("bundled desktop lifecycle", () => {
 
     await browser.refresh();
     await $(".worktree-row").waitForDisplayed();
-    await expect($(`small=${sidebarRepository}`)).toBeDisplayed();
+    await expect($(`.worktree-row[title="${sidebarRepository}"]`)).toBeDisplayed();
 
     const firstSession = browser.sessionId;
     await browser.reloadSession();
     expect(browser.sessionId).not.toBe(firstSession);
     await $(".worktree-row").waitForDisplayed();
-    await expect($(`small=${sidebarRepository}`)).toBeDisplayed();
+    await expect($(`.worktree-row[title="${sidebarRepository}"]`)).toBeDisplayed();
 
     const detached = path.join(fixtureRoot, "detached-repository");
     createRepository(detached);
@@ -270,7 +270,7 @@ describe("bundled desktop lifecycle", () => {
 
     await $('button[aria-label="Find repositories and worktrees"]').click();
     await $(".palette-input-row input").setValue("review-feature");
-    const worktreePaletteResult = await $(`//div[contains(@class, "palette-results")]/button[.//small[normalize-space()="${worktree}"]]`);
+    const worktreePaletteResult = await $(`//div[contains(@class, "palette-results")]/button[@title="${worktree}"]`);
     await expect(worktreePaletteResult).toBeDisplayed();
     await worktreePaletteResult.click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
@@ -279,7 +279,7 @@ describe("bundled desktop lifecycle", () => {
 
     await $('button[aria-label="Find repositories and worktrees"]').click();
     await $(".palette-input-row input").setValue("review-switch-repository");
-    const repositoryPaletteResult = await $(`//div[contains(@class, "palette-results")]/button[.//small[normalize-space()="${switchRepository}"]]`);
+    const repositoryPaletteResult = await $(`//div[contains(@class, "palette-results")]/button[@title="${switchRepository}"]`);
     await expect(repositoryPaletteResult).toBeDisplayed();
     await repositoryPaletteResult.click();
     await expect($("h1=Worktrees")).toBeDisplayed();
@@ -287,7 +287,7 @@ describe("bundled desktop lifecycle", () => {
 
     await $('button[aria-label="Find repositories and worktrees"]').click();
     await $(".palette-input-row input").setValue("review-feature");
-    const reopenedWorktreePaletteResult = await $(`//div[contains(@class, "palette-results")]/button[.//small[normalize-space()="${worktree}"]]`);
+    const reopenedWorktreePaletteResult = await $(`//div[contains(@class, "palette-results")]/button[@title="${worktree}"]`);
     await expect(reopenedWorktreePaletteResult).toBeDisplayed();
     await reopenedWorktreePaletteResult.click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
