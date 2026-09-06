@@ -13,6 +13,13 @@ in parallel.
 - Rust backend for process orchestration, normalization, SQLite, and typed IPC
 - Native Git CLI as the semantic authority; do not add libgit2
 
+The CLI is the authority because it matches each user's installed Git exactly
+(repo formats, ref semantics, diff behavior), streams output that can be
+bounded and cancelled, and keeps Git crashes in a child process; libgit2 lags
+Git on all three. The cost, that only the CLI is available for queries, is paid
+with stable porcelain formats and locale pinning on any invocation whose
+diagnostics are machine-parsed.
+
 Keep Git semantics and filesystem access out of the React layer. The webview
 receives normalized domain data through narrow Tauri commands.
 
