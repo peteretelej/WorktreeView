@@ -11,14 +11,7 @@ pub(crate) async fn test_pool() -> SqlitePool {
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    sqlx::query("CREATE TABLE repos (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, last_opened_at INTEGER NOT NULL, created_at INTEGER NOT NULL, pinned_at INTEGER)")
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
     pool
 }
 

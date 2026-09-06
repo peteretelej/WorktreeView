@@ -411,7 +411,7 @@ function App() {
   }
   async function loadHistoryPage(entry: HistoryEntry, generation: number, skip: number, against: string | null, append: boolean) {
     try {
-      const page = await invoke<CommitPage>("list_commits", { path: entry.worktreePath ?? entry.repoPath, startRef: entry.startRef ?? null, against, skip, limit: COMMIT_PAGE_SIZE });
+      const page = await invoke<CommitPage>("list_commits", { path: entry.worktreePath ?? entry.repoPath, repoPath: entry.repoPath, startRef: entry.startRef ?? null, against, skip, limit: COMMIT_PAGE_SIZE });
       if (generation !== historyGenerationRef.current) return;
       setHistory((current) => current && current.repoPath === entry.repoPath && current.startPointLabel === entry.startPointLabel ? { ...current, commits: append ? [...current.commits, ...page.commits] : page.commits, hasMore: page.has_more, loading: false, error: "" } : current);
     } catch (error) {

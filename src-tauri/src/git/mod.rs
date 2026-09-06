@@ -8,7 +8,7 @@ pub(crate) use exec::{
     stdin_git_command, MAX_OUTPUT,
 };
 #[cfg(test)]
-pub(crate) use exec::read_bounded;
+pub(crate) use exec::{read_bounded, spawn_counted};
 pub(crate) use filters::{
     configured_filter_names, filter_override_args, reject_applicable_filters,
 };

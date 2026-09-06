@@ -1,1 +1,0 @@
-ALTER TABLE repos ADD COLUMN pinned_at INTEGER;

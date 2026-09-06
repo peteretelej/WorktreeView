@@ -165,6 +165,7 @@ pub(crate) async fn normalize_stored_paths(pool: &SqlitePool) -> Result<(), sqlx
         .bind(&path)
         .execute(pool)
         .await?;
+        crate::cache::carry_repo_path(pool, &path, simplified).await?;
         sqlx::query("DELETE FROM repos WHERE path = ?")
             .bind(&path)
             .execute(pool)
@@ -476,5 +477,41 @@ mod tests {
         let rows = load_repos(&pool).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, r"C:\repos\demo");
+    }
+
+    #[tokio::test]
+    async fn normalization_carries_cached_pages_to_the_plain_path() {
+        let pool = test_pool().await;
+        let verbatim = r"\\?\C:\repos\demo";
+        let plain = r"C:\repos\demo";
+        sqlx::query("INSERT INTO repos (path, name, last_opened_at, created_at, pinned_at) VALUES (?, 'demo', 50, 40, 7)")
+            .bind(verbatim)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let start_sha = "a".repeat(40);
+        let commits = [crate::git::CommitInfo {
+            sha: start_sha.clone(),
+            subject: "carried".into(),
+            author: "A U Thor".into(),
+            date: "2026-01-02T03:04:05+00:00".into(),
+            refs: Vec::new(),
+            parents: Vec::new(),
+            default_base_ancestor: false,
+        }];
+        crate::cache::store_log_page(&pool, verbatim, &start_sha, "", 0, 1, &commits, false).await;
+
+        normalize_stored_paths(&pool).await.unwrap();
+
+        let (cached, has_more) = crate::cache::lookup_log_page(&pool, plain, &start_sha, "", 0, 1)
+            .await
+            .unwrap();
+        assert!(!has_more);
+        assert_eq!(cached[0].subject, "carried");
+        assert!(
+            crate::cache::lookup_log_page(&pool, verbatim, &start_sha, "", 0, 1)
+                .await
+                .is_none()
+        );
     }
 }

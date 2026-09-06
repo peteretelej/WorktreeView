@@ -1,3 +1,4 @@
+mod cache;
 mod commands;
 mod git;
 mod review;

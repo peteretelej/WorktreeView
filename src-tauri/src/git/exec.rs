@@ -1,12 +1,76 @@
 use crate::CommandError;
+#[cfg(test)]
+use std::cell::Cell;
+#[cfg(test)]
+use std::future::Future;
 use std::path::Path;
 use std::process::Stdio;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::time::{timeout, Duration};
 
 pub(crate) const MAX_OUTPUT: usize = 4 * 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+// Test-only spawn counter: one increment per spawned git child, the
+// assertion mechanism for cache tests. While a counting window is open,
+// spawns from other threads pause at the gate, so exact spawn-delta
+// assertions observe exactly the window's own children. Spawns inside the
+// window bypass the gate via its thread flag.
+#[cfg(test)]
+static SPAWN_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static SPAWN_GATE: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+thread_local! {
+    static SPAWN_COUNTING: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_spawn_count() {
+    SPAWN_COUNT.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_count() -> u64 {
+    SPAWN_COUNT.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn count_spawn() {
+    let counting = SPAWN_COUNTING.with(Cell::get);
+    // Hold the gate across the increment so a spawn either completes before
+    // a counting window opens or waits until one closes, never in between.
+    let _guard = (!counting).then(|| {
+        SPAWN_GATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    });
+    SPAWN_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+// Runs `future` inside an exclusive counting window and returns its output
+// plus the number of git children it spawned.
+#[cfg(test)]
+pub(crate) async fn spawn_counted<F, T>(future: F) -> (u64, T)
+where
+    F: Future<Output = T>,
+{
+    let guard = SPAWN_GATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    SPAWN_COUNTING.with(|counting| counting.set(true));
+    reset_spawn_count();
+    let output = future.await;
+    let count = spawn_count();
+    SPAWN_COUNTING.with(|counting| counting.set(false));
+    drop(guard);
+    (count, output)
+}
 
 // Suppresses console windows when a GUI-parented git spawn would otherwise
 // flash one (children inherit the hidden console).
@@ -100,6 +164,8 @@ pub(crate) async fn run_git_with_env(
     let mut child = dir_git_command(path, args, env)?
         .spawn()
         .map_err(|_| CommandError::new("git_execution", "Git could not be started."))?;
+    #[cfg(test)]
+    count_spawn();
     let stdout = child
         .stdout
         .take()
@@ -171,6 +237,8 @@ pub(crate) async fn run_git_with_stdin(
     let mut child = command
         .spawn()
         .map_err(|_| CommandError::new("git_execution", "Git could not be started."))?;
+    #[cfg(test)]
+    count_spawn();
     let mut stdin = child
         .stdin
         .take()

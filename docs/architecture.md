@@ -24,6 +24,8 @@ normalized domain data through narrow, typed Tauri commands.
   commits, worktrees, untracked paths) into typed domain structs.
 - `review.rs`: assembles review data (changed files, patches, commits,
   refs) from Git results.
+- `cache.rs`: SQLite-backed history cache for commit pages and ancestry
+  marks, keyed by resolved SHAs.
 - `store.rs`: SQLite persistence (sqlx) for repositories, pins, and
   settings, plus path canonicalization and normalization of stored
   Windows verbatim paths. Migrations live in `src-tauri/migrations`.
@@ -46,6 +48,15 @@ test:unit`.
 
 ## Persistence
 
-SQLite stores repositories, pin order, and settings. Review flows are
-read-only and write nothing back to Git; see
-[safety-model.md](safety-model.md).
+SQLite stores repositories, pin order, and settings. It also caches commit
+history: `list_commits` resolves the start ref with one fresh
+`git rev-parse`, then serves log pages and default-base ancestry marks from
+the cache when the resolved SHAs match what was fetched before. Pages key
+on `(repo_path, start_sha, against_sha, skip, limit)` with commit rows
+keyed by SHA, and ancestry marks on `(commit_sha, against_sha)`; a branch
+move changes the resolved SHA, so stale pages are never served. Cache
+writes are best-effort and never fail an open. Developers upgrading from
+an older build must delete the app's `worktreeview.sqlite3` once (the
+migration set was consolidated); desktop e2e containers rebuild their
+database on every run. Review flows remain read-only and write nothing
+back to Git; see [safety-model.md](safety-model.md).

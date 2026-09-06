@@ -79,12 +79,23 @@ pub(crate) async fn list_refs(
 #[tauri::command]
 pub(crate) async fn list_commits(
     path: String,
+    repo_path: String,
     start_ref: Option<String>,
     against: Option<String>,
     skip: Option<u32>,
     limit: Option<u16>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<CommitPage, CommandError> {
-    commit_page(path, start_ref, against, skip, limit).await
+    commit_page(
+        &state.pool,
+        &repo_path,
+        path,
+        start_ref,
+        against,
+        skip,
+        limit,
+    )
+    .await
 }
 
 #[tauri::command]

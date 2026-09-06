@@ -11,6 +11,10 @@ later optimization target.
   process rather than leaking work.
 - No in-process Git engine: large operations stay in a child process, so
   their memory growth and crashes never land in the app.
+- Commit history is cached in SQLite keyed by resolved SHAs: a warm
+  history open skips the `git log` spawn, and deep-page and
+  ancestry-probe costs are paid once per SHA key instead of on every
+  open. `git log` still runs, bounded, whenever the key changes.
 
 ## Webview side
 

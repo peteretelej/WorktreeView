@@ -1,3 +1,4 @@
+use crate::cache;
 use crate::git::{
     acceptable_diff_exit, configured_filter_names, effective_head_ref, filter_override_args,
     git_args, git_execution_error, parse_commits, parse_name_status, parse_numstat,
@@ -13,6 +14,7 @@ use cap_std::{
     fs::{Dir, OpenOptions},
 };
 use serde::Serialize;
+use sqlx::SqlitePool;
 use std::{io::Read, path::Path};
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -229,7 +231,15 @@ async fn mark_default_base_ancestors(
     Ok(())
 }
 
+// Exactly 40 ASCII hex characters: a literal commit SHA, whose content is
+// immutable, versus a symbolic ref that must resolve fresh every time.
+fn literal_sha(reference: &str) -> bool {
+    reference.len() == 40 && reference.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub(crate) async fn commit_page(
+    pool: &SqlitePool,
+    repo_path: &str,
     path: String,
     start_ref: Option<String>,
     against: Option<String>,
@@ -245,13 +255,76 @@ pub(crate) async fn commit_page(
     let path = canonical_path(&path)?;
     let explicit_start = start_ref.is_some();
     let start_ref = effective_head_ref(start_ref);
-    let start_sha = resolve_ref(&path, &start_ref).await?;
-    let against_sha = match against {
-        Some(against) => Some(resolve_ref(&path, &against).await?),
-        None => None,
-    };
     let skip = skip.unwrap_or(0);
     let limit = usize::from(limit.unwrap_or(100).min(100));
+
+    // Symbolic start refs resolve first: the fresh resolution is the cache
+    // key and its freshness proof. Literal start SHAs are content-addressed,
+    // so the cache is consulted before resolving and a hit spawns nothing;
+    // only a miss pays for a resolution (a gc-pruned SHA fails there).
+    // `against` resolves before every cache use: a symbolic base must be
+    // fresh, and a literal-SHA base is used as-is.
+    let start_sha: String;
+    let against_sha: Option<String>;
+    let cached: Option<(Vec<CommitInfo>, bool)>;
+    if literal_sha(&start_ref) {
+        against_sha = match &against {
+            Some(against) => Some(resolve_ref(&path, against).await?),
+            None => None,
+        };
+        cached = cache::lookup_log_page(
+            pool,
+            repo_path,
+            &start_ref,
+            against_sha.as_deref().unwrap_or(""),
+            skip,
+            limit,
+        )
+        .await;
+        if cached.is_some() {
+            start_sha = start_ref.clone();
+        } else {
+            start_sha = resolve_ref(&path, &start_ref).await?;
+        }
+    } else {
+        start_sha = resolve_ref(&path, &start_ref).await?;
+        against_sha = match &against {
+            Some(against) => Some(resolve_ref(&path, against).await?),
+            None => None,
+        };
+        cached = cache::lookup_log_page(
+            pool,
+            repo_path,
+            &start_sha,
+            against_sha.as_deref().unwrap_or(""),
+            skip,
+            limit,
+        )
+        .await;
+    }
+
+    if let Some((mut commits, has_more)) = cached {
+        if let Some(against_sha) = &against_sha {
+            let shas: Vec<String> = commits.iter().map(|commit| commit.sha.clone()).collect();
+            let non_ancestors = match cache::lookup_marks(pool, &shas, against_sha).await {
+                Some(non_ancestors) => non_ancestors,
+                None => {
+                    mark_default_base_ancestors(&path, &mut commits, against_sha).await?;
+                    let non_ancestors: Vec<bool> = commits
+                        .iter()
+                        .map(|commit| !commit.default_base_ancestor)
+                        .collect();
+                    cache::store_marks(pool, &shas, against_sha, &non_ancestors).await;
+                    non_ancestors
+                }
+            };
+            for (commit, non_ancestor) in commits.iter_mut().zip(non_ancestors) {
+                commit.default_base_ancestor = !non_ancestor;
+            }
+        }
+        return Ok(CommitPage { commits, has_more });
+    }
+
     let mut owned_args = vec![
         "log".into(),
         format!("--skip={skip}"),
@@ -259,7 +332,7 @@ pub(crate) async fn commit_page(
         "--format=%H%x1f%s%x1f%an%x1f%aI%x1f%D%x1f%P%x1e".into(),
     ];
     if explicit_start {
-        owned_args.push(start_sha);
+        owned_args.push(start_sha.clone());
     }
     let args = git_args(&owned_args);
     let (exit_code, stdout, stderr) = run_git(&path, &args).await?;
@@ -271,6 +344,27 @@ pub(crate) async fn commit_page(
     commits.truncate(limit);
     if let Some(against_sha) = &against_sha {
         mark_default_base_ancestors(&path, &mut commits, against_sha).await?;
+    }
+    // The cache is an optimization: a failed write (a full disk, for one)
+    // never fails the open.
+    let page_shas: Vec<String> = commits.iter().map(|commit| commit.sha.clone()).collect();
+    cache::store_log_page(
+        pool,
+        repo_path,
+        &start_sha,
+        against_sha.as_deref().unwrap_or(""),
+        skip,
+        limit,
+        &commits,
+        has_more,
+    )
+    .await;
+    if let Some(against_sha) = &against_sha {
+        let non_ancestors: Vec<bool> = commits
+            .iter()
+            .map(|commit| !commit.default_base_ancestor)
+            .collect();
+        cache::store_marks(pool, &page_shas, against_sha, &non_ancestors).await;
     }
     Ok(CommitPage { commits, has_more })
 }
@@ -487,7 +581,8 @@ pub(crate) async fn review_patch(
 mod tests {
     use super::*;
     use crate::git::read_bounded;
-    use crate::testutil::{test_git, test_path, test_repo, test_rev_parse};
+    use crate::git::spawn_counted;
+    use crate::testutil::{test_git, test_path, test_pool, test_repo, test_rev_parse};
     #[cfg(unix)]
     use std::path::PathBuf;
     use std::process::Command as StdCommand;
@@ -1046,6 +1141,8 @@ mod tests {
     #[tokio::test]
     async fn list_commits_pages_bounded_histories() {
         let repo = test_repo("commit-paging");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
         for index in 0..104 {
             std::fs::write(repo.join("tracked.txt"), format!("change {index}\n")).unwrap();
             test_git(&repo, &["add", "tracked.txt"]);
@@ -1054,16 +1151,24 @@ mod tests {
         }
         let head_sha = test_rev_parse(&repo, "HEAD");
 
-        let first = commit_page(repo.to_str().unwrap().into(), None, None, None, None)
+        let first = commit_page(&pool, &repo_path, repo_path.clone(), None, None, None, None)
             .await
             .unwrap();
         assert_eq!(first.commits.len(), 100);
         assert!(first.has_more);
         assert_eq!(first.commits[0].sha, head_sha);
 
-        let second = commit_page(repo.to_str().unwrap().into(), None, None, Some(100), None)
-            .await
-            .unwrap();
+        let second = commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            None,
+            None,
+            Some(100),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(second.commits.len(), 5);
         assert!(!second.has_more);
         assert!(!second
@@ -1071,27 +1176,53 @@ mod tests {
             .iter()
             .any(|commit| first.commits.iter().any(|page| page.sha == commit.sha)));
 
-        let capped = commit_page(repo.to_str().unwrap().into(), None, None, None, Some(1000))
-            .await
-            .unwrap();
+        let capped = commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            None,
+            None,
+            None,
+            Some(1000),
+        )
+        .await
+        .unwrap();
         assert_eq!(capped.commits.len(), 100);
         assert!(capped.has_more);
 
-        let window = commit_page(repo.to_str().unwrap().into(), None, None, Some(2), Some(3))
-            .await
-            .unwrap();
+        let window = commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            None,
+            None,
+            Some(2),
+            Some(3),
+        )
+        .await
+        .unwrap();
         assert_eq!(window.commits.len(), 3);
         assert_eq!(window.commits[0].sha, first.commits[2].sha);
         assert!(window.has_more);
 
-        let exhausted = commit_page(repo.to_str().unwrap().into(), None, None, Some(200), None)
-            .await
-            .unwrap();
+        let exhausted = commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            None,
+            None,
+            Some(200),
+            None,
+        )
+        .await
+        .unwrap();
         assert!(exhausted.commits.is_empty());
         assert!(!exhausted.has_more);
 
         let unresolvable = commit_page(
-            repo.to_str().unwrap().into(),
+            &pool,
+            &repo_path,
+            repo_path.clone(),
             Some("refs/heads/missing".into()),
             None,
             None,
@@ -1107,6 +1238,8 @@ mod tests {
     #[tokio::test]
     async fn list_commits_marks_default_base_ancestry() {
         let repo = test_repo("commit-ancestry");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
         test_git(&repo, &["branch", "-M", "main"]);
         let initial_sha = test_rev_parse(&repo, "HEAD");
         std::fs::write(repo.join("main-only.txt"), "main\n").unwrap();
@@ -1120,7 +1253,9 @@ mod tests {
         let feature_sha = test_rev_parse(&repo, "refs/heads/feature");
 
         let page = commit_page(
-            repo.to_str().unwrap().into(),
+            &pool,
+            &repo_path,
+            repo_path.clone(),
             Some("refs/heads/feature".into()),
             Some("refs/heads/main".into()),
             None,
@@ -1141,7 +1276,9 @@ mod tests {
         assert!(marked(&initial_sha));
 
         let unmarked = commit_page(
-            repo.to_str().unwrap().into(),
+            &pool,
+            &repo_path,
+            repo_path.clone(),
             Some("refs/heads/feature".into()),
             None,
             None,
@@ -1155,7 +1292,9 @@ mod tests {
             .all(|commit| !commit.default_base_ancestor));
 
         let unresolvable_against = commit_page(
-            repo.to_str().unwrap().into(),
+            &pool,
+            &repo_path,
+            repo_path.clone(),
             None,
             Some("refs/heads/missing".into()),
             None,
@@ -1211,6 +1350,8 @@ mod tests {
     #[tokio::test]
     async fn merge_first_parent_base_reviews_merge_own_changes() {
         let repo = test_repo("merge-first-parent");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
         test_git(&repo, &["branch", "-M", "main"]);
         std::fs::write(repo.join("main.txt"), "main\n").unwrap();
         test_git(&repo, &["add", "main.txt"]);
@@ -1220,7 +1361,17 @@ mod tests {
         test_git(&repo, &["add", "feature.txt"]);
         test_git(&repo, &["commit", "--quiet", "-m", "feature commit"]);
         test_git(&repo, &["checkout", "--quiet", "main"]);
-        test_git(&repo, &["merge", "--no-ff", "--quiet", "-m", "merge feature", "feature"]);
+        test_git(
+            &repo,
+            &[
+                "merge",
+                "--no-ff",
+                "--quiet",
+                "-m",
+                "merge feature",
+                "feature",
+            ],
+        );
         let merge_sha = test_rev_parse(&repo, "HEAD");
         let first_parent = test_rev_parse(&repo, &format!("{merge_sha}^"));
         let second_parent = test_rev_parse(&repo, &format!("{merge_sha}^2"));
@@ -1241,7 +1392,9 @@ mod tests {
         assert_eq!(index.target_sha, merge_sha);
 
         let page = commit_page(
-            repo.to_str().unwrap().into(),
+            &pool,
+            &repo_path,
+            repo_path.clone(),
             Some(merge_sha),
             None,
             None,
@@ -1250,6 +1403,209 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(page.commits[0].parents, [first_parent, second_parent]);
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_history_pages_skip_git_log_spawns() {
+        let repo = test_repo("cache-hit");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        test_git(&repo, &["branch", "-M", "main"]);
+        for index in 0..3 {
+            std::fs::write(repo.join("tracked.txt"), format!("change {index}\n")).unwrap();
+            test_git(&repo, &["add", "tracked.txt"]);
+            let message = format!("commit {index}");
+            test_git(&repo, &["commit", "--quiet", "-m", &message]);
+        }
+
+        let first = commit_page(&pool, &repo_path, repo_path.clone(), None, None, None, None)
+            .await
+            .unwrap();
+        // A symbolic ref cannot skip its resolution (it is the freshness
+        // proof); the hit must skip the `git log` fetch and nothing else.
+        let (spawns, second) = spawn_counted(commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await;
+        assert_eq!(spawns, 1);
+        assert_eq!(first, second.unwrap());
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn literal_sha_hits_spawn_nothing() {
+        let repo = test_repo("cache-literal");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        std::fs::write(repo.join("tracked.txt"), "change\n").unwrap();
+        test_git(&repo, &["add", "tracked.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "second"]);
+        let head_sha = test_rev_parse(&repo, "HEAD");
+
+        let first = commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            Some(head_sha.clone()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        // Content behind a SHA is immutable, so a literal-SHA hit resolves
+        // nothing and spawns no git children at all.
+        let (spawns, second) = spawn_counted(commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            Some(head_sha.clone()),
+            None,
+            None,
+            None,
+        ))
+        .await;
+        assert_eq!(spawns, 0);
+        assert_eq!(first, second.unwrap());
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn head_movement_refetches_history() {
+        let repo = test_repo("cache-head-movement");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        test_git(&repo, &["branch", "-M", "main"]);
+
+        let first = commit_page(&pool, &repo_path, repo_path.clone(), None, None, None, None)
+            .await
+            .unwrap();
+        let (warmup, _) = spawn_counted(commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await;
+        assert_eq!(warmup, 1);
+
+        std::fs::write(repo.join("tracked.txt"), "newer\n").unwrap();
+        test_git(&repo, &["add", "tracked.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "newer commit"]);
+        let new_head = test_rev_parse(&repo, "HEAD");
+
+        // The moved HEAD resolves to a new key, so the open fetches again.
+        let (spawns, moved) = spawn_counted(commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await;
+        assert_eq!(spawns, 2);
+        let moved = moved.unwrap();
+        assert_eq!(moved.commits[0].sha, new_head);
+        assert_ne!(moved.commits[0].sha, first.commits[0].sha);
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ancestry_marks_are_reused_between_identical_opens() {
+        let repo = test_repo("cache-ancestry");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        test_git(&repo, &["branch", "-M", "main"]);
+        let initial_sha = test_rev_parse(&repo, "HEAD");
+        std::fs::write(repo.join("main-only.txt"), "main\n").unwrap();
+        test_git(&repo, &["add", "main-only.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "main change"]);
+        test_git(&repo, &["checkout", "--quiet", "-b", "feature"]);
+        std::fs::write(repo.join("feature-only.txt"), "feature\n").unwrap();
+        test_git(&repo, &["add", "feature-only.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "feature change"]);
+        let main_sha = test_rev_parse(&repo, "refs/heads/main");
+        let feature_sha = test_rev_parse(&repo, "refs/heads/feature");
+        let marked = |page: &CommitPage, sha: &str| {
+            page.commits
+                .iter()
+                .find(|commit| commit.sha == sha)
+                .unwrap()
+                .default_base_ancestor
+        };
+
+        let first = commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            Some("refs/heads/feature".into()),
+            Some("refs/heads/main".into()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.commits.len(), 3);
+        assert!(!marked(&first, &feature_sha));
+        assert!(marked(&first, &main_sha));
+        assert!(marked(&first, &initial_sha));
+
+        // The second identical open resolves both refs but reuses the cached
+        // marks: no `git log`, no `rev-list` probe.
+        let (spawns, second) = spawn_counted(commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            Some("refs/heads/feature".into()),
+            Some("refs/heads/main".into()),
+            None,
+            None,
+        ))
+        .await;
+        assert_eq!(spawns, 2);
+        assert_eq!(first, second.unwrap());
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_keys_share_across_working_directories() {
+        let repo = test_repo("cache-cwd");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        std::fs::create_dir(repo.join("nested")).unwrap();
+        std::fs::write(repo.join("nested/file.txt"), "nested\n").unwrap();
+        test_git(&repo, &["add", "nested/file.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "nested file"]);
+        let subdir = repo.join("nested").to_str().unwrap().to_string();
+
+        let root_page = commit_page(&pool, &repo_path, repo_path.clone(), None, None, None, None)
+            .await
+            .unwrap();
+        // Same repo key under a different git working directory: the page
+        // hits, proving the cache is repo-scoped, not cwd-scoped.
+        let (spawns, subdir_page) = spawn_counted(commit_page(
+            &pool, &repo_path, subdir, None, None, None, None,
+        ))
+        .await;
+        assert_eq!(spawns, 1);
+        assert_eq!(root_page, subdir_page.unwrap());
 
         std::fs::remove_dir_all(repo).unwrap();
     }
