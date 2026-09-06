@@ -70,6 +70,16 @@ pub struct Settings {
     pub diff_layout: DiffLayout,
     pub whitespace_visible: bool,
     pub line_wrap: bool,
+    pub zoom: f64,
+}
+
+// Bounds cover the frontend's zoom level set (src/zoom.ts); stored values
+// outside them are clamped on both read and write.
+const MIN_ZOOM: f64 = 0.5;
+const MAX_ZOOM: f64 = 2.0;
+
+fn clamp_zoom(zoom: f64) -> f64 {
+    if zoom.is_finite() { zoom.clamp(MIN_ZOOM, MAX_ZOOM) } else { Settings::default().zoom }
 }
 
 impl Default for Settings {
@@ -79,6 +89,7 @@ impl Default for Settings {
             diff_layout: DiffLayout::Unified,
             whitespace_visible: false,
             line_wrap: false,
+            zoom: 1.0,
         }
     }
 }
@@ -238,6 +249,11 @@ pub(crate) async fn get_settings_in_pool(pool: &SqlitePool) -> Result<Settings, 
                     settings.line_wrap = flag;
                 }
             }
+            "zoom" => {
+                if let Ok(zoom) = value.parse::<f64>() {
+                    settings.zoom = clamp_zoom(zoom);
+                }
+            }
             _ => {}
         }
     }
@@ -248,14 +264,16 @@ pub(crate) async fn set_settings_in_pool(
     pool: &SqlitePool,
     settings: &Settings,
 ) -> Result<Settings, CommandError> {
+    let zoom = clamp_zoom(settings.zoom);
     let values = [
-        ("theme", settings.theme.as_value()),
-        ("diff_layout", settings.diff_layout.as_value()),
+        ("theme", settings.theme.as_value().to_string()),
+        ("diff_layout", settings.diff_layout.as_value().to_string()),
         (
             "whitespace_visible",
-            settings_bool_value(settings.whitespace_visible),
+            settings_bool_value(settings.whitespace_visible).to_string(),
         ),
-        ("line_wrap", settings_bool_value(settings.line_wrap)),
+        ("line_wrap", settings_bool_value(settings.line_wrap).to_string()),
+        ("zoom", zoom.to_string()),
     ];
     let mut transaction = pool.begin().await?;
     for (key, value) in values {
@@ -269,7 +287,9 @@ pub(crate) async fn set_settings_in_pool(
         .await?;
     }
     transaction.commit().await?;
-    Ok(settings.clone())
+    let mut persisted = settings.clone();
+    persisted.zoom = zoom;
+    Ok(persisted)
 }
 
 #[cfg(test)]
@@ -371,6 +391,7 @@ mod tests {
             diff_layout: DiffLayout::Split,
             whitespace_visible: true,
             line_wrap: true,
+            zoom: 1.25,
         };
         let persisted = set_settings_in_pool(&pool, &settings).await.unwrap();
         assert_eq!(persisted, settings);
@@ -378,10 +399,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn out_of_range_zoom_is_clamped_on_write() {
+        let pool = test_pool().await;
+        let settings = Settings {
+            zoom: 9.0,
+            ..Settings::default()
+        };
+        let persisted = set_settings_in_pool(&pool, &settings).await.unwrap();
+        assert_eq!(persisted.zoom, MAX_ZOOM);
+        assert_eq!(get_settings_in_pool(&pool).await.unwrap().zoom, MAX_ZOOM);
+    }
+
+    #[tokio::test]
     async fn corrupt_settings_rows_fall_back_to_defaults() {
         let pool = test_pool().await;
         sqlx::query(
-            "INSERT INTO settings (key, value) VALUES ('theme', 'neon'), ('diff_layout', 'fancy'), ('whitespace_visible', 'maybe'), ('line_wrap', 'sometimes')",
+            "INSERT INTO settings (key, value) VALUES ('theme', 'neon'), ('diff_layout', 'fancy'), ('whitespace_visible', 'maybe'), ('line_wrap', 'sometimes'), ('zoom', 'huge')",
         )
         .execute(&pool)
         .await

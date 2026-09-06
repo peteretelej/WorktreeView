@@ -20,8 +20,8 @@ built for developers running multiple coding agents in parallel.
   until the repository is activated again. Individual commits are reviewable
   against their parent, with the empty tree as the base for parentless
   commits.
-- Settings (appearance, diff display, dark and light themes) persist
-  locally.
+- Settings (appearance, interface zoom, diff display, dark and light
+  themes) persist locally.
 
 ## Non-goals
 

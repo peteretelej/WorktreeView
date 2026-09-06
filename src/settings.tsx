@@ -1,12 +1,13 @@
 import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ArrowLeft } from "lucide-react";
+import { ZOOM_LEVELS, snapZoom } from "./zoom.ts";
 
 export type Theme = "system" | "light" | "dark";
 export type DiffLayout = "unified" | "split";
-export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean };
+export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; zoom: number };
 
-export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false };
+export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false, zoom: 1 };
 
 export function getSettings() { return invoke<Settings>("get_settings"); }
 export function persistSettings(settings: Settings) { return invoke<Settings>("set_settings", { settings }); }
@@ -37,6 +38,8 @@ const DIFF_LAYOUT_OPTIONS: { value: DiffLayout; label: string }[] = [
   { value: "split", label: "Split" },
 ];
 
+const zoomLabel = (level: number) => `${Math.round(level * 100)}%`;
+
 export function SettingsPage({ settings, saveError, onBack, onChange }: { settings: Settings; saveError: string; onBack: () => void; onChange: (next: Settings) => void }) {
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -62,6 +65,12 @@ export function SettingsPage({ settings, saveError, onBack, onChange }: { settin
         <div className="settings-row">
           <div className="settings-row-copy"><strong>Theme</strong><span>Interface color scheme; system follows the OS color scheme.</span></div>
           <div className="scope-toggle" role="group" aria-label="Theme">{THEME_OPTIONS.map((option) => <button key={option.value} type="button" className={settings.theme === option.value ? "active" : ""} aria-pressed={settings.theme === option.value} onClick={() => onChange({ ...settings, theme: option.value })}>{option.label}</button>)}</div>
+        </div>
+        <div className="settings-row">
+          <div className="settings-row-copy"><strong>Zoom</strong><span>Interface scale; Ctrl +, Ctrl -, and Ctrl 0 also work.</span></div>
+          <select className="settings-select" aria-label="Interface zoom" value={String(snapZoom(settings.zoom))} onChange={(event) => onChange({ ...settings, zoom: Number(event.currentTarget.value) })}>
+            {ZOOM_LEVELS.map((level) => <option key={level} value={String(level)}>{zoomLabel(level)}</option>)}
+          </select>
         </div>
       </section>
       <section id="settings-diff" className="settings-section" aria-labelledby="settings-diff-heading">
