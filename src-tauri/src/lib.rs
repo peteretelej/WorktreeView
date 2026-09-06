@@ -47,6 +47,28 @@ fn sanitize(value: &str) -> String {
         .collect()
 }
 
+// std::fs::canonicalize returns Windows verbatim paths (\\?\C:\... and
+// \\?\UNC\server\share for network shares). Plain paths work everywhere we
+// hand them, but keep verbatim when the plain form would exceed the 260
+// character limit legacy Win32 paths accept.
+pub(crate) fn plain_path(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let plain = if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{share}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        return path.to_path_buf();
+    };
+    if plain.chars().count() <= 260 {
+        PathBuf::from(plain)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn canonical_path(path: &str) -> Result<PathBuf, CommandError> {
     if path.trim().is_empty() {
         return Err(CommandError::new(
@@ -61,9 +83,9 @@ fn canonical_path(path: &str) -> Result<PathBuf, CommandError> {
             "The selected folder does not exist.",
         ));
     }
-    let canonical = path.canonicalize().map_err(|_| {
+    let canonical = plain_path(&path.canonicalize().map_err(|_| {
         CommandError::new("invalid_path", "The selected folder could not be resolved.")
-    })?;
+    })?);
     if canonical.file_name().is_none() || canonical.to_str().is_none() {
         return Err(CommandError::new(
             "invalid_path",
@@ -94,6 +116,9 @@ pub fn run() {
                     .run(&pool)
                     .await
                     .map_err(|error| format!("Could not migrate repository storage: {error}"))?;
+                store::normalize_stored_paths(&pool).await.map_err(|error| {
+                    format!("Could not normalize stored repository paths: {error}")
+                })?;
                 Ok::<_, String>(pool)
             })?;
             app.manage(AppState { pool });
@@ -113,4 +138,29 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn verbatim_prefixes_are_stripped() {
+        assert_eq!(
+            plain_path(Path::new(r"\\?\C:\repos\demo")),
+            PathBuf::from(r"C:\repos\demo")
+        );
+        assert_eq!(
+            plain_path(Path::new(r"\\?\UNC\server\share\demo")),
+            PathBuf::from(r"\\server\share\demo")
+        );
+        assert_eq!(plain_path(Path::new("/tmp/demo")), PathBuf::from("/tmp/demo"));
+    }
+
+    #[test]
+    fn overlong_unc_paths_stay_verbatim() {
+        let deep = format!(r"\\?\UNC\server\share\{}", "a/".repeat(200));
+        assert_eq!(plain_path(Path::new(&deep)), PathBuf::from(&deep));
+    }
 }

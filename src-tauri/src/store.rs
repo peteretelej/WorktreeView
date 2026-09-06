@@ -1,7 +1,8 @@
 use crate::git::{ensure_work_tree, Worktree};
-use crate::{canonical_path, CommandError};
+use crate::{canonical_path, plain_path, CommandError};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -128,6 +129,37 @@ pub(crate) async fn load_repos(pool: &SqlitePool) -> Result<Vec<Repo>, CommandEr
         })
         .collect::<Result<_, sqlx::Error>>()
         .map_err(Into::into)
+}
+
+// Older versions stored Windows verbatim paths (\\?\C:\...) on open; move
+// them to plain paths so the UI shows what the user selected. A plain-path
+// row wins if both forms already exist.
+pub(crate) async fn normalize_stored_paths(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let paths: Vec<String> = sqlx::query_scalar("SELECT path FROM repos")
+        .fetch_all(pool)
+        .await?;
+    for path in paths {
+        let simplified = plain_path(Path::new(&path));
+        let Some(simplified) = simplified.to_str() else {
+            continue;
+        };
+        if simplified == path {
+            continue;
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO repos (path, name, last_opened_at, created_at, pinned_at) \
+             SELECT ?1, name, last_opened_at, created_at, pinned_at FROM repos WHERE path = ?2",
+        )
+        .bind(simplified)
+        .bind(&path)
+        .execute(pool)
+        .await?;
+        sqlx::query("DELETE FROM repos WHERE path = ?")
+            .bind(&path)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn open_repo_path(path: &str, pool: &SqlitePool) -> Result<Repo, CommandError> {
@@ -358,5 +390,58 @@ mod tests {
             get_settings_in_pool(&pool).await.unwrap(),
             Settings::default()
         );
+    }
+
+    #[tokio::test]
+    async fn verbatim_repo_paths_are_rewritten_to_plain_paths() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO repos (path, name, last_opened_at, created_at, pinned_at) VALUES (?, 'demo', 50, 40, 7)")
+            .bind(r"\\?\C:\repos\demo")
+            .execute(&pool)
+            .await
+            .unwrap();
+        normalize_stored_paths(&pool).await.unwrap();
+        let row = sqlx::query("SELECT path, name, pinned_at FROM repos")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<String, _>("path"), r"C:\repos\demo");
+        assert_eq!(row.get::<String, _>("name"), "demo");
+        assert_eq!(row.get::<Option<i64>, _>("pinned_at"), Some(7));
+    }
+
+    #[tokio::test]
+    async fn unc_verbatim_repo_paths_keep_the_share_prefix() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO repos (path, name, last_opened_at, created_at, pinned_at) VALUES (?, 'share', 50, 40, NULL)")
+            .bind(r"\\?\UNC\server\share\demo")
+            .execute(&pool)
+            .await
+            .unwrap();
+        normalize_stored_paths(&pool).await.unwrap();
+        let path: String = sqlx::query_scalar("SELECT path FROM repos")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(path, r"\\server\share\demo");
+    }
+
+    #[tokio::test]
+    async fn plain_rows_win_over_verbatim_duplicates() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO repos (path, name, last_opened_at, created_at) VALUES (?, 'demo', 51, 40)")
+            .bind(r"C:\repos\demo")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO repos (path, name, last_opened_at, created_at) VALUES (?, 'demo', 50, 40)")
+            .bind(r"\\?\C:\repos\demo")
+            .execute(&pool)
+            .await
+            .unwrap();
+        normalize_stored_paths(&pool).await.unwrap();
+        let rows = load_repos(&pool).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, r"C:\repos\demo");
     }
 }

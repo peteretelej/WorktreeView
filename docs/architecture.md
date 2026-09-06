@@ -25,8 +25,8 @@ normalized domain data through narrow, typed Tauri commands.
 - `review.rs`: assembles review data (changed files, patches, commits,
   refs) from Git results.
 - `store.rs`: SQLite persistence (sqlx) for repositories, pins, and
-  settings, plus path canonicalization. Migrations live in
-  `src-tauri/migrations`.
+  settings, plus path canonicalization and normalization of stored
+  Windows verbatim paths. Migrations live in `src-tauri/migrations`.
 
 ## Git as the semantic authority
 
