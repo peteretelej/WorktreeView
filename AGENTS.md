@@ -41,6 +41,22 @@ and support cancellation in Rust. Use virtualized or windowed rendering for
 large frontend collections and diffs; do not render a full large diff into the
 DOM.
 
+## Docs
+
+Durable docs live in `docs/`, one concern per page. A change that alters
+behavior updates the affected page in the same change. Keep pages concise:
+short sections, one concern each, no duplication of README or CONTRIBUTING
+content. README stays minimal (pitch, install, quick start); development
+guides belong in CONTRIBUTING.md.
+
+| Doc | Purpose |
+|-----|---------|
+| `docs/design.md` | Product model: review-first worktree inbox, ref-based targets |
+| `docs/architecture.md` | System layout: Tauri, React, Rust modules, IPC, SQLite |
+| `docs/safety-model.md` | Read-only guarantees and Git spawn hygiene |
+| `docs/performance.md` | Large-repo and large-diff requirements |
+| `docs/release.md` | Distribution channels and publishing plans |
+
 ## Commands
 
 ```sh
