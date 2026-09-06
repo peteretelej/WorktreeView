@@ -8,6 +8,19 @@ use tokio::time::{timeout, Duration};
 pub(crate) const MAX_OUTPUT: usize = 4 * 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 
+// Suppresses console windows when a GUI-parented git spawn would otherwise
+// flash one (children inherit the hidden console).
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(windows)]
+fn hide_console(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_console(_command: &mut Command) {}
+
 pub(crate) async fn read_bounded<R: AsyncRead + Unpin>(mut reader: R) -> Result<Vec<u8>, CommandError> {
     let mut output = Vec::new();
     let mut buffer = [0; 8192];
@@ -75,6 +88,7 @@ fn dir_git_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    hide_console(&mut command);
     Ok(command)
 }
 
@@ -146,6 +160,7 @@ pub(crate) fn stdin_git_command(args: &[&str]) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    hide_console(&mut command);
     command
 }
 
@@ -243,6 +258,7 @@ pub(crate) fn repo_stdin_git_command(root: &Path, args: &[&str]) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    hide_console(&mut command);
     command
 }
 
