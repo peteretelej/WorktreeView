@@ -187,7 +187,7 @@ pub(crate) async fn carry_repo_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::test_pool;
+    use crate::testutil::{seed_repo, test_pool};
 
     fn commit(sha: &str, subject: &str) -> CommitInfo {
         CommitInfo {
@@ -208,6 +208,8 @@ mod tests {
     #[tokio::test]
     async fn log_pages_round_trip_with_marks() {
         let pool = test_pool().await;
+        seed_repo(&pool, "/repo").await;
+        seed_repo(&pool, "/other").await;
         let commits = [
             commit(&"a".repeat(40), "decorated"),
             commit(&"b".repeat(40), "plain"),
@@ -266,6 +268,7 @@ mod tests {
     #[tokio::test]
     async fn stored_page_upsert_replaces_page_rows_and_ignores_commit_duplicates() {
         let pool = test_pool().await;
+        seed_repo(&pool, "/repo").await;
         let sha = "a".repeat(40);
         let first = [commit(&sha, "original")];
         store_log_page(&pool, "/repo", &sha, "", 0, 1, &first, false).await;

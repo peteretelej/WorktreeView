@@ -690,7 +690,7 @@ mod tests {
     use super::*;
     use crate::git::read_bounded;
     use crate::git::spawn_counted;
-    use crate::testutil::{test_git, test_path, test_pool, test_repo, test_rev_parse};
+    use crate::testutil::{seed_repo, test_git, test_path, test_pool, test_repo, test_rev_parse};
     #[cfg(unix)]
     use std::path::PathBuf;
     use std::process::Command as StdCommand;
@@ -1532,6 +1532,7 @@ mod tests {
         let repo = test_repo("cache-hit");
         let pool = test_pool().await;
         let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
         test_git(&repo, &["branch", "-M", "main"]);
         for index in 0..3 {
             std::fs::write(repo.join("tracked.txt"), format!("change {index}\n")).unwrap();
@@ -1566,6 +1567,7 @@ mod tests {
         let repo = test_repo("cache-literal");
         let pool = test_pool().await;
         let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
         std::fs::write(repo.join("tracked.txt"), "change\n").unwrap();
         test_git(&repo, &["add", "tracked.txt"]);
         test_git(&repo, &["commit", "--quiet", "-m", "second"]);
@@ -1605,6 +1607,7 @@ mod tests {
         let repo = test_repo("cache-head-movement");
         let pool = test_pool().await;
         let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
         test_git(&repo, &["branch", "-M", "main"]);
 
         let first = commit_page(&pool, &repo_path, repo_path.clone(), None, None, None, None)
@@ -1651,6 +1654,7 @@ mod tests {
         let repo = test_repo("cache-ancestry");
         let pool = test_pool().await;
         let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
         test_git(&repo, &["branch", "-M", "main"]);
         let initial_sha = test_rev_parse(&repo, "HEAD");
         std::fs::write(repo.join("main-only.txt"), "main\n").unwrap();
@@ -1709,6 +1713,7 @@ mod tests {
         let repo = test_repo("cache-cwd");
         let pool = test_pool().await;
         let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
         std::fs::create_dir(repo.join("nested")).unwrap();
         std::fs::write(repo.join("nested/file.txt"), "nested\n").unwrap();
         test_git(&repo, &["add", "nested/file.txt"]);
@@ -1735,6 +1740,7 @@ mod tests {
         let repo = test_repo("retrospect-gc");
         let pool = test_pool().await;
         let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
         test_git(&repo, &["branch", "-M", "main"]);
         test_git(&repo, &["checkout", "--quiet", "-b", "feature"]);
         for index in 0..4 {

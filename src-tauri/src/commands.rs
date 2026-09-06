@@ -3,7 +3,7 @@ use crate::review::{
     commit_page, refs_inventory, review_changes, review_patch, FilePatch, RefInventory,
     ReviewIndex,
 };
-use crate::retrospection::{list_surfaces_in_pool, SurfaceListing};
+use crate::retrospection::{list_surfaces_in_pool, set_surface_pinned_in_pool, SurfaceListing};
 use crate::store::{
     get_settings_in_pool, load_repos, open_repo_path, set_repo_pinned_in_pool,
     set_settings_in_pool, Repo, Settings,
@@ -52,6 +52,17 @@ pub(crate) async fn set_repo_pinned(
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<i64>, CommandError> {
     set_repo_pinned_in_pool(&state.pool, &path, pinned).await
+}
+
+#[tauri::command]
+pub(crate) async fn set_surface_pinned(
+    path: String,
+    kind: String,
+    identity_key: String,
+    pinned: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<i64>, CommandError> {
+    set_surface_pinned_in_pool(&state.pool, &path, &kind, &identity_key, pinned).await
 }
 
 #[tauri::command]

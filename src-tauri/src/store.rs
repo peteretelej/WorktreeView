@@ -536,13 +536,222 @@ mod tests {
             &"a".repeat(40),
         )
         .await;
+        sqlx::query(
+            "UPDATE retrospected_surfaces SET pinned_at = 7, origin = 'pin' \
+             WHERE repo_path = ? AND identity_key = 'refs/heads/feature'",
+        )
+        .bind(verbatim)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         normalize_stored_paths(&pool).await.unwrap();
 
-        let rows: Vec<String> = sqlx::query_scalar("SELECT repo_path FROM retrospected_surfaces")
+        let rows: Vec<(String, Option<i64>, String)> =
+            sqlx::query_as("SELECT repo_path, pinned_at, origin FROM retrospected_surfaces")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, [(plain.to_string(), Some(7), "pin".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_repo_cascades_to_its_cached_rows() {
+        let pool = test_pool().await;
+        upsert_repo(&pool, "/kept", "kept", 1).await.unwrap();
+        upsert_repo(&pool, "/dropped", "dropped", 2).await.unwrap();
+        let commits = [crate::git::CommitInfo {
+            sha: "a".repeat(40),
+            subject: "shared".into(),
+            author: "A U Thor".into(),
+            date: "2026-01-02T03:04:05+00:00".into(),
+            refs: Vec::new(),
+            parents: Vec::new(),
+            default_base_ancestor: false,
+        }];
+        crate::cache::store_log_page(&pool, "/kept", &"a".repeat(40), "", 0, 1, &commits, false)
+            .await;
+        crate::cache::store_log_page(
+            &pool,
+            "/dropped",
+            &"a".repeat(40),
+            "",
+            0,
+            1,
+            &commits,
+            false,
+        )
+        .await;
+        crate::retrospection::record_surface_open(
+            &pool,
+            "/kept",
+            "branch",
+            "refs/heads/kept",
+            "kept",
+            "refs/heads/kept",
+            &"a".repeat(40),
+        )
+        .await;
+        crate::retrospection::record_surface_open(
+            &pool,
+            "/dropped",
+            "branch",
+            "refs/heads/dropped",
+            "dropped",
+            "refs/heads/dropped",
+            &"a".repeat(40),
+        )
+        .await;
+
+        sqlx::query("DELETE FROM repos WHERE path = '/dropped'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Repo-scoped rows cascade away with the repos row; shared content
+        // rows keyed by SHA survive.
+        let page_repos: Vec<String> =
+            sqlx::query_scalar("SELECT repo_path FROM log_pages ORDER BY repo_path")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(page_repos, ["/kept"]);
+        let surface_repos: Vec<String> =
+            sqlx::query_scalar("SELECT repo_path FROM retrospected_surfaces ORDER BY repo_path")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(surface_repos, ["/kept"]);
+        let commit_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM commits")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(commit_count, 1);
+    }
+
+    // The orphan sweep and foreign-key rebuild inside 0003 run against a
+    // hand-built pre-migration database so orphans can exist at all; the
+    // migration SQL is the exact file the runner executes.
+    #[tokio::test]
+    async fn the_pin_migration_sweeps_orphans_and_unreferenced_content() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(sqlx::sqlite::SqliteConnectOptions::new())
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0002_retrospection.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO repos (path, name, last_opened_at, created_at) \
+             VALUES ('/kept', 'kept', 1, 1), ('/other', 'other', 2, 2)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let kept_sha = "a".repeat(40);
+        let other_sha = "b".repeat(40);
+        let orphan_only_sha = "c".repeat(40);
+        let unreferenced_sha = "d".repeat(40);
+        for (repo_path, sha) in [
+            ("/kept", &kept_sha),
+            ("/other", &other_sha),
+            ("/orphan", &orphan_only_sha),
+        ] {
+            sqlx::query(
+                "INSERT INTO log_pages (repo_path, start_sha, against_sha, skip, limit_value, commit_shas, has_more) \
+                 VALUES (?, ?, '', 0, 1, ?, 0)",
+            )
+            .bind(repo_path)
+            .bind(sha)
+            .bind(format!("[\"{sha}\"]"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for sha in [&kept_sha, &other_sha, &orphan_only_sha, &unreferenced_sha] {
+            sqlx::query(
+                "INSERT INTO commits (sha, subject, author, date, refs, parents) \
+                 VALUES (?, 's', 'a', 'd', '[]', '[]')",
+            )
+            .bind(sha)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO ancestry_marks (commit_sha, against_sha, non_ancestor) \
+             VALUES (?, ?, 1), (?, ?, 0)",
+        )
+        .bind(&kept_sha)
+        .bind(&other_sha)
+        .bind(&unreferenced_sha)
+        .bind(&kept_sha)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO retrospected_surfaces (repo_path, kind, identity_key, label, detail, head_sha, last_seen_at) \
+             VALUES ('/kept', 'branch', 'refs/heads/live', 'live', 'refs/heads/live', ?, 5), \
+                    ('/orphan', 'branch', 'refs/heads/orphan', 'orphan', 'refs/heads/orphan', ?, 6)",
+        )
+        .bind(&kept_sha)
+        .bind(&orphan_only_sha)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!("../migrations/0003_surface_pins.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let page_repos: Vec<String> =
+            sqlx::query_scalar("SELECT repo_path FROM log_pages ORDER BY repo_path")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(page_repos, ["/kept", "/other"]);
+        let surfaces: Vec<(String, Option<i64>, String)> =
+            sqlx::query_as("SELECT repo_path, pinned_at, origin FROM retrospected_surfaces")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            surfaces,
+            [("/kept".to_string(), None, "review".to_string())]
+        );
+        let commit_shas: Vec<String> = sqlx::query_scalar("SELECT sha FROM commits ORDER BY sha")
             .fetch_all(&pool)
             .await
             .unwrap();
-        assert_eq!(rows, [plain]);
+        assert_eq!(commit_shas, [kept_sha.clone(), other_sha.clone()]);
+        let marks: Vec<(String, String)> =
+            sqlx::query_as("SELECT commit_sha, against_sha FROM ancestry_marks")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(marks, [(kept_sha, other_sha)]);
+
+        // The rebuilt tables enforce the foreign keys on this pool.
+        sqlx::query("DELETE FROM repos WHERE path = '/kept'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let page_repos: Vec<String> = sqlx::query_scalar("SELECT repo_path FROM log_pages")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(page_repos, ["/other"]);
+        let surface_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM retrospected_surfaces")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(surface_count, 0);
     }
 }

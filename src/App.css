@@ -1054,6 +1054,21 @@ button:disabled {
 
 .project-row-wrap .sidebar-worktree-row,
 .project-row-wrap .sidebar-branch-row { padding-right: 26px; }
+/* Sidebar surface rows carry both a history and a pin control; the pin sits
+   left of the history button, so widen the rows to clear both. */
+.project-row-wrap .sidebar-worktree-row,
+.project-row-wrap .sidebar-branch-row,
+.project-row-wrap .archived-row { padding-right: 48px; }
+.project-row-wrap .surface-pin { right: 24px; }
+.gone-badge { flex: none; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 8px; text-transform: uppercase; }
+.archived-section { margin: 0 0 5px 21px; border-left: 1px solid var(--border); }
+.archived-heading { display: flex; height: 28px; align-items: center; gap: 6px; padding: 0 6px 0 4px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
+.archived-heading span { flex: none; }
+.archived-heading input { min-width: 0; flex: 1; height: 22px; padding: 0 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--foreground); font-size: 10px; letter-spacing: normal; text-transform: none; }
+.archived-row { display: flex; width: calc(100% - 4px); min-height: 30px; flex-direction: column; justify-content: center; gap: 1px; margin-left: 4px; padding: 3px 6px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); cursor: pointer; font: 10px var(--font-mono); text-align: left; }
+.archived-row:hover { background: var(--surface-2); color: var(--foreground); }
+.archived-row span, .archived-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.archived-section .page-controls { min-height: 30px; padding: 3px; }
 .history-button { position: absolute; top: 50%; right: 4px; display: inline-flex; width: 20px; height: 20px; align-items: center; justify-content: center; transform: translateY(-50%); border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; opacity: 0; }
 .project-row-wrap:hover .history-button,
 .history-button:focus-visible { opacity: 1; }

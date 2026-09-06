@@ -140,7 +140,7 @@ export const config = {
   runner: "local",
   hostname: "127.0.0.1",
   port: 4444,
-  specs: ["./specs/lifecycle.e2e.mjs"],
+  specs: ["./specs/*.e2e.mjs"],
   maxInstances: 1,
   capabilities: [{
     "tauri:options": {

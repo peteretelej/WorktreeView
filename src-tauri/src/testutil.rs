@@ -15,6 +15,20 @@ pub(crate) async fn test_pool() -> SqlitePool {
     pool
 }
 
+// The repo-scoped tables reference repos(path); production flows always
+// have the parent row from open_repo, so tests persisting rows for a path
+// seed it first.
+pub(crate) async fn seed_repo(pool: &SqlitePool, path: &str) {
+    sqlx::query(
+        "INSERT OR IGNORE INTO repos (path, name, last_opened_at, created_at) \
+         VALUES (?, 'test', 1, 1)",
+    )
+    .bind(path)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 pub(crate) fn test_path(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "worktreeview-{label}-{}-{}",

@@ -9,8 +9,9 @@ normalized domain data through narrow, typed Tauri commands.
 
 - `commands.rs`: thin typed IPC adapters. The full command surface:
   `open_repo`, `list_repos`, `list_worktrees`, `set_repo_pinned`,
-  `get_settings`, `set_settings`, `list_refs`, `list_commits`,
-  `list_review_changes`, `list_surfaces`, `read_review_patch`.
+  `set_surface_pinned`, `get_settings`, `set_settings`, `list_refs`,
+  `list_commits`, `list_review_changes`, `list_surfaces`,
+  `read_review_patch`.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
   (4 MiB per stream), a 10 second deadline, and kill-on-drop cancellation.
   Repository-scoped runs share one hardened builder; no-index diffs get
@@ -28,7 +29,10 @@ normalized domain data through narrow, typed Tauri commands.
   marks, keyed by resolved SHAs.
 - `retrospection.rs`: records reviewed worktree and branch identities
   (last resolved head, last-seen time) at open time and lists surfaces that
-  have disappeared from the live worktree and ref inventory.
+  have disappeared from the live worktree and ref inventory. It also owns
+  per-surface pins: pinning a recorded surface updates its row in place,
+  and pinning a never-reviewed surface resolves its identity with one
+  bounded Git spawn before recording it with pin origin.
 - `store.rs`: SQLite persistence (sqlx) for repositories, pins, and
   settings, plus path canonicalization and normalization of stored
   Windows verbatim paths. Migrations live in `src-tauri/migrations`.
@@ -45,9 +49,9 @@ locale to C. The full rationale is in the repo `AGENTS.md`.
 ## Frontend (`src/`)
 
 A flat React + Vite app: `App.tsx` (shell and review views), `settings.tsx`,
-`diff.ts` (diff presentation helpers), and `navigation.ts` (back and forward
-review history). Unit tests for the two utilities run with `npm run
-test:unit`.
+`diff.ts` (diff presentation helpers), `navigation.ts` (back and forward
+review history), and `surfaces.ts` (surface pin and archive helpers). Unit
+tests for the utilities run with `npm run test:unit`.
 
 ## Persistence
 
@@ -59,6 +63,16 @@ before. Pages key on `(repo_path, start_sha, against_sha, skip, limit)` with
 commit rows keyed by SHA, and ancestry marks on `(commit_sha, against_sha)`;
 a branch move changes the resolved SHA, so stale pages are never served.
 Cache writes are best-effort and never fail an open.
+
+Retrospected surfaces key on `(repo_path, kind, identity_key)` and carry the
+recorded label, head, pin state, and row origin (`review` for recorded
+opens, `pin` for surfaces created by pinning). The repo-scoped tables
+(`log_pages`, `retrospected_surfaces`) declare
+`REFERENCES repos(path) ON DELETE CASCADE`, so deleting a repo's row prunes
+its cached pages and surface rows automatically; the shared `commits` and
+`ancestry_marks` content is keyed by SHA and is never cascaded. Pruning is a
+store-level property: the app has no repo-removal UI, and the cascade
+activates for whichever flow deletes the row.
 
 Opening a worktree's or branch's history (or its review) records the
 surface's identity and resolved head in `retrospected_surfaces`; recording

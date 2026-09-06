@@ -14,11 +14,23 @@ pub(crate) struct GoneSurface {
     detail: String,
     head_sha: String,
     last_seen_at: i64,
+    pinned_at: Option<i64>,
+}
+
+// Pin state of one recorded surface, reported for live rows too: gone rows
+// carry `pinned_at` themselves, but a surface that is still alive only
+// appears here.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub(crate) struct SurfacePinRef {
+    kind: String,
+    identity_key: String,
+    pinned_at: i64,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub(crate) struct SurfaceListing {
     gone: Vec<GoneSurface>,
+    pinned: Vec<SurfacePinRef>,
 }
 
 // Open-time retrospection: remember the identity and last resolved head of
@@ -99,7 +111,7 @@ pub(crate) async fn list_surfaces_in_pool(
         .map(str::to_string)
         .collect();
     let rows = sqlx::query(
-        "SELECT kind, identity_key, label, detail, head_sha, last_seen_at \
+        "SELECT kind, identity_key, label, detail, head_sha, last_seen_at, pinned_at \
          FROM retrospected_surfaces WHERE repo_path = ? \
          ORDER BY last_seen_at DESC, kind ASC, identity_key ASC",
     )
@@ -107,9 +119,18 @@ pub(crate) async fn list_surfaces_in_pool(
     .fetch_all(pool)
     .await?;
     let mut gone = Vec::new();
+    let mut pinned = Vec::new();
     for row in rows {
         let kind: String = row.try_get("kind")?;
         let identity_key: String = row.try_get("identity_key")?;
+        let pinned_at: Option<i64> = row.try_get("pinned_at")?;
+        if let Some(pinned_at) = pinned_at {
+            pinned.push(SurfacePinRef {
+                kind: kind.clone(),
+                identity_key: identity_key.clone(),
+                pinned_at,
+            });
+        }
         let live = match kind.as_str() {
             "worktree" => live_worktrees.contains(&identity_key),
             "branch" => live_heads.contains(&identity_key),
@@ -123,10 +144,11 @@ pub(crate) async fn list_surfaces_in_pool(
                 detail: row.try_get("detail")?,
                 head_sha: row.try_get("head_sha")?,
                 last_seen_at: row.try_get("last_seen_at")?,
+                pinned_at,
             });
         }
     }
-    Ok(SurfaceListing { gone })
+    Ok(SurfaceListing { gone, pinned })
 }
 
 // Recorded worktree keys are platform-canonical plain paths while
@@ -139,6 +161,178 @@ fn live_worktree_key(path: &str) -> String {
         .canonicalize()
         .map(|canonical| plain_path(&canonical).to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.to_string())
+}
+
+// Pin or unpin one surface. An already-recorded surface (live or gone) is
+// pinned in place with no spawn; only an unknown identity resolves fresh,
+// with at most one bounded spawn. Unpinning deletes pin-created rows (a pin
+// is the only thing holding them) and just clears review-recorded rows.
+pub(crate) async fn set_surface_pinned_in_pool(
+    pool: &SqlitePool,
+    path: &str,
+    kind: &str,
+    identity_key: &str,
+    pinned: bool,
+) -> Result<Option<i64>, CommandError> {
+    let repo = canonical_path(path)?;
+    let repo_path = repo.to_str().ok_or_else(|| {
+        CommandError::new("invalid_path", "The selected path is not valid UTF-8.")
+    })?;
+    let identity_key = match kind {
+        "worktree" => live_worktree_key(identity_key),
+        _ => identity_key.to_string(),
+    };
+    let persisted_error = || {
+        CommandError::new(
+            "persistence",
+            "The surface is not recorded and cannot be pinned.",
+        )
+    };
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT origin FROM retrospected_surfaces \
+         WHERE repo_path = ? AND kind = ? AND identity_key = ?",
+    )
+    .bind(repo_path)
+    .bind(kind)
+    .bind(&identity_key)
+    .fetch_optional(pool)
+    .await?;
+    let pinned_at = pinned.then(now_millis);
+    if let Some(origin) = existing {
+        if pinned {
+            sqlx::query(
+                "UPDATE retrospected_surfaces SET pinned_at = ? \
+                 WHERE repo_path = ? AND kind = ? AND identity_key = ?",
+            )
+            .bind(pinned_at)
+            .bind(repo_path)
+            .bind(kind)
+            .bind(&identity_key)
+            .execute(pool)
+            .await?;
+        } else if origin == "pin" {
+            sqlx::query(
+                "DELETE FROM retrospected_surfaces \
+                 WHERE repo_path = ? AND kind = ? AND identity_key = ?",
+            )
+            .bind(repo_path)
+            .bind(kind)
+            .bind(&identity_key)
+            .execute(pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE retrospected_surfaces SET pinned_at = NULL \
+                 WHERE repo_path = ? AND kind = ? AND identity_key = ?",
+            )
+            .bind(repo_path)
+            .bind(kind)
+            .bind(&identity_key)
+            .execute(pool)
+            .await?;
+        }
+        return Ok(pinned_at);
+    }
+    if !pinned {
+        return Err(persisted_error());
+    }
+    let (label, detail, head_sha) = resolve_surface_identity(&repo, kind, &identity_key).await?;
+    sqlx::query(
+        "INSERT INTO retrospected_surfaces \
+         (repo_path, kind, identity_key, label, detail, head_sha, last_seen_at, pinned_at, origin) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pin')",
+    )
+    .bind(repo_path)
+    .bind(kind)
+    .bind(&identity_key)
+    .bind(&label)
+    .bind(&detail)
+    .bind(&head_sha)
+    .bind(now_millis())
+    .bind(pinned_at)
+    .execute(pool)
+    .await?;
+    Ok(pinned_at)
+}
+
+// Pin-time identity for a surface the app never recorded. Branches resolve
+// with one rev-parse; worktrees come from one worktree listing that also
+// carries the branch label and head.
+async fn resolve_surface_identity(
+    repo: &Path,
+    kind: &str,
+    identity_key: &str,
+) -> Result<(String, String, String), CommandError> {
+    if identity_key.starts_with('-') {
+        return Err(CommandError::new(
+            "persistence",
+            "The surface is not recorded and cannot be pinned.",
+        ));
+    }
+    match kind {
+        "branch" => {
+            let (exit_code, stdout, _stderr) =
+                run_git(repo, &["rev-parse", "--verify", identity_key]).await?;
+            if exit_code != 0 {
+                return Err(CommandError::new(
+                    "persistence",
+                    format!("The surface '{identity_key}' is not recorded and cannot be pinned."),
+                ));
+            }
+            let head_sha = std::str::from_utf8(&stdout)
+                .map_err(|_| {
+                    CommandError::new("git_output_malformed", "Git returned invalid ref data.")
+                })?
+                .trim();
+            if head_sha.is_empty() {
+                return Err(CommandError::new(
+                    "persistence",
+                    format!("The surface '{identity_key}' is not recorded and cannot be pinned."),
+                ));
+            }
+            let label = identity_key
+                .strip_prefix("refs/heads/")
+                .unwrap_or(identity_key);
+            Ok((
+                label.to_string(),
+                identity_key.to_string(),
+                head_sha.to_string(),
+            ))
+        }
+        "worktree" => {
+            let (exit_code, stdout, stderr) = run_git(
+                repo,
+                &[
+                    "-c",
+                    "core.quotePath=false",
+                    "worktree",
+                    "list",
+                    "--porcelain",
+                ],
+            )
+            .await?;
+            if exit_code != 0 {
+                return Err(git_execution_error(&stderr));
+            }
+            for worktree in parse_worktrees(&stdout)? {
+                if live_worktree_key(&worktree.path) == identity_key {
+                    let label = worktree
+                        .branch
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(&worktree.branch);
+                    return Ok((label.to_string(), identity_key.to_string(), worktree.head));
+                }
+            }
+            Err(CommandError::new(
+                "persistence",
+                format!("The surface '{identity_key}' is not recorded and cannot be pinned."),
+            ))
+        }
+        _ => Err(CommandError::new(
+            "persistence",
+            format!("The surface '{identity_key}' is not recorded and cannot be pinned."),
+        )),
+    }
 }
 
 // Keep `Worktree`'s fields `pub(crate)` in `git::parse.rs` so retrospection
@@ -154,8 +348,8 @@ pub(crate) async fn carry_repo_path(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT OR IGNORE INTO retrospected_surfaces \
-         (repo_path, kind, identity_key, label, detail, head_sha, last_seen_at) \
-         SELECT ?, kind, identity_key, label, detail, head_sha, last_seen_at \
+         (repo_path, kind, identity_key, label, detail, head_sha, last_seen_at, pinned_at, origin) \
+         SELECT ?, kind, identity_key, label, detail, head_sha, last_seen_at, pinned_at, origin \
          FROM retrospected_surfaces WHERE repo_path = ?",
     )
     .bind(new_path)
@@ -174,7 +368,7 @@ mod tests {
     use super::*;
     use crate::git::spawn_counted;
     use crate::review::{commit_page, review_changes};
-    use crate::testutil::{test_git, test_path, test_pool, test_repo, test_rev_parse};
+    use crate::testutil::{seed_repo, test_git, test_path, test_pool, test_repo, test_rev_parse};
 
     type SurfaceRow = (String, String, String, String, i64);
 
@@ -212,6 +406,7 @@ mod tests {
         let repo = test_repo("retrospect-worktree");
         let pool = test_pool().await;
         let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
         test_git(&repo, &["branch", "-M", "main"]);
         let worktree = test_path("retrospect-worktree-wt");
         test_git(
@@ -279,6 +474,7 @@ mod tests {
         let repo = test_repo("retrospect-branch");
         let pool = test_pool().await;
         let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
         test_git(&repo, &["branch", "-M", "main"]);
         test_git(&repo, &["checkout", "--quiet", "-b", "feature"]);
         std::fs::write(repo.join("feature-only.txt"), "feature\n").unwrap();
@@ -333,6 +529,7 @@ mod tests {
         let repo = test_repo("retrospect-shape");
         let pool = test_pool().await;
         let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
         let repo_key = canonical_key(&repo);
         test_git(&repo, &["branch", "-M", "main"]);
         test_git(&repo, &["tag", "v1"]);
@@ -475,6 +672,264 @@ mod tests {
         assert_eq!(detached_row.4, 1000);
 
         test_git(&repo, &["worktree", "remove", &detached_path]);
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn surface_pin_round_trip_pins_and_unpins_worktree_and_branch() {
+        let repo = test_repo("pin-roundtrip");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
+        test_git(&repo, &["branch", "-M", "main"]);
+        let worktree = test_path("pin-roundtrip-wt");
+        test_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "wt-feature",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        test_git(&repo, &["branch", "br-feature"]);
+        let head_sha = test_rev_parse(&repo, "refs/heads/br-feature");
+
+        // Never-recorded surfaces resolve fresh with one bounded spawn each.
+        let (worktree_spawns, worktree_pinned_at) = spawn_counted(set_surface_pinned_in_pool(
+            &pool,
+            &repo_path,
+            "worktree",
+            worktree.to_str().unwrap(),
+            true,
+        ))
+        .await;
+        assert_eq!(worktree_spawns, 1);
+        let (branch_spawns, branch_pinned_at) = spawn_counted(set_surface_pinned_in_pool(
+            &pool,
+            &repo_path,
+            "branch",
+            "refs/heads/br-feature",
+            true,
+        ))
+        .await;
+        assert_eq!(branch_spawns, 1);
+
+        let listing = list_surfaces_in_pool(&pool, &repo_path).await.unwrap();
+        assert!(listing.gone.is_empty());
+        assert_eq!(listing.pinned.len(), 2);
+        let worktree_key = canonical_key(&worktree);
+        assert!(listing.pinned.contains(&SurfacePinRef {
+            kind: "worktree".into(),
+            identity_key: worktree_key.clone(),
+            pinned_at: worktree_pinned_at.unwrap().unwrap(),
+        }));
+        assert!(listing.pinned.contains(&SurfacePinRef {
+            kind: "branch".into(),
+            identity_key: "refs/heads/br-feature".into(),
+            pinned_at: branch_pinned_at.unwrap().unwrap(),
+        }));
+        let branch_row = sqlx::query(
+            "SELECT label, detail, head_sha, origin FROM retrospected_surfaces \
+             WHERE kind = 'branch' AND identity_key = 'refs/heads/br-feature'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(branch_row.get::<String, _>("label"), "br-feature");
+        assert_eq!(
+            branch_row.get::<String, _>("detail"),
+            "refs/heads/br-feature"
+        );
+        assert_eq!(branch_row.get::<String, _>("head_sha"), head_sha);
+        assert_eq!(branch_row.get::<String, _>("origin"), "pin");
+
+        // Unpinning deletes pin-created rows outright.
+        assert_eq!(
+            set_surface_pinned_in_pool(&pool, &repo_path, "worktree", &worktree_key, false)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            set_surface_pinned_in_pool(&pool, &repo_path, "branch", "refs/heads/br-feature", false)
+                .await
+                .unwrap(),
+            None
+        );
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM retrospected_surfaces")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+
+        test_git(&repo, &["worktree", "remove", worktree.to_str().unwrap()]);
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pinning_recorded_gone_surface_sets_pinned_at_without_spawning() {
+        let repo = test_repo("pin-gone");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
+        test_git(&repo, &["branch", "-M", "main"]);
+        record_surface_open(
+            &pool,
+            &repo_path,
+            "branch",
+            "refs/heads/dead",
+            "dead",
+            "refs/heads/dead",
+            &"a".repeat(40),
+        )
+        .await;
+
+        let (spawns, pinned) = spawn_counted(set_surface_pinned_in_pool(
+            &pool,
+            &repo_path,
+            "branch",
+            "refs/heads/dead",
+            true,
+        ))
+        .await;
+        assert_eq!(spawns, 0);
+        let pinned_at = pinned.unwrap();
+
+        let listing = list_surfaces_in_pool(&pool, &repo_path).await.unwrap();
+        assert_eq!(listing.gone.len(), 1);
+        assert_eq!(listing.gone[0].pinned_at, pinned_at);
+        assert_eq!(listing.pinned.len(), 1);
+        assert_eq!(listing.pinned[0].identity_key, "refs/heads/dead");
+
+        // Unpinning a review-recorded row keeps the row, pin cleared.
+        let (unpin_spawns, unpinned) = spawn_counted(set_surface_pinned_in_pool(
+            &pool,
+            &repo_path,
+            "branch",
+            "refs/heads/dead",
+            false,
+        ))
+        .await;
+        assert_eq!(unpin_spawns, 0);
+        assert_eq!(unpinned.unwrap(), None);
+        let listing = list_surfaces_in_pool(&pool, &repo_path).await.unwrap();
+        assert_eq!(listing.gone.len(), 1);
+        assert_eq!(listing.gone[0].pinned_at, None);
+        assert!(listing.pinned.is_empty());
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pinning_unknown_identity_fails_with_persistence() {
+        let repo = test_repo("pin-unknown");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        test_git(&repo, &["branch", "-M", "main"]);
+
+        let branch_error =
+            set_surface_pinned_in_pool(&pool, &repo_path, "branch", "refs/heads/missing", true)
+                .await
+                .unwrap_err();
+        assert_eq!(branch_error.code, "persistence");
+        let missing_worktree = test_path("pin-unknown-missing");
+        let worktree_error = set_surface_pinned_in_pool(
+            &pool,
+            &repo_path,
+            "worktree",
+            missing_worktree.to_str().unwrap(),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(worktree_error.code, "persistence");
+        let unpin_error = set_surface_pinned_in_pool(
+            &pool,
+            &repo_path,
+            "branch",
+            "refs/heads/also-missing",
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unpin_error.code, "persistence");
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pinned_never_reviewed_surface_appears_gone_with_pin_time_identity() {
+        let repo = test_repo("pin-gone-fresh");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
+        test_git(&repo, &["branch", "-M", "main"]);
+        test_git(&repo, &["branch", "ephemeral"]);
+        let head_sha = test_rev_parse(&repo, "refs/heads/ephemeral");
+
+        set_surface_pinned_in_pool(&pool, &repo_path, "branch", "refs/heads/ephemeral", true)
+            .await
+            .unwrap();
+        test_git(&repo, &["branch", "-D", "ephemeral"]);
+
+        let listing = list_surfaces_in_pool(&pool, &repo_path).await.unwrap();
+        assert_eq!(listing.gone.len(), 1);
+        assert_eq!(listing.gone[0].kind, "branch");
+        assert_eq!(listing.gone[0].label, "ephemeral");
+        assert_eq!(listing.gone[0].head_sha, head_sha);
+        assert!(listing.gone[0].pinned_at.is_some());
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unpin_deletes_pin_origin_rows_but_keeps_review_origin_rows() {
+        let repo = test_repo("pin-origin");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
+        test_git(&repo, &["branch", "-M", "main"]);
+        test_git(&repo, &["branch", "reviewed"]);
+        test_git(&repo, &["branch", "pinonly"]);
+        record_surface_open(
+            &pool,
+            &repo_path,
+            "branch",
+            "refs/heads/reviewed",
+            "reviewed",
+            "refs/heads/reviewed",
+            &"a".repeat(40),
+        )
+        .await;
+
+        set_surface_pinned_in_pool(&pool, &repo_path, "branch", "refs/heads/reviewed", true)
+            .await
+            .unwrap();
+        set_surface_pinned_in_pool(&pool, &repo_path, "branch", "refs/heads/pinonly", true)
+            .await
+            .unwrap();
+        set_surface_pinned_in_pool(&pool, &repo_path, "branch", "refs/heads/reviewed", false)
+            .await
+            .unwrap();
+        set_surface_pinned_in_pool(&pool, &repo_path, "branch", "refs/heads/pinonly", false)
+            .await
+            .unwrap();
+
+        let identities: Vec<String> =
+            sqlx::query_scalar("SELECT identity_key FROM retrospected_surfaces")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(identities, ["refs/heads/reviewed"]);
+        let pinned: Vec<Option<i64>> =
+            sqlx::query_scalar("SELECT pinned_at FROM retrospected_surfaces")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(pinned, [None]);
+
         std::fs::remove_dir_all(repo).unwrap();
     }
 }

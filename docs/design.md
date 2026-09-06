@@ -1,31 +1,9 @@
-# Design
-
-WorktreeView is a desktop app for reviewing code across local Git worktrees,
-built for developers running multiple coding agents in parallel.
-
-## The model
-
-- A review inbox over the repo -> worktree hierarchy. The sidebar lists
-  pinned and recent repositories, their worktrees, and their branches.
-- Worktrees and refs are both first-class review targets. Clicking a
-  worktree or a branch opens a review in one click; nothing is ever checked
-  out.
-- A worktree review shows all changes against the right base by default:
-  the merge-base, including uncommitted and untracked work. A committed-only
-  toggle narrows the scope. Non-worktree targets (branches, tags) are
-  committed-only by definition.
-- Commit history is the default surface for an activated repository: a paged
-  history view for the selected worktree's branch opens alongside the inbox
-  and provides commit pickers. Dismissing it returns to the worktree table
-  until the repository is activated again. Individual commits are reviewable
-  against their parent, with the empty tree as the base for parentless
-  commits.
-- Reviewing or opening a worktree or branch remembers its identity and last
-  resolved head. When the surface later disappears from the repository it
-  stays listed flagged gone, and its history and committed-diff views still
-  open from cached or re-derivable data; once Git can no longer resolve the
-  recorded head, the view degrades to "content no longer available" instead
-  of silently dropping the surface.
+- Pinning extends to individual worktrees and branches the way it works for
+  repositories: pinned surfaces sort first in their repo group, wherever they
+  still exist or not. A pinned surface that later disappears keeps its row
+  inline with a gone badge; every other disappeared surface collects in a
+  searchable per-repo Archived section so months of deleted branches stay
+  findable without cluttering the live sidebar.
 - Settings (appearance, interface zoom, diff display, dark and light
   themes) persist locally.
 
