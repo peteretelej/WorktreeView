@@ -22,7 +22,10 @@ against the right base, without checking anything out.
 
 ## Install
 
-- GitHub Releases: coming soon
+- GitHub Releases: grab the installer for your platform from the
+  [latest release](https://github.com/peteretelej/WorktreeView/releases/latest).
+  Early builds are unsigned, so Windows SmartScreen and macOS Gatekeeper
+  will warn on first launch
 - Microsoft Store: coming soon <!-- TODO: replace with the Store listing link once submitted -->
 - npm: the `worktreeview` name is reserved for a future distribution
   channel; the npm package is not the desktop app

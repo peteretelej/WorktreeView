@@ -26,6 +26,19 @@ needs only frontmatter and navigation config.
 
 ## CI
 
-GitHub Actions runs the desktop e2e suite (the same `npm run test:desktop`
-command developers run locally) only on manual dispatch and published
-releases, and retains failure diagnostics for 14 days.
+GitHub Actions runs two workflows:
+
+- Desktop e2e: the same `npm run test:desktop` command developers run
+  locally, on manual dispatch and published releases, with failure
+  diagnostics retained for 14 days.
+- Release: a `v*` tag push builds Tauri bundles for Windows (NSIS and
+  MSI), macOS (dmg, x64 and arm64), and Linux (deb, rpm, AppImage) and
+  attaches them to a draft GitHub Release. Publishing the draft is the
+  manual gate, and the publish event is what triggers the desktop e2e
+  suite.
+
+Release builds are unsigned in early releases: Windows shows a
+SmartScreen warning, and macOS requires right-click Open (or
+`xattr -cr /Applications/WorktreeView.app`) on first launch. There is no
+updater channel yet, so installs upgrade by downloading the next
+release.

@@ -124,6 +124,24 @@ files in the reported run artifact directory. Do not use privileged mode,
 host display sockets, writable fixture mounts, a networked test runtime,
 or global Docker pruning.
 
+## Releases
+
+Releases are cut by tag. Align the version in `package.json` (run
+`npm install` to sync `package-lock.json`), `src-tauri/Cargo.toml`, and
+`src-tauri/tauri.conf.json` (then run
+`cargo check --manifest-path src-tauri/Cargo.toml` to update
+`Cargo.lock`), commit, and push the tag:
+
+```sh
+git tag v0.0.1
+git push origin main v0.0.1
+```
+
+The Release workflow builds Windows, macOS, and Linux bundles and
+attaches them to a draft GitHub Release. Review the draft, edit the
+notes if needed, then publish it; publishing also triggers the desktop
+e2e suite. Builds are unsigned in early releases.
+
 ## Documentation
 
 Durable docs live in `docs/`, one concern per page, indexed in
