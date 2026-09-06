@@ -7,6 +7,7 @@ use crate::git::{
     validate_scope_combination, validate_untracked_combination, ChangedFile, CommitInfo,
     CommitPage, MAX_OUTPUT,
 };
+use crate::retrospection;
 use crate::{canonical_path, CommandError};
 use cap_fs_ext::OpenOptionsSyncExt;
 use cap_std::{
@@ -237,6 +238,23 @@ fn literal_sha(reference: &str) -> bool {
     reference.len() == 40 && reference.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+// The opened page already carries `%D` decorations: the `HEAD ->` entry
+// names the opened worktree's branch without another spawn. Empty when
+// detached or when the page has no commits.
+fn head_decoration_label(commits: &[CommitInfo]) -> String {
+    let Some(first) = commits.first() else {
+        return String::new();
+    };
+    for reference in &first.refs {
+        if let Some(("HEAD", target)) = reference.split_once(" -> ") {
+            if let Some(branch) = target.strip_prefix("refs/heads/") {
+                return branch.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
 pub(crate) async fn commit_page(
     pool: &SqlitePool,
     repo_path: &str,
@@ -255,6 +273,13 @@ pub(crate) async fn commit_page(
     let path = canonical_path(&path)?;
     let explicit_start = start_ref.is_some();
     let start_ref = effective_head_ref(start_ref);
+    // Only explicit `refs/heads/` start refs name a surface worth recording;
+    // tags, raw SHAs, and rev expressions are not surfaces.
+    let branch_start = if explicit_start && start_ref.starts_with("refs/heads/") {
+        Some(start_ref.clone())
+    } else {
+        None
+    };
     let skip = skip.unwrap_or(0);
     let limit = usize::from(limit.unwrap_or(100).min(100));
 
@@ -284,7 +309,20 @@ pub(crate) async fn commit_page(
         if cached.is_some() {
             start_sha = start_ref.clone();
         } else {
-            start_sha = resolve_ref(&path, &start_ref).await?;
+            start_sha = resolve_ref(&path, &start_ref).await.map_err(|error| {
+                if error.code == "unresolvable_ref" {
+                    // The literal SHA is the recorded head of an opened
+                    // surface: when Git can no longer resolve it (reflog
+                    // expiry then gc), the content is gone rather than the
+                    // ref being wrong.
+                    CommandError::new(
+                        "content_unavailable",
+                        "This surface's content is no longer available in the repository.",
+                    )
+                } else {
+                    error
+                }
+            })?;
         }
     } else {
         start_sha = resolve_ref(&path, &start_ref).await?;
@@ -303,7 +341,7 @@ pub(crate) async fn commit_page(
         .await;
     }
 
-    if let Some((mut commits, has_more)) = cached {
+    let page = if let Some((mut commits, has_more)) = cached {
         if let Some(against_sha) = &against_sha {
             let shas: Vec<String> = commits.iter().map(|commit| commit.sha.clone()).collect();
             let non_ancestors = match cache::lookup_marks(pool, &shas, against_sha).await {
@@ -322,54 +360,94 @@ pub(crate) async fn commit_page(
                 commit.default_base_ancestor = !non_ancestor;
             }
         }
-        return Ok(CommitPage { commits, has_more });
+        CommitPage { commits, has_more }
+    } else {
+        let mut owned_args = vec![
+            "log".into(),
+            format!("--skip={skip}"),
+            format!("--max-count={}", limit + 1),
+            // Decorations feed the opened worktree's recorded label and must
+            // be full refnames regardless of tty and log.decorate defaults.
+            "--decorate=full".into(),
+            "--format=%H%x1f%s%x1f%an%x1f%aI%x1f%D%x1f%P%x1e".into(),
+        ];
+        if explicit_start {
+            owned_args.push(start_sha.clone());
+        }
+        let args = git_args(&owned_args);
+        let (exit_code, stdout, stderr) = run_git(&path, &args).await?;
+        if exit_code != 0 {
+            return Err(git_execution_error(&stderr));
+        }
+        let mut commits = parse_commits(&stdout)?;
+        let has_more = commits.len() > limit;
+        commits.truncate(limit);
+        if let Some(against_sha) = &against_sha {
+            mark_default_base_ancestors(&path, &mut commits, against_sha).await?;
+        }
+        // The cache is an optimization: a failed write (a full disk, for one)
+        // never fails the open.
+        let page_shas: Vec<String> = commits.iter().map(|commit| commit.sha.clone()).collect();
+        cache::store_log_page(
+            pool,
+            repo_path,
+            &start_sha,
+            against_sha.as_deref().unwrap_or(""),
+            skip,
+            limit,
+            &commits,
+            has_more,
+        )
+        .await;
+        if let Some(against_sha) = &against_sha {
+            let non_ancestors: Vec<bool> = commits
+                .iter()
+                .map(|commit| !commit.default_base_ancestor)
+                .collect();
+            cache::store_marks(pool, &page_shas, against_sha, &non_ancestors).await;
+        }
+        CommitPage { commits, has_more }
+    };
+    // Open-time retrospection: record a surface only for opens that resolved
+    // a real one. A HEAD-based open is the worktree surface, labeled from the
+    // page's `HEAD ->` decoration (empty when detached, keeping any recorded
+    // label); an explicit `refs/heads/` open is the branch surface; tags,
+    // raw SHAs, and rev expressions record nothing, so reopening a gone
+    // surface by SHA leaves `last_seen` at "last open while alive".
+    if let Some(branch_ref) = branch_start {
+        let label = branch_ref
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&branch_ref);
+        retrospection::record_surface_open(
+            pool,
+            repo_path,
+            "branch",
+            &branch_ref,
+            label,
+            &branch_ref,
+            &start_sha,
+        )
+        .await;
+    } else if !explicit_start {
+        let worktree_key = path.to_str().unwrap_or_default();
+        let label = head_decoration_label(&page.commits);
+        retrospection::record_surface_open(
+            pool,
+            repo_path,
+            "worktree",
+            worktree_key,
+            &label,
+            worktree_key,
+            &start_sha,
+        )
+        .await;
     }
-
-    let mut owned_args = vec![
-        "log".into(),
-        format!("--skip={skip}"),
-        format!("--max-count={}", limit + 1),
-        "--format=%H%x1f%s%x1f%an%x1f%aI%x1f%D%x1f%P%x1e".into(),
-    ];
-    if explicit_start {
-        owned_args.push(start_sha.clone());
-    }
-    let args = git_args(&owned_args);
-    let (exit_code, stdout, stderr) = run_git(&path, &args).await?;
-    if exit_code != 0 {
-        return Err(git_execution_error(&stderr));
-    }
-    let mut commits = parse_commits(&stdout)?;
-    let has_more = commits.len() > limit;
-    commits.truncate(limit);
-    if let Some(against_sha) = &against_sha {
-        mark_default_base_ancestors(&path, &mut commits, against_sha).await?;
-    }
-    // The cache is an optimization: a failed write (a full disk, for one)
-    // never fails the open.
-    let page_shas: Vec<String> = commits.iter().map(|commit| commit.sha.clone()).collect();
-    cache::store_log_page(
-        pool,
-        repo_path,
-        &start_sha,
-        against_sha.as_deref().unwrap_or(""),
-        skip,
-        limit,
-        &commits,
-        has_more,
-    )
-    .await;
-    if let Some(against_sha) = &against_sha {
-        let non_ancestors: Vec<bool> = commits
-            .iter()
-            .map(|commit| !commit.default_base_ancestor)
-            .collect();
-        cache::store_marks(pool, &page_shas, against_sha, &non_ancestors).await;
-    }
-    Ok(CommitPage { commits, has_more })
+    Ok(page)
 }
 
 pub(crate) async fn review_changes(
+    pool: &SqlitePool,
+    repo_path: &str,
     path: String,
     base: String,
     head_ref: Option<String>,
@@ -377,6 +455,7 @@ pub(crate) async fn review_changes(
     reversed: bool,
 ) -> Result<ReviewIndex, CommandError> {
     validate_ref(&base, "base")?;
+    let explicit_head = head_ref.is_some();
     let head_ref = effective_head_ref(head_ref);
     validate_ref(&head_ref, "head_ref")?;
     validate_scope_combination(&base, &head_ref, committed_only)?;
@@ -392,6 +471,35 @@ pub(crate) async fn review_changes(
         resolve_ref(&path, &base).await?
     };
     let target_sha = resolve_ref(&path, &head_ref).await?;
+    // Same conservative recording rules as commit_page: the worktree target
+    // records with an empty label (the branch name is not in hand without an
+    // extra spawn; the CASE keeps the nicer label commit_page recorded), a
+    // branch target records the full ref, commit targets record nothing.
+    if !explicit_head {
+        let worktree_key = path.to_str().unwrap_or_default();
+        retrospection::record_surface_open(
+            pool,
+            repo_path,
+            "worktree",
+            worktree_key,
+            "",
+            worktree_key,
+            &target_sha,
+        )
+        .await;
+    } else if head_ref.starts_with("refs/heads/") {
+        let label = head_ref.strip_prefix("refs/heads/").unwrap_or(&head_ref);
+        retrospection::record_surface_open(
+            pool,
+            repo_path,
+            "branch",
+            &head_ref,
+            label,
+            &head_ref,
+            &target_sha,
+        )
+        .await;
+    }
     // Filters configured in any scope are neutralized for inventory commands so
     // that enumeration never executes them; reviews are refused only when a
     // changed file's attributes actually map to a configured filter.
@@ -621,6 +729,8 @@ mod tests {
     #[tokio::test]
     async fn branch_tag_collision_uses_full_refs_for_review_data() {
         let repo = test_repo("branch-tag-collision");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
         test_git(&repo, &["branch", "-M", "main"]);
         test_git(&repo, &["tag", "main", "HEAD"]);
         test_git(
@@ -671,6 +781,8 @@ mod tests {
         );
 
         let review = review_changes(
+            &pool,
+            &repo_path,
             repo.to_str().unwrap().into(),
             "refs/heads/main".into(),
             Some("refs/heads/feature".into()),
@@ -722,6 +834,7 @@ mod tests {
     #[tokio::test]
     async fn tracked_review_does_not_refresh_index() {
         let repo = test_repo("index-refresh");
+        let pool = test_pool().await;
         let index = repo.join(".git/index");
         let before = std::fs::read(&index).unwrap();
         let tracked = std::fs::OpenOptions::new()
@@ -737,6 +850,8 @@ mod tests {
         drop(tracked);
 
         review_changes(
+            &pool,
+            &repo.to_str().unwrap().to_string(),
             repo.to_str().unwrap().into(),
             "HEAD".into(),
             None,
@@ -1310,9 +1425,12 @@ mod tests {
     #[tokio::test]
     async fn empty_tree_base_reviews_root_commits() {
         let repo = test_repo("empty-tree-base");
+        let pool = test_pool().await;
         let root_sha = test_rev_parse(&repo, "HEAD");
 
         let index = review_changes(
+            &pool,
+            &repo.to_str().unwrap().to_string(),
             repo.to_str().unwrap().into(),
             "empty-tree".into(),
             Some(root_sha.clone()),
@@ -1378,6 +1496,8 @@ mod tests {
         assert_ne!(first_parent, second_parent);
 
         let index = review_changes(
+            &pool,
+            &repo_path,
             repo.to_str().unwrap().into(),
             first_parent.clone(),
             Some(merge_sha.clone()),
@@ -1606,6 +1726,90 @@ mod tests {
         .await;
         assert_eq!(spawns, 1);
         assert_eq!(root_page, subdir_page.unwrap());
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pruned_surface_degrades_to_content_unavailable() {
+        let repo = test_repo("retrospect-gc");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        test_git(&repo, &["branch", "-M", "main"]);
+        test_git(&repo, &["checkout", "--quiet", "-b", "feature"]);
+        for index in 0..4 {
+            std::fs::write(repo.join("tracked.txt"), format!("change {index}\n")).unwrap();
+            test_git(&repo, &["add", "tracked.txt"]);
+            let message = format!("feature commit {index}");
+            test_git(&repo, &["commit", "--quiet", "-m", &message]);
+        }
+        let feature_sha = test_rev_parse(&repo, "refs/heads/feature");
+
+        // Opening page 1 caches it under the recorded head.
+        let first = commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            Some("refs/heads/feature".into()),
+            None,
+            None,
+            Some(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.commits.len(), 2);
+
+        test_git(&repo, &["checkout", "--quiet", "main"]);
+        test_git(&repo, &["branch", "-D", "feature"]);
+
+        // Reflog expiry plus prune make the recorded head unresolvable, the
+        // proposal's accepted-debt degradation point.
+        test_git(&repo, &["reflog", "expire", "--expire=now", "--all"]);
+        test_git(&repo, &["gc", "--prune=now"]);
+
+        // The cached page still renders with no git at all.
+        let (spawns, cached) = spawn_counted(commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            Some(feature_sha.clone()),
+            None,
+            None,
+            Some(2),
+        ))
+        .await;
+        assert_eq!(spawns, 0);
+        assert_eq!(cached.unwrap(), first);
+
+        // A deeper uncached page by the same SHA degrades to
+        // content_unavailable instead of unresolvable_ref.
+        let degraded = commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            Some(feature_sha),
+            None,
+            Some(2),
+            Some(2),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(degraded.code, "content_unavailable");
+
+        // A symbolic start ref that fails keeps unresolvable_ref: a missing
+        // ref is not "content gone".
+        let symbolic = commit_page(
+            &pool,
+            &repo_path,
+            repo_path.clone(),
+            Some("refs/heads/feature".into()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(symbolic.code, "unresolvable_ref");
 
         std::fs::remove_dir_all(repo).unwrap();
     }

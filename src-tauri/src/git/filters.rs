@@ -117,8 +117,9 @@ fn parse_applicable_filter_paths(output: &[u8], configured: &[String]) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{test_git, test_repo};
-    use crate::{list_review_changes, read_review_patch};
+    use crate::read_review_patch;
+    use crate::review::review_changes;
+    use crate::testutil::{test_git, test_pool, test_repo};
     use std::path::PathBuf;
     use std::process::Command as StdCommand;
 
@@ -184,7 +185,10 @@ mod tests {
 
         // With the filter-matching blob.mark untouched, the unrelated change
         // reviews normally despite the configured filter.
-        let review = list_review_changes(
+        let pool = test_pool().await;
+        let review = review_changes(
+            &pool,
+            repo.to_str().unwrap(),
             repo.to_str().unwrap().into(),
             "HEAD".into(),
             None,
@@ -211,7 +215,9 @@ mod tests {
 
         std::fs::write(repo.join("blob.mark"), "changed\n").unwrap();
 
-        let refused = list_review_changes(
+        let refused = review_changes(
+            &pool,
+            repo.to_str().unwrap(),
             repo.to_str().unwrap().into(),
             "HEAD".into(),
             None,

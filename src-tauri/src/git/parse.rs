@@ -3,9 +3,9 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Worktree {
-    path: String,
-    branch: String,
-    head: String,
+    pub(crate) path: String,
+    pub(crate) branch: String,
+    pub(crate) head: String,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]

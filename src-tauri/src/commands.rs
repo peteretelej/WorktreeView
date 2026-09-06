@@ -3,6 +3,7 @@ use crate::review::{
     commit_page, refs_inventory, review_changes, review_patch, FilePatch, RefInventory,
     ReviewIndex,
 };
+use crate::retrospection::{list_surfaces_in_pool, SurfaceListing};
 use crate::store::{
     get_settings_in_pool, load_repos, open_repo_path, set_repo_pinned_in_pool,
     set_settings_in_pool, Repo, Settings,
@@ -99,14 +100,33 @@ pub(crate) async fn list_commits(
 }
 
 #[tauri::command]
+pub(crate) async fn list_surfaces(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<SurfaceListing, CommandError> {
+    list_surfaces_in_pool(&state.pool, &path).await
+}
+
+#[tauri::command]
 pub(crate) async fn list_review_changes(
     path: String,
+    repo_path: String,
     base: String,
     head_ref: Option<String>,
     committed_only: bool,
     reversed: bool,
+    state: tauri::State<'_, AppState>,
 ) -> Result<ReviewIndex, CommandError> {
-    review_changes(path, base, head_ref, committed_only, reversed).await
+    review_changes(
+        &state.pool,
+        &repo_path,
+        path,
+        base,
+        head_ref,
+        committed_only,
+        reversed,
+    )
+    .await
 }
 
 #[tauri::command]

@@ -1,4 +1,6 @@
 export type Worktree = { path: string; branch: string; head: string };
+export type GoneSurface = { kind: "worktree" | "branch"; identity_key: string; label: string; detail: string; head_sha: string; last_seen_at: number };
+export type SurfaceListing = { gone: GoneSurface[] };
 export type ChangedFile = { path: string; status: string; untracked: boolean };
 export type ReviewScope = "all" | "committed";
 export type ReviewTarget = { kind: "worktree"; worktree: Worktree } | { kind: "ref"; name: string } | { kind: "commit"; sha: string; parents: string[]; defaultBaseAncestor: boolean };

@@ -1,14 +1,15 @@
 mod cache;
 mod commands;
 mod git;
+mod retrospection;
 mod review;
 mod store;
 #[cfg(test)]
 mod testutil;
 
 use commands::{
-    get_settings, list_commits, list_refs, list_repos, list_review_changes, list_worktrees,
-    open_repo, read_review_patch, set_repo_pinned, set_settings,
+    get_settings, list_commits, list_refs, list_repos, list_review_changes, list_surfaces,
+    list_worktrees, open_repo, read_review_patch, set_repo_pinned, set_settings,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -133,6 +134,7 @@ pub fn run() {
             list_refs,
             list_commits,
             list_review_changes,
+            list_surfaces,
             read_review_patch,
             get_settings,
             set_settings

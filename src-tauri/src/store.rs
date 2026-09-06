@@ -106,7 +106,7 @@ fn settings_bool_from_value(value: &str) -> Option<bool> {
     }
 }
 
-fn now_millis() -> i64 {
+pub(crate) fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -166,6 +166,7 @@ pub(crate) async fn normalize_stored_paths(pool: &SqlitePool) -> Result<(), sqlx
         .execute(pool)
         .await?;
         crate::cache::carry_repo_path(pool, &path, simplified).await?;
+        crate::retrospection::carry_repo_path(pool, &path, simplified).await?;
         sqlx::query("DELETE FROM repos WHERE path = ?")
             .bind(&path)
             .execute(pool)
@@ -513,5 +514,35 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn normalization_carries_retrospected_surfaces_to_the_plain_path() {
+        let pool = test_pool().await;
+        let verbatim = r"\\?\C:\repos\demo";
+        let plain = r"C:\repos\demo";
+        sqlx::query("INSERT INTO repos (path, name, last_opened_at, created_at, pinned_at) VALUES (?, 'demo', 50, 40, 7)")
+            .bind(verbatim)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::retrospection::record_surface_open(
+            &pool,
+            verbatim,
+            "branch",
+            "refs/heads/feature",
+            "feature",
+            "refs/heads/feature",
+            &"a".repeat(40),
+        )
+        .await;
+
+        normalize_stored_paths(&pool).await.unwrap();
+
+        let rows: Vec<String> = sqlx::query_scalar("SELECT repo_path FROM retrospected_surfaces")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, [plain]);
     }
 }

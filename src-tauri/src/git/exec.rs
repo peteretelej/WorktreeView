@@ -335,9 +335,11 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
     #[cfg(unix)]
-    use crate::testutil::{test_git, test_repo};
+    use crate::testutil::{test_git, test_pool, test_repo};
     #[cfg(unix)]
-    use crate::{list_review_changes, read_review_patch};
+    use crate::review::review_changes;
+    #[cfg(unix)]
+    use crate::read_review_patch;
     #[cfg(unix)]
     use std::process::Command as StdCommand;
 
@@ -458,7 +460,10 @@ mod tests {
         assert!(marker.exists());
         std::fs::remove_file(&marker).unwrap();
 
-        let index = list_review_changes(
+        let pool = test_pool().await;
+        let index = review_changes(
+            &pool,
+            repo.to_str().unwrap(),
             repo.to_str().unwrap().into(),
             "HEAD".into(),
             None,

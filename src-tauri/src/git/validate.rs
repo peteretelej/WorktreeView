@@ -171,8 +171,8 @@ pub(crate) fn primary_branch(branches: &[String]) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::list_review_changes;
-    use crate::testutil::test_repo;
+    use crate::review::review_changes;
+    use crate::testutil::{test_pool, test_repo};
 
     #[test]
     fn validates_review_arguments() {
@@ -237,7 +237,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_unresolvable_review_refs() {
         let repo = test_repo("unresolvable-ref");
-        let error = list_review_changes(
+        let pool = test_pool().await;
+        let error = review_changes(
+            &pool,
+            repo.to_str().unwrap(),
             repo.to_str().unwrap().into(),
             "refs/heads/missing".into(),
             None,

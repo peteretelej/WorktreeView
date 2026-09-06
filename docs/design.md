@@ -20,6 +20,12 @@ built for developers running multiple coding agents in parallel.
   until the repository is activated again. Individual commits are reviewable
   against their parent, with the empty tree as the base for parentless
   commits.
+- Reviewing or opening a worktree or branch remembers its identity and last
+  resolved head. When the surface later disappears from the repository it
+  stays listed flagged gone, and its history and committed-diff views still
+  open from cached or re-derivable data; once Git can no longer resolve the
+  recorded head, the view degrades to "content no longer available" instead
+  of silently dropping the surface.
 - Settings (appearance, interface zoom, diff display, dark and light
   themes) persist locally.
 
