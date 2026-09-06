@@ -45,6 +45,25 @@ pub(crate) fn validate_untracked_combination(
     Ok(())
 }
 
+pub(crate) async fn ensure_work_tree(canonical: &Path) -> Result<(), CommandError> {
+    let (exit_code, stdout, stderr) =
+        run_git(canonical, &["rev-parse", "--is-inside-work-tree"]).await?;
+    if exit_code != 0
+        && !String::from_utf8_lossy(&stderr)
+            .to_ascii_lowercase()
+            .contains("not a git repository")
+    {
+        return Err(git_execution_error(&stderr));
+    }
+    if exit_code != 0 || std::str::from_utf8(&stdout).map(|value| value.trim()) != Ok("true") {
+        return Err(CommandError::new(
+            "not_git_repository",
+            "The selected folder is not a Git repository and was not added.",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_scope_combination(
     base: &str,
     effective_head_ref: &str,

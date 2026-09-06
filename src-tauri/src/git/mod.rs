@@ -17,6 +17,6 @@ pub(crate) use parse::{
     ChangedFile, CommitInfo, CommitPage, Worktree,
 };
 pub(crate) use validate::{
-    effective_head_ref, primary_branch, resolve_empty_tree, resolve_ref, validate_file,
-    validate_ref, validate_scope_combination, validate_untracked_combination,
+    effective_head_ref, ensure_work_tree, primary_branch, resolve_empty_tree, resolve_ref,
+    validate_file, validate_ref, validate_scope_combination, validate_untracked_combination,
 };

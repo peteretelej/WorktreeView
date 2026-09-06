@@ -30,7 +30,7 @@ COPY src-tauri/capabilities ./src-tauri/capabilities
 COPY src-tauri/icons ./src-tauri/icons
 COPY src-tauri/migrations/0001_repos.sql ./src-tauri/migrations/0001_repos.sql
 COPY src-tauri/migrations/0002_repo_pins.sql ./src-tauri/migrations/0002_repo_pins.sql
-COPY src-tauri/src/main.rs src-tauri/src/lib.rs ./src-tauri/src/
+COPY src-tauri/src/ ./src-tauri/src/
 COPY e2e ./e2e
 
 RUN --mount=type=cache,target=/root/.cargo/registry \
