@@ -98,6 +98,49 @@ fn canonical_path(path: &str) -> Result<PathBuf, CommandError> {
     Ok(canonical)
 }
 
+async fn connect_store_pool(
+    db_path: &Path,
+    options: &SqliteConnectOptions,
+) -> Result<SqlitePool, String> {
+    let pool = sqlx::SqlitePool::connect_with(options.clone())
+        .await
+        .map_err(|error| format!("Could not connect to repository storage: {error}"))?;
+    let error = match sqlx::migrate!().run(&pool).await {
+        Ok(()) => return Ok(pool),
+        Err(error) => error,
+    };
+    // A store whose recorded migrations diverge from the embedded set (the
+    // pre-squash 0.0.1 schema) cannot migrate forward. It only holds saved
+    // repos, pins, and settings, so it is recreated rather than blocking
+    // startup on every launch.
+    if !matches!(
+        error,
+        sqlx::migrate::MigrateError::VersionMissing(_)
+            | sqlx::migrate::MigrateError::VersionMismatch(_)
+    ) {
+        return Err(format!("Could not migrate repository storage: {error}"));
+    }
+    pool.close().await;
+    for suffix in ["", "-wal", "-shm"] {
+        let file = PathBuf::from(format!("{}{suffix}", db_path.display()));
+        if let Err(error) = std::fs::remove_file(&file) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!(
+                    "Could not reset incompatible repository storage: {error}"
+                ));
+            }
+        }
+    }
+    let pool = sqlx::SqlitePool::connect_with(options.clone())
+        .await
+        .map_err(|error| format!("Could not connect to repository storage: {error}"))?;
+    sqlx::migrate!()
+        .run(&pool)
+        .await
+        .map_err(|error| format!("Could not migrate repository storage: {error}"))?;
+    Ok(pool)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -108,17 +151,12 @@ pub fn run() {
             })?;
             std::fs::create_dir_all(&data_dir)
                 .map_err(|error| format!("Could not create application data directory: {error}"))?;
+            let db_path = data_dir.join("worktreeview.sqlite3");
             let options = SqliteConnectOptions::new()
-                .filename(data_dir.join("worktreeview.sqlite3"))
+                .filename(&db_path)
                 .create_if_missing(true);
             let pool = tauri::async_runtime::block_on(async {
-                let pool = sqlx::SqlitePool::connect_with(options)
-                    .await
-                    .map_err(|error| format!("Could not connect to repository storage: {error}"))?;
-                sqlx::migrate!()
-                    .run(&pool)
-                    .await
-                    .map_err(|error| format!("Could not migrate repository storage: {error}"))?;
+                let pool = connect_store_pool(&db_path, &options).await?;
                 store::normalize_stored_paths(&pool).await.map_err(|error| {
                     format!("Could not normalize stored repository paths: {error}")
                 })?;
@@ -148,6 +186,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::plain_path;
+    use super::{connect_store_pool, SqliteConnectOptions};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -167,5 +206,56 @@ mod tests {
     fn overlong_unc_paths_stay_verbatim() {
         let deep = format!(r"\\?\UNC\server\share\{}", "a/".repeat(200));
         assert_eq!(plain_path(Path::new(&deep)), PathBuf::from(&deep));
+    }
+
+    #[tokio::test]
+    async fn incompatible_store_schema_is_recreated() {
+        let dir = crate::testutil::test_path("store-reset");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("worktreeview.sqlite3");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+
+        // A store from the pre-squash migration set: version 1 recorded
+        // under a description and checksum the embedded baseline cannot
+        // match, with tables the current schema does not define.
+        let old = sqlx::SqlitePool::connect_with(options.clone()).await.unwrap();
+        sqlx::query("CREATE TABLE repos (id INTEGER PRIMARY KEY)")
+            .execute(&old)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, \
+             description TEXT NOT NULL, installed_on TIMESTAMP NOT NULL \
+             DEFAULT CURRENT_TIMESTAMP, success BOOLEAN NOT NULL, \
+             checksum BLOB NOT NULL, execution_time BIGINT NOT NULL)",
+        )
+        .execute(&old)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+             (version, description, success, checksum, execution_time) \
+             VALUES (1, 'repos', 1, X'00', 0)",
+        )
+        .execute(&old)
+        .await
+        .unwrap();
+        old.close().await;
+
+        let pool = connect_store_pool(&db_path, &options).await.unwrap();
+        let versions: Vec<(i64,)> =
+            sqlx::query_as("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(versions.len(), 3);
+        sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
