@@ -459,19 +459,14 @@ fn side_lines<'a>(lines: &'a [PatchLine], side: &str) -> BTreeMap<u32, &'a str> 
 }
 
 // Hash of the lines currently present in start..=end on one side; None
-// when the range holds no rendered lines at all.
+// when the range holds no rendered lines at all. Blank lines keep their
+// empty content so the joined text matches the write-time hash exactly.
 fn range_hash(lines: &BTreeMap<u32, &str>, start: u32, end: u32) -> Option<String> {
-    let mut content = String::new();
-    for (_, text) in lines.range(start..=end) {
-        if !content.is_empty() {
-            content.push('\n');
-        }
-        content.push_str(text);
-    }
-    if content.is_empty() {
+    let texts: Vec<&str> = lines.range(start..=end).map(|(_, text)| *text).collect();
+    if texts.is_empty() {
         None
     } else {
-        Some(anchor_hash(&content))
+        Some(anchor_hash(&texts.join("\n")))
     }
 }
 
@@ -887,6 +882,62 @@ mod tests {
                 state: AnchorState::Current,
                 moved_line: None,
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn matcher_matches_anchors_starting_on_blank_lines() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        // git renders blank diff rows as a one-space marker the frontend
+        // strips to "", so the write-time content keeps those empty lines.
+        let comment = create_comment_in_pool(
+            &pool,
+            "/demo",
+            "base",
+            "/demo",
+            "worktree",
+            &line_draft("note", "RIGHT", 2, 3, &["", "x"]),
+        )
+        .await
+        .unwrap();
+        let blank = create_comment_in_pool(
+            &pool,
+            "/demo",
+            "base",
+            "/demo",
+            "worktree",
+            &line_draft("blank note", "RIGHT", 5, 5, &[""]),
+        )
+        .await
+        .unwrap();
+        let lines = [
+            patch("a", Some(1), Some(1)),
+            patch("", Some(2), Some(2)),
+            patch("x", Some(3), Some(3)),
+            patch("y", Some(4), Some(4)),
+            patch("", Some(5), Some(5)),
+            patch("b", Some(6), Some(6)),
+        ];
+        let statuses = match_comment_anchors_in_pool(
+            &pool, "/demo", "base", "/demo", "worktree", "file.txt", &lines,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            statuses,
+            [
+                AnchorStatus {
+                    comment_id: comment.id,
+                    state: AnchorState::Current,
+                    moved_line: None,
+                },
+                AnchorStatus {
+                    comment_id: blank.id,
+                    state: AnchorState::Current,
+                    moved_line: None,
+                },
+            ]
         );
     }
 
