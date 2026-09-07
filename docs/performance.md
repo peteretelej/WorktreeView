@@ -15,6 +15,8 @@ later optimization target.
   history open skips the `git log` spawn, and deep-page and
   ancestry-probe costs are paid once per SHA key instead of on every
   open. `git log` still runs, bounded, whenever the key changes.
+- A patch read resolves only symbolic ref endpoints: literal SHA
+  endpoints are content-addressed and validated by the diff itself.
 
 ## Webview side
 

@@ -581,12 +581,21 @@ pub(crate) async fn review_patch(
     // Same reserved base as `review_changes`: parentless commits diff the
     // empty tree via the two-dot committed-only range.
     let empty_tree_base = base == "empty-tree";
+    // Literal SHA endpoints are content-addressed: the diff validates them
+    // by executing, so they spawn no resolution. Symbolic endpoints keep
+    // resolving fresh, because a missing ref must still fail as
+    // unresolvable_ref. The resolved base is only needed for the
+    // empty-tree range.
     let base_sha = if empty_tree_base {
         resolve_empty_tree(&path).await?
+    } else if literal_sha(&base) {
+        String::new()
     } else {
         resolve_ref(&path, &base).await?
     };
-    let _target_sha = resolve_ref(&path, &head_ref).await?;
+    if !literal_sha(&head_ref) {
+        resolve_ref(&path, &head_ref).await?;
+    }
     if !committed_only && !untracked {
         let filters = configured_filter_names(&path).await?;
         reject_applicable_filters(&path, std::slice::from_ref(&file), &filters).await?;
@@ -1009,6 +1018,64 @@ mod tests {
         std::fs::remove_dir_all(origin).unwrap();
         std::fs::remove_dir_all(repo).unwrap();
     }
+    #[tokio::test]
+    async fn literal_sha_patch_endpoints_spawn_no_resolutions() {
+        let repo = test_repo("patch-literal-endpoints");
+        std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        test_git(&repo, &["add", "tracked.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "base"]);
+        let base_sha = test_rev_parse(&repo, "HEAD");
+        std::fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
+        test_git(&repo, &["add", "tracked.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "changed"]);
+        let head_sha = test_rev_parse(&repo, "HEAD");
+
+        let patch = review_patch(
+            repo.to_str().unwrap().into(),
+            base_sha.clone(),
+            Some(head_sha.clone()),
+            true,
+            false,
+            "tracked.txt".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(patch.text.contains("+changed"));
+
+        // Content-addressed endpoints are validated by the diff itself:
+        // only the numstat probe and the patch spawn remain.
+        let (spawns, again) = spawn_counted(review_patch(
+            repo.to_str().unwrap().into(),
+            base_sha.clone(),
+            Some(head_sha.clone()),
+            true,
+            false,
+            "tracked.txt".into(),
+            false,
+        ))
+        .await;
+        assert_eq!(spawns, 2);
+        assert!(again.unwrap().text.contains("+changed"));
+
+        // A missing literal SHA fails at the diff as a Git execution error
+        // rather than the symbolic-ref unresolvable_ref contract.
+        let missing = review_patch(
+            repo.to_str().unwrap().into(),
+            "a".repeat(40),
+            Some(head_sha),
+            true,
+            false,
+            "tracked.txt".into(),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing.code, "git_execution");
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
     #[tokio::test]
     async fn untracked_patch_requires_current_git_inventory() {
         let repo = test_repo("untracked-inventory");
