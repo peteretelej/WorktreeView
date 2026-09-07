@@ -6,6 +6,11 @@
   findable without cluttering the live sidebar.
 - Settings (appearance, interface zoom, diff display, dark and light
   themes) persist locally.
+- Commit history is a permanent sidebar fixture rather than a surface you
+  have to be in: the commit list follows the active ref (the reviewed
+  worktree or branch, the history surface's start point, or the selected
+  worktree in the worktree list) and stays anchored when a commit review
+  opens. Picking a commit shows that commit's own diff against its parent.
 
 ## Non-goals
 
