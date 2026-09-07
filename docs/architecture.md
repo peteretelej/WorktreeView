@@ -13,8 +13,8 @@ normalized domain data through narrow, typed Tauri commands.
   `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
   `list_refs`, `list_commits`, `list_review_changes`, `list_surfaces`,
   `read_review_patch`, `create_comment`, `list_comments`,
-  `reply_comment`, `set_comment_resolved`, `edit_comment`,
-  `match_comment_anchors`.
+  `list_submissions`, `reply_comment`, `set_comment_resolved`,
+  `edit_comment`, `match_comment_anchors`.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
   (4 MiB per stream), a deadline (10 seconds for local probes, 60 for the
   fetch the refresh action runs), and kill-on-drop cancellation.
@@ -44,7 +44,13 @@ normalized domain data through narrow, typed Tauri commands.
   (current, moved with the nearest re-anchored line, outdated); the
   frontend only maps display sides to logical sides and places the
   results. Anchor-shape validation lives here and is authoritative for
-  the package.
+  the package. It also owns the submission ingest: one
+  `ingest_submission_in_pool` validates schema, vocabulary, and size caps
+  against the [client contract](agent-submissions.md), reuses the anchor
+  validator, stores sections as sent, and materializes findings as agent
+  comments with severity and submission reference in one transaction; the
+  loopback transport calls it unchanged. `list_submissions` returns
+  stored sections as typed entries, never raw JSON.
 - `cache.rs`: SQLite-backed history cache for commit pages and ancestry
   marks, keyed by resolved SHAs.
 - `retrospection.rs`: records reviewed worktree and branch identities
@@ -75,17 +81,18 @@ views), `settings.tsx`, `diff.ts` (diff presentation helpers),
 (review base and worktree scope preset helpers), `surfaces.ts` (surface
 pin and archive helpers), `comments.ts` (comment mirror types and
 logical-side helpers) with `comments.tsx` (comment hook, stream panel,
-and inline composers), and `markdown.tsx` rendering comment bodies through
+and inline composers), `canvas.ts` (submission mirror types and section
+view mapping) with `canvas.tsx` (section cards, the sandboxed html block,
+and the reviews strip), and `markdown.tsx` rendering comment bodies through
 `react-markdown` with `rehype-sanitize`'s default schema
 (`markdown-schema.ts` keeps the schema constant unit-testable). Unit tests
-for the utilities run with
-`npm run test:unit`.
+for the utilities run with `npm run test:unit`.
 
 ## Persistence
 
 SQLite stores repositories, pin order, settings, retrospected surface
-identities, review sessions with their comments (and, from the next phase,
-submissions), plus a commit history cache: `list_commits` resolves the start
+identities, review sessions with their comments and agent submissions,
+plus a commit history cache: `list_commits` resolves the start
 ref with one fresh `git rev-parse`, then serves log pages and default-base
 ancestry marks from the cache when the resolved SHAs match what was fetched
 before. Pages key on `(repo_path, start_sha, against_sha, skip, limit)` with
@@ -98,12 +105,15 @@ SHAs are resolved (the worktree path for live worktree targets), so a moved
 branch naturally starts a new comment session. Comments reference their
 review, optionally a parent comment (one root plus flat replies), and
 optionally a file or logical line range; line comments carry the write-time
-anchor hash and bounded snippet that drift detection needs later. All three
-tables cascade from the `repos` row, as do the older repo-scoped caches.
-The whole schema is one consolidated `0001` migration; a store recorded
-under an older migration set diverges from the embedded baseline and is
-set aside as `worktreeview.sqlite3.bak` at startup while a fresh store is
-rebuilt, so no manual deletion is needed.
+anchor hash and bounded snippet that drift detection needs later.
+Submissions reference their review and store the agent identity and their
+sections as JSON; findings are never stored separately, they are comment
+rows authored by the agent with a severity and a submission reference.
+All three tables cascade from the `repos` row, as do the older repo-scoped
+caches. The whole schema is one consolidated `0001` migration; a store
+recorded under an older migration set diverges from the embedded baseline
+and is set aside as `worktreeview.sqlite3.bak` at startup while a fresh
+store is rebuilt, so no manual deletion is needed.
 
 Retrospected surfaces key on `(repo_path, kind, identity_key)` and carry the
 recorded label, head, pin state, and row origin (`review` for recorded

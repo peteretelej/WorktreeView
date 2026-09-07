@@ -29,7 +29,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test:desktop": "bash scripts/test-desktop.sh",
-    "test:unit": "node --test src/navigation.test.ts src/reviewPresets.test.ts src/surfaces.test.ts src/diff.test.ts src/zoom.test.ts src/highlight.test.ts src/comments.test.ts src/markdown.test.ts"
+    "test:unit": "node --test src/navigation.test.ts src/reviewPresets.test.ts src/surfaces.test.ts src/diff.test.ts src/zoom.test.ts src/highlight.test.ts src/comments.test.ts src/markdown.test.ts src/canvas.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

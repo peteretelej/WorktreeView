@@ -11,10 +11,10 @@ mod testutil;
 
 use commands::{
     create_comment, edit_comment, fetch_project, get_branch_inventory, get_settings,
-    list_comments, list_commits, list_refs, list_repos, list_review_changes, list_surfaces,
-    list_worktree_status, list_worktrees, match_comment_anchors, open_repo, read_review_patch,
-    remove_repo, reply_comment, set_comment_resolved, set_repo_pinned, set_settings,
-    set_surface_pinned,
+    list_comments, list_commits, list_refs, list_repos, list_review_changes, list_submissions,
+    list_surfaces, list_worktree_status, list_worktrees, match_comment_anchors, open_repo,
+    read_review_patch, remove_repo, reply_comment, set_comment_resolved, set_repo_pinned,
+    set_settings, set_surface_pinned,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -207,6 +207,7 @@ pub fn run() {
             set_settings,
             create_comment,
             list_comments,
+            list_submissions,
             reply_comment,
             set_comment_resolved,
             edit_comment,

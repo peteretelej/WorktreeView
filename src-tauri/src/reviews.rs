@@ -11,6 +11,19 @@ const SNIPPET_MAX_CHARS: usize = 2000;
 // recorded start; beyond it the comment is outdated, not moved.
 const MATCH_WINDOW: u32 = 25;
 
+// Submission ingest caps. The 2 MiB payload cap is authoritative for
+// submission size; the phase 3 transport only applies a coarser pre-parse
+// guard, so an ingest-legal submission is never transport-rejected.
+const MAX_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
+const MAX_HTML_SECTION_BYTES: usize = 1024 * 1024;
+const MAX_TEXT_BODY_BYTES: usize = 256 * 1024;
+const MAX_AGENT_NAME_CHARS: usize = 200;
+const MAX_AGENT_MODEL_CHARS: usize = 200;
+const MAX_COMMAND_CONTEXT_CHARS: usize = 500;
+const MAX_FINDING_TITLE_CHARS: usize = 500;
+const MAX_SECTIONS: usize = 32;
+const MAX_FINDINGS: usize = 200;
+
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Comment {
     id: i64,
@@ -54,6 +67,51 @@ pub struct PatchLine {
     text: String,
     old_line: Option<u32>,
     new_line: Option<u32>,
+}
+
+// Sections are stored as sent (the vocabulary is app-owned and unknown
+// kinds stay forward-compatible) and re-emitted typed over IPC, never as
+// raw JSON.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct StoredSection {
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+}
+
+// The one client-supplied block kind is `html`: static markup rendered in a
+// sandboxed iframe, badged as client content.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmissionPayload {
+    agent_name: String,
+    agent_model: String,
+    command_context: Option<String>,
+    sections: Vec<StoredSection>,
+    findings: Vec<SubmissionFinding>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmissionFinding {
+    title: String,
+    body: String,
+    file: Option<String>,
+    start: Option<u32>,
+    end: Option<u32>,
+    priority: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct Submission {
+    id: i64,
+    review_id: i64,
+    agent_name: String,
+    agent_model: String,
+    command_context: Option<String>,
+    sections: Vec<StoredSection>,
+    created_at: i64,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -111,13 +169,26 @@ fn validate_severity(severity: &Option<String>) -> Result<(), CommandError> {
 enum Anchor {
     Review,
     File { file_path: String },
-    Line { side: String, start_line: u32, end_line: u32, content: String },
+    // Human comments bind the anchored lines' content (hash and snippet);
+    // agent findings have no line content, so nothing is bound.
+    Line { side: String, start_line: u32, end_line: u32, content: Option<String> },
+}
+
+// Whether a line anchor must bind the draft's line content: required for
+// human comments, absent for submission findings.
+enum AnchorLines {
+    FromDraft,
+    Absent,
 }
 
 // The authoritative anchor-shape validator for this package: phase 2's
 // ingest reuses it. Mirrors the comments table CHECK constraints with
 // friendly errors, and binds the hashed content to the posted lines.
 fn validate_anchor(draft: &CommentDraft) -> Result<Anchor, CommandError> {
+    validate_anchor_with(draft, AnchorLines::FromDraft)
+}
+
+fn validate_anchor_with(draft: &CommentDraft, lines: AnchorLines) -> Result<Anchor, CommandError> {
     require_body(&draft.body)?;
     validate_severity(&draft.severity)?;
     let invalid = |message: &str| CommandError::new("invalid_comment", message);
@@ -155,14 +226,20 @@ fn validate_anchor(draft: &CommentDraft) -> Result<Anchor, CommandError> {
     if end_line < start_line {
         return Err(invalid("A line anchor's end line cannot precede its start."));
     }
-    if draft.lines.is_empty() {
-        return Err(invalid("A line comment needs the anchored lines' content."));
-    }
+    let content = match lines {
+        AnchorLines::FromDraft => {
+            if draft.lines.is_empty() {
+                return Err(invalid("A line comment needs the anchored lines' content."));
+            }
+            Some(draft.lines.join("\n"))
+        }
+        AnchorLines::Absent => None,
+    };
     Ok(Anchor::Line {
         side,
         start_line,
         end_line,
-        content: draft.lines.join("\n"),
+        content,
     })
 }
 
@@ -271,7 +348,7 @@ async fn insert_comment(
     anchor: Option<Anchor>,
 ) -> Result<Comment, CommandError> {
     let (hash, snippet) = match anchor {
-        Some(Anchor::Line { content, .. }) => (
+        Some(Anchor::Line { content: Some(content), .. }) => (
             Some(anchor_hash(&content)),
             Some(truncate_chars(&content, SNIPPET_MAX_CHARS)),
         ),
@@ -565,6 +642,223 @@ pub(crate) async fn match_comment_anchors_in_pool(
         statuses.push(match_anchor(&anchor, lines));
     }
     Ok(statuses)
+}
+
+fn invalid_submission(message: impl Into<String>) -> CommandError {
+    CommandError::new("invalid_submission", message)
+}
+
+// Anchoring errors come from the shared comment validator under its
+// invalid_comment code; a finding's anchor is a submission-shape violation,
+// so the code is relabeled while the message passes through.
+fn recode_submission(error: CommandError) -> CommandError {
+    CommandError {
+        code: "invalid_submission".into(),
+        message: error.message,
+    }
+}
+
+// Resolves a finding to its comment anchor columns through the shared
+// validator. Line-anchored findings always anchor RIGHT (the new side); the
+// payload carries no side field.
+fn finding_anchor(
+    finding: &SubmissionFinding,
+) -> Result<(Option<String>, Option<String>, Option<i64>, Option<i64>), CommandError> {
+    let line_anchored = finding.file.is_some() && finding.start.is_some();
+    let draft = CommentDraft {
+        body: finding.body.clone(),
+        severity: Some(finding.priority.clone()),
+        file_path: finding.file.clone(),
+        side: line_anchored.then(|| "RIGHT".to_string()),
+        start_line: finding.start,
+        end_line: finding.end.or(finding.start),
+        lines: Vec::new(),
+    };
+    let anchor = validate_anchor_with(&draft, AnchorLines::Absent).map_err(recode_submission)?;
+    Ok(match anchor {
+        Anchor::Review => (None, None, None, None),
+        Anchor::File { file_path } => (Some(file_path), None, None, None),
+        Anchor::Line {
+            side,
+            start_line,
+            end_line,
+            ..
+        } => (
+            draft.file_path.clone(),
+            Some(side),
+            Some(i64::from(start_line)),
+            Some(i64::from(end_line)),
+        ),
+    })
+}
+
+fn require_non_empty(value: &str, what: &str) -> Result<(), CommandError> {
+    if value.trim().is_empty() {
+        return Err(invalid_submission(format!("{what} must be a non-empty string.")));
+    }
+    Ok(())
+}
+
+fn require_char_cap(value: &str, cap: usize, what: &str) -> Result<(), CommandError> {
+    if value.chars().count() > cap {
+        return Err(invalid_submission(format!("{what} exceeds {cap} characters.")));
+    }
+    Ok(())
+}
+
+fn validate_submission(payload: &SubmissionPayload) -> Result<(), CommandError> {
+    let serialized = serde_json::to_vec(payload)
+        .map_err(|_| invalid_submission("The submission could not be serialized."))?;
+    if serialized.len() > MAX_PAYLOAD_BYTES {
+        return Err(invalid_submission(
+            "The submission exceeds the 2 MiB payload cap.",
+        ));
+    }
+    require_non_empty(&payload.agent_name, "The agent name")?;
+    require_char_cap(&payload.agent_name, MAX_AGENT_NAME_CHARS, "The agent name")?;
+    require_non_empty(&payload.agent_model, "The agent model")?;
+    require_char_cap(&payload.agent_model, MAX_AGENT_MODEL_CHARS, "The agent model")?;
+    if let Some(context) = &payload.command_context {
+        require_char_cap(context, MAX_COMMAND_CONTEXT_CHARS, "The command context")?;
+    }
+    if payload.sections.len() > MAX_SECTIONS {
+        return Err(invalid_submission(format!(
+            "The submission exceeds {MAX_SECTIONS} sections."
+        )));
+    }
+    if payload.findings.len() > MAX_FINDINGS {
+        return Err(invalid_submission(format!(
+            "The submission exceeds {MAX_FINDINGS} findings."
+        )));
+    }
+    for section in &payload.sections {
+        let (cap, what) = if section.kind == "html" {
+            (MAX_HTML_SECTION_BYTES, "The html section body")
+        } else {
+            (MAX_TEXT_BODY_BYTES, "A section body")
+        };
+        if section.body.len() > cap {
+            return Err(invalid_submission(format!(
+                "{what} exceeds the {cap} byte cap."
+            )));
+        }
+    }
+    for finding in &payload.findings {
+        require_non_empty(&finding.title, "A finding title")?;
+        require_char_cap(&finding.title, MAX_FINDING_TITLE_CHARS, "A finding title")?;
+        finding_anchor(finding)?;
+    }
+    Ok(())
+}
+
+// The only writer of submissions and agent comments: phase 3's HTTP
+// handler calls this unchanged. The submission and every finding comment
+// commit atomically or not at all.
+#[allow(dead_code)] // the phase 3 transport is the production caller
+pub(crate) async fn ingest_submission_in_pool(
+    pool: &SqlitePool,
+    repo_path: &str,
+    base_sha: &str,
+    target_key: &str,
+    target_kind: &str,
+    payload: &SubmissionPayload,
+) -> Result<i64, CommandError> {
+    validate_submission(payload)?;
+    // The target repository must exist before anything is written; reviews
+    // key on a repos row that cascades away with it.
+    let known: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM repos WHERE path = ?")
+        .bind(repo_path)
+        .fetch_one(pool)
+        .await?;
+    if known == 0 {
+        return Err(CommandError::new(
+            "unknown_review_target",
+            "No repository with that path is open in WorktreeView.",
+        ));
+    }
+    let review_id =
+        resolve_review_id(pool, repo_path, base_sha, target_key, target_kind).await?;
+    let mut tx = pool.begin().await?;
+    let result = sqlx::query(
+        "INSERT INTO submissions (review_id, agent_name, agent_model, command_context, \
+                sections_json, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(review_id)
+    .bind(payload.agent_name.as_str())
+    .bind(payload.agent_model.as_str())
+    .bind(payload.command_context.as_deref())
+    .bind(serde_json::to_string(&payload.sections).map_err(|_| {
+        invalid_submission("The submission sections could not be serialized.")
+    })?)
+    .bind(now_millis())
+    .execute(&mut *tx)
+    .await?;
+    let submission_id = result.last_insert_rowid();
+    for finding in &payload.findings {
+        let (file_path, side, start_line, end_line) = finding_anchor(finding)?;
+        sqlx::query(
+            "INSERT INTO comments (review_id, author_kind, author_name, author_model, body, \
+                    file_path, side, start_line, end_line, severity, submission_id, created_at) \
+             VALUES (?, 'agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(review_id)
+        .bind(payload.agent_name.as_str())
+        .bind(payload.agent_model.as_str())
+        .bind(finding.body.as_str())
+        .bind(file_path)
+        .bind(side)
+        .bind(start_line)
+        .bind(end_line)
+        .bind(Some(finding.priority.as_str()))
+        .bind(submission_id)
+        .bind(now_millis())
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(submission_id)
+}
+
+pub(crate) async fn list_submissions_in_pool(
+    pool: &SqlitePool,
+    repo_path: &str,
+    base_sha: &str,
+    target_key: &str,
+    target_kind: &str,
+) -> Result<Vec<Submission>, CommandError> {
+    let Some(review_id) =
+        find_review_id(pool, repo_path, base_sha, target_key, target_kind).await?
+    else {
+        return Ok(Vec::new());
+    };
+    let rows = sqlx::query(
+        "SELECT id, review_id, agent_name, agent_model, command_context, sections_json, created_at \
+         FROM submissions WHERE review_id = ? ORDER BY created_at, id",
+    )
+    .bind(review_id)
+    .fetch_all(pool)
+    .await?;
+    let mut submissions = Vec::new();
+    for row in &rows {
+        let sections_json: String = row.try_get("sections_json")?;
+        let sections: Vec<StoredSection> = serde_json::from_str(&sections_json).map_err(|error| {
+            CommandError::new(
+                "persistence",
+                format!("A stored submission could not be read: {error}"),
+            )
+        })?;
+        submissions.push(Submission {
+            id: row.try_get("id")?,
+            review_id: row.try_get("review_id")?,
+            agent_name: row.try_get("agent_name")?,
+            agent_model: row.try_get("agent_model")?,
+            command_context: row.try_get("command_context")?,
+            sections,
+            created_at: row.try_get("created_at")?,
+        });
+    }
+    Ok(submissions)
 }
 
 #[cfg(test)]
@@ -1134,5 +1428,306 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(statuses[0].state, AnchorState::Outdated);
+    }
+
+    fn payload() -> SubmissionPayload {
+        SubmissionPayload {
+            agent_name: "reviewer-bot".into(),
+            agent_model: "test-model".into(),
+            command_context: Some("orchestrator".into()),
+            sections: vec![
+                StoredSection {
+                    kind: "brief".into(),
+                    title: "Summary".into(),
+                    body: "All good.".into(),
+                },
+                StoredSection {
+                    kind: "walkthrough".into(),
+                    title: "Walkthrough".into(),
+                    body: "Step by step.".into(),
+                },
+                StoredSection {
+                    kind: "custom-diagram".into(),
+                    title: "Diagram".into(),
+                    body: "Unknown kinds are stored as sent.".into(),
+                },
+            ],
+            findings: vec![
+                SubmissionFinding {
+                    title: "Review note".into(),
+                    body: "Review-level finding.".into(),
+                    file: None,
+                    start: None,
+                    end: None,
+                    priority: "P1".into(),
+                },
+                SubmissionFinding {
+                    title: "File note".into(),
+                    body: "File-level finding.".into(),
+                    file: Some("file.txt".into()),
+                    start: None,
+                    end: None,
+                    priority: "P2".into(),
+                },
+                SubmissionFinding {
+                    title: "Line note".into(),
+                    body: "Line finding.".into(),
+                    file: Some("file.txt".into()),
+                    start: Some(3),
+                    end: Some(4),
+                    priority: "P0".into(),
+                },
+            ],
+        }
+    }
+
+    async fn ingest(
+        pool: &SqlitePool,
+        repo_path: &str,
+        payload: &SubmissionPayload,
+    ) -> Result<i64, CommandError> {
+        ingest_submission_in_pool(pool, repo_path, "base", "/demo", "worktree", payload).await
+    }
+
+    #[tokio::test]
+    async fn ingest_round_trips_sections_and_materializes_findings_as_agent_comments() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let submission_id = ingest(&pool, "/demo", &payload()).await.unwrap();
+
+        let submissions = list_submissions_in_pool(&pool, "/demo", "base", "/demo", "worktree")
+            .await
+            .unwrap();
+        assert_eq!(submissions.len(), 1);
+        let submission = &submissions[0];
+        assert_eq!(submission.id, submission_id);
+        assert_eq!(submission.agent_name, "reviewer-bot");
+        assert_eq!(submission.agent_model, "test-model");
+        assert_eq!(submission.command_context.as_deref(), Some("orchestrator"));
+        // Sections come back typed and in order; the unknown kind is stored.
+        assert_eq!(
+            submission
+                .sections
+                .iter()
+                .map(|section| section.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["brief", "walkthrough", "custom-diagram"]
+        );
+        assert_eq!(submission.sections[2].title, "Diagram");
+
+        let comments = list_comments_in_pool(&pool, "/demo", "base", "/demo", "worktree")
+            .await
+            .unwrap();
+        assert_eq!(comments.len(), 3);
+        assert!(comments.iter().all(|comment| comment.author_kind == "agent"));
+        assert!(comments
+            .iter()
+            .all(|comment| comment.submission_id == Some(submission_id)));
+        assert!(comments
+            .iter()
+            .all(|comment| comment.author_name == "reviewer-bot"));
+        assert!(comments
+            .iter()
+            .all(|comment| comment.author_model.as_deref() == Some("test-model")));
+        let review_level = &comments[0];
+        assert_eq!(review_level.severity.as_deref(), Some("P1"));
+        assert_eq!(review_level.body, "Review-level finding.");
+        assert_eq!(review_level.file_path, None);
+        let file_level = &comments[1];
+        assert_eq!(file_level.severity.as_deref(), Some("P2"));
+        assert_eq!(file_level.file_path.as_deref(), Some("file.txt"));
+        assert_eq!(file_level.side, None);
+        let line_level = &comments[2];
+        assert_eq!(line_level.severity.as_deref(), Some("P0"));
+        assert_eq!(line_level.file_path.as_deref(), Some("file.txt"));
+        // Findings carry no side: line anchors are always the RIGHT side,
+        // and with no bound lines there is no hash or snippet to drift-match.
+        assert_eq!(line_level.side.as_deref(), Some("RIGHT"));
+        assert_eq!(line_level.start_line, Some(3));
+        assert_eq!(line_level.end_line, Some(4));
+        assert_eq!(line_level.anchor_hash, None);
+        assert_eq!(line_level.snippet, None);
+        let missing = list_submissions_in_pool(&pool, "/demo", "base", "/gone", "head")
+            .await
+            .unwrap();
+        assert!(missing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_payload_violations() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+
+        let mut empty_name = payload();
+        empty_name.agent_name = "  ".into();
+        assert_eq!(
+            ingest(&pool, "/demo", &empty_name).await.unwrap_err().code,
+            "invalid_submission"
+        );
+
+        let mut bad_priority = payload();
+        bad_priority.findings[0].priority = "P9".into();
+        assert_eq!(
+            ingest(&pool, "/demo", &bad_priority)
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_submission"
+        );
+
+        // A line number without a file is a malformed anchor.
+        let mut bad_anchor = payload();
+        bad_anchor.findings[0].start = Some(3);
+        assert_eq!(
+            ingest(&pool, "/demo", &bad_anchor).await.unwrap_err().code,
+            "invalid_submission"
+        );
+
+        // An oversized total payload is rejected even though every section
+        // body is under its own cap.
+        let mut oversized = payload();
+        oversized.sections = vec![StoredSection {
+            kind: "brief".into(),
+            title: "Big".into(),
+            body: "a".repeat(MAX_PAYLOAD_BYTES + 1),
+        }];
+        assert_eq!(
+            ingest(&pool, "/demo", &oversized)
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_submission"
+        );
+
+        // An html section body may exceed the text cap but not 1 MiB.
+        let mut html = payload();
+        html.sections = vec![StoredSection {
+            kind: "html".into(),
+            title: "Canvas".into(),
+            body: format!("<p>{}</p>", "a".repeat(MAX_HTML_SECTION_BYTES)),
+        }];
+        assert_eq!(
+            ingest(&pool, "/demo", &html).await.unwrap_err().code,
+            "invalid_submission"
+        );
+        let mut legal = payload();
+        legal.sections = vec![StoredSection {
+            kind: "html".into(),
+            title: "Canvas".into(),
+            body: "<p>static</p>".into(),
+        }];
+        legal.findings.truncate(1);
+        assert!(ingest(&pool, "/demo", &legal).await.is_ok());
+
+        // Non-html section bodies cap at 256 KiB.
+        let mut text = payload();
+        text.sections = vec![StoredSection {
+            kind: "notes".into(),
+            title: "Notes".into(),
+            body: "a".repeat(MAX_TEXT_BODY_BYTES + 1),
+        }];
+        assert_eq!(
+            ingest(&pool, "/demo", &text).await.unwrap_err().code,
+            "invalid_submission"
+        );
+
+        // Structural violations never leave rows behind.
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reviews")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1,
+            "only the round-trip review exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_unknown_fields() {
+        let rejected = serde_json::from_str::<SubmissionPayload>(
+            r#"{
+                "agent_name": "bot", "agent_model": "m", "sections": [], "findings": [],
+                "unexpected": true
+            }"#,
+        )
+        .unwrap_err();
+        assert!(rejected.is_data());
+        let rejected = serde_json::from_str::<SubmissionPayload>(
+            r#"{
+                "agent_name": "bot", "agent_model": "m", "sections": [], "findings": [],
+                "command_context": null, "extra": 1
+            }"#,
+        )
+        .unwrap_err();
+        assert!(rejected.is_data());
+        let section = serde_json::from_str::<StoredSection>(
+            r#"{ "kind": "brief", "title": "t", "body": "b", "note": "x" }"#,
+        )
+        .unwrap_err();
+        assert!(section.is_data());
+        assert!(serde_json::from_str::<SubmissionPayload>(
+            r#"{
+                "agent_name": "bot", "agent_model": "m", "sections": [], "findings": [],
+                "command_context": null
+            }"#,
+        )
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn ingest_without_a_repo_row_is_unknown_review_target() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let error = ingest(&pool, "/missing", &payload()).await.unwrap_err();
+        assert_eq!(error.code, "unknown_review_target");
+        // Nothing was written, not even a review shell for the target.
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reviews")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM submissions")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_rolls_back_when_a_finding_insert_fails_midway() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        // A DB-level fault on the second finding's insert simulates a
+        // mid-ingest failure the validator cannot see.
+        sqlx::query(
+            "CREATE TRIGGER force_agent_failure BEFORE INSERT ON comments \
+             WHEN NEW.author_kind = 'agent' AND NEW.severity = 'P1' \
+             BEGIN SELECT RAISE(ABORT, 'forced failure'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let error = ingest(&pool, "/demo", &payload()).await.unwrap_err();
+        assert_eq!(error.code, "persistence");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM submissions")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "the submission must roll back with its findings"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM comments")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "no finding comment may survive a failed ingest"
+        );
     }
 }

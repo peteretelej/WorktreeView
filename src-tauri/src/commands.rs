@@ -10,8 +10,8 @@ use crate::review::{
 use crate::retrospection::{list_surfaces_in_pool, set_surface_pinned_in_pool, SurfaceListing};
 use crate::reviews::{
     create_comment_in_pool, edit_comment_in_pool, list_comments_in_pool,
-    match_comment_anchors_in_pool, reply_comment_in_pool, set_comment_resolved_in_pool,
-    AnchorStatus, Comment, CommentDraft, PatchLine,
+    list_submissions_in_pool, match_comment_anchors_in_pool, reply_comment_in_pool,
+    set_comment_resolved_in_pool, AnchorStatus, Comment, CommentDraft, PatchLine, Submission,
 };
 use crate::store::{
     get_settings_in_pool, load_repos, open_repo_path, remove_repo_in_pool, set_repo_pinned_in_pool,
@@ -308,6 +308,17 @@ pub(crate) async fn list_comments(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Comment>, CommandError> {
     list_comments_in_pool(&state.pool, &repo_path, &base_sha, &target_key, &target_kind).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_submissions(
+    repo_path: String,
+    base_sha: String,
+    target_key: String,
+    target_kind: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<Submission>, CommandError> {
+    list_submissions_in_pool(&state.pool, &repo_path, &base_sha, &target_key, &target_kind).await
 }
 
 #[tauri::command]

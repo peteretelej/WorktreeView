@@ -56,6 +56,7 @@ guides belong in CONTRIBUTING.md.
 | `docs/design.md` | Product model: review-first worktree inbox, ref-based targets |
 | `docs/architecture.md` | System layout: Tauri, React, Rust modules, IPC, SQLite |
 | `docs/safety-model.md` | Read-only guarantees and Git spawn hygiene |
+| `docs/agent-submissions.md` | Client contract for agent review submissions: schema, caps, rendering |
 | `docs/performance.md` | Large-repo and large-diff requirements |
 | `docs/release.md` | Distribution channels and publishing plans |
 

@@ -204,11 +204,12 @@ export function CommentThreadView({ thread, status, comments }: { thread: Commen
   </div>;
 }
 
-export function CommentStream({ comments }: { comments: CommentsApi }) {
+export function CommentStream({ comments, strip }: { comments: CommentsApi; strip?: ReactNode }) {
   if (!comments.key) return null;
   return <aside className="comment-stream" aria-label="Comments">
     <div className="pane-heading"><strong>Comments</strong><span>{comments.threads.length}</span></div>
     <div className="comment-stream-body">
+      {strip}
       <div className="comment-filter" role="group" aria-label="Filter comments by author">
         {(["all", "human", "agent"] as const).map((option) => <button key={option} type="button" className={comments.author === option ? "active" : ""} onClick={() => comments.setAuthor(option)}>{option}</button>)}
       </div>
