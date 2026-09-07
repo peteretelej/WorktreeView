@@ -56,15 +56,37 @@ function select(directory) {
   renameSync(replacement, selector);
 }
 
+const INBOX_TERMINAL_STATES = ["No repositories", "No worktrees", "Worktrees unavailable", "Repositories could not be loaded"];
+
+async function showWorktreeList() {
+  // A repository with hydrated worktrees lands on the commit-history surface;
+  // the worktree list sits behind its back button. Otherwise the inbox shows
+  // a terminal empty or error state; loading states keep the wait polling.
+  // Existence checks only: wdio element reads like getAttribute implicitly
+  // re-find a vanished element for waitforTimeout before failing.
+  await browser.waitUntil(async () => {
+    if (await $("main .back-button").isExisting()
+      && !await $('section[aria-label="Code review"]').isExisting()) return true;
+    for (const heading of INBOX_TERMINAL_STATES) {
+      if (await $(`strong=${heading}`).isExisting()) return true;
+    }
+    return false;
+  }, { timeoutMsg: "repository surface did not settle" });
+  if (await $("main .back-button").isExisting()) {
+    await $("main .back-button").click();
+    await $(".inbox-pane").waitForDisplayed();
+  }
+}
+
 async function openSelectedRepository(expectedPath) {
   await $('button[aria-label="Open repository"]').click();
   if (!expectedPath) return;
   await browser.waitUntil(async () => {
     const active = await $('nav.project-list button[aria-current="true"]');
     if (!await active.isExisting()) return false;
-    return await active.getAttribute("title") === expectedPath
-      && await $(".inbox-pane").getAttribute("aria-busy") === "false";
+    return await active.getAttribute("title") === expectedPath;
   }, { timeoutMsg: `repository did not finish opening: ${expectedPath}` });
+  await showWorktreeList();
 }
 
 async function projectPaths() {
@@ -159,12 +181,14 @@ describe("bundled desktop lifecycle", () => {
     await expect($("div.nav-section-label=Recent")).toBeDisplayed();
 
     await browser.refresh();
+    await showWorktreeList();
     await $(".worktree-row").waitForDisplayed();
     await expect($(`.worktree-row[title="${sidebarRepository}"]`)).toBeDisplayed();
 
     const firstSession = browser.sessionId;
     await browser.reloadSession();
     expect(browser.sessionId).not.toBe(firstSession);
+    await showWorktreeList();
     await $(".worktree-row").waitForDisplayed();
     await expect($(`.worktree-row[title="${sidebarRepository}"]`)).toBeDisplayed();
 
@@ -282,6 +306,7 @@ describe("bundled desktop lifecycle", () => {
     const repositoryPaletteResult = await $(`//div[contains(@class, "palette-results")]/button[@title="${switchRepository}"]`);
     await expect(repositoryPaletteResult).toBeDisplayed();
     await repositoryPaletteResult.click();
+    await showWorktreeList();
     await expect($("h1=Worktrees")).toBeDisplayed();
     assert.equal(await $('section[aria-label="Code review"]').isExisting(), false);
 
