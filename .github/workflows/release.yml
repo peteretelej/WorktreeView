@@ -78,7 +78,7 @@ jobs:
           tagName: v__VERSION__
           releaseName: WorktreeView v__VERSION__
           releaseBody: Installers for Windows, macOS, and Linux. Builds are unsigned in early releases; see the README for install notes.
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           generateReleaseNotes: true
           uploadUpdaterJson: false
