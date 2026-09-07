@@ -571,7 +571,7 @@ h2 {
 .table-header,
 .worktree-row {
   display: grid;
-  grid-template-columns: minmax(230px, 1fr) minmax(130px, 0.6fr);
+  grid-template-columns: minmax(230px, 1fr) minmax(130px, 0.6fr) minmax(110px, 0.5fr);
   gap: 12px;
   align-items: center;
 }
@@ -641,6 +641,59 @@ h2 {
 .worktree-row.selected {
   background: var(--primary-soft);
   box-shadow: inset 2px 0 var(--primary);
+}
+
+.worktree-row-wrap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+}
+
+.worktree-row-wrap .worktree-row {
+  border-bottom: 0;
+}
+
+.working-changes-button {
+  justify-self: end;
+  margin-right: 14px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.working-changes-button:hover,
+.working-changes-button:focus-visible {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--foreground);
+}
+
+.changes-cell {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.changes-cell.dirty {
+  color: var(--warn);
+}
+
+.overview-meta {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.section-heading .icon-button {
+  align-self: center;
 }
 
 .branch-title {
@@ -906,6 +959,10 @@ button:disabled {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 7px 12px;
   }
+
+  .changes-cell {
+    display: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -989,7 +1046,7 @@ button:disabled {
 .project-row-wrap .sidebar-worktree-row,
 .project-row-wrap .sidebar-branch-row,
 .project-row-wrap .archived-row { padding-right: 26px; }
-.gone-badge { flex: none; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 8px; text-transform: uppercase; }
+.gone-badge, .main-badge { flex: none; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 8px; text-transform: uppercase; }
 .archived-section { margin: 0 0 5px 21px; border-left: 1px solid var(--border); }
 .archived-heading { display: flex; height: 28px; align-items: center; gap: 6px; padding: 0 6px 0 4px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
 .archived-heading span { flex: none; }

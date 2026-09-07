@@ -12,6 +12,8 @@ against the right base, without checking anything out.
 ## Features
 
 - Repository tree with pinned and recent repos, worktrees, and branches
+- Project overview with live per-worktree change counts and one-click
+  working-changes reviews
 - Worktree reviews against the merge-base, including uncommitted and
   untracked work by default, with a committed-only toggle
 - Review any branch, tag, or individual commit without checkout

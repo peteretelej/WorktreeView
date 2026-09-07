@@ -66,12 +66,13 @@ describe("bundled desktop surface pins and archived surfaces", () => {
     select(repository);
     await openSelectedRepository(repository);
     await expandRepository(repository);
-    await expect($(`.sidebar-children button.sidebar-branch-row span=e2e-pin`)).toBeDisplayed();
-    await expect($(`.sidebar-children button.sidebar-branch-row span=e2e-archive`)).toBeDisplayed();
+    await expect($('//button[contains(@class, "sidebar-branch-row")][.//span[normalize-space()="e2e-pin"]]')).toBeDisplayed();
+    await expect($('//button[contains(@class, "sidebar-branch-row")][.//span[normalize-space()="e2e-archive"]]')).toBeDisplayed();
 
-    // Pinning a branch writes only to the app's own database.
+    // Pinning a branch writes only to the app's own database; the pin
+    // affordance is hover-revealed, so assert existence over display.
     await $('button[aria-label="Pin branch e2e-pin"]').click();
-    await expect($('button[aria-label="Unpin branch e2e-pin"]')).toBeDisplayed();
+    await expect($('button[aria-label="Unpin branch e2e-pin"]')).toBeExisting();
 
     // The pin survives an application restart.
     const firstSession = browser.sessionId;
@@ -79,20 +80,20 @@ describe("bundled desktop surface pins and archived surfaces", () => {
     expect(browser.sessionId).not.toBe(firstSession);
     await $(".worktree-row").waitForDisplayed();
     await expandRepository(repository);
-    await expect($('button[aria-label="Unpin branch e2e-pin"]')).toBeDisplayed();
+    await expect($('button[aria-label="Unpin branch e2e-pin"]')).toBeExisting();
 
     // Unpinning clears the pin.
     await $('button[aria-label="Unpin branch e2e-pin"]').click();
-    await expect($('button[aria-label="Pin branch e2e-pin"]')).toBeDisplayed();
+    await expect($('button[aria-label="Pin branch e2e-pin"]')).toBeExisting();
 
     // Record the archive candidate by opening its review, then delete the
     // branches in the writable fixture copy: the unpinned recorded branch
     // archives, the pinned branch stays inline with a gone badge.
-    await $(`.sidebar-children button.sidebar-branch-row span=e2e-archive`).click();
+    await $('//button[contains(@class, "sidebar-branch-row")][.//span[normalize-space()="e2e-archive"]]').click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
-    await $('button=Worktrees').click();
+    await $(`button=Overview`).click();
     await $('button[aria-label="Pin branch e2e-gone"]').click();
-    await expect($('button[aria-label="Unpin branch e2e-gone"]')).toBeDisplayed();
+    await expect($('button[aria-label="Unpin branch e2e-gone"]')).toBeExisting();
     git(["branch", "-D", "e2e-pin", "e2e-archive", "e2e-gone"], repository);
     await browser.refresh();
     await $(".worktree-row").waitForDisplayed();

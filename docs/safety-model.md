@@ -8,7 +8,9 @@ repository cannot mutate it or execute code it defines.
 - No staging, committing, checkout, fetching, pushing, or worktree
   management from any review path, present or planned.
 - Reviews are computed from read-only Git plumbing: diff, rev-parse,
-  for-each-ref, log, ls-files, worktree list.
+  for-each-ref, log, ls-files, worktree list. The per-worktree change-count
+  probe runs status with --no-optional-locks so it can never refresh or lock
+  the index.
 
 ## Spawn hygiene
 

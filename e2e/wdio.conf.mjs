@@ -157,14 +157,16 @@ export const config = {
     timeout: 180_000,
   },
   onPrepare() {
-    rmSync("/tmp/worktreeview-e2e-data", { recursive: true, force: true });
     rmSync("/tmp/worktreeview-e2e-fixtures", { recursive: true, force: true });
     rmSync("/tmp/worktreeview-e2e-selection", { force: true });
-    mkdirSync("/tmp/worktreeview-e2e-data", { recursive: true });
     mkdirSync("/tmp/worktreeview-e2e-fixtures", { recursive: true });
     mkdirSync("/tmp/worktreeview-e2e-git-home", { recursive: true });
   },
   async beforeSession() {
+    // Every spec file starts from an empty app store: a preceding worker's
+    // saved repositories would otherwise leak into fresh-start assertions.
+    rmSync("/tmp/worktreeview-e2e-data", { recursive: true, force: true });
+    mkdirSync("/tmp/worktreeview-e2e-data", { recursive: true });
     try {
       backendOverflow = false;
       backendFd = openSync(backendLog, "a", 0o600);

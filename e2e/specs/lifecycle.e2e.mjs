@@ -59,23 +59,18 @@ function select(directory) {
 const INBOX_TERMINAL_STATES = ["No repositories", "No worktrees", "Worktrees unavailable", "Repositories could not be loaded"];
 
 async function showWorktreeList() {
-  // A repository with hydrated worktrees lands on the commit-history surface;
-  // the worktree list sits behind its back button. Otherwise the inbox shows
-  // a terminal empty or error state; loading states keep the wait polling.
+  // A repository lands on its project overview: the inbox pane showing the
+  // worktree rows. Otherwise the inbox shows a terminal empty or error
+  // state; loading states keep the wait polling.
   // Existence checks only: wdio element reads like getAttribute implicitly
   // re-find a vanished element for waitforTimeout before failing.
   await browser.waitUntil(async () => {
-    if (await $("main .back-button").isExisting()
-      && !await $('section[aria-label="Code review"]').isExisting()) return true;
+    if (await $(".inbox-pane .worktree-row").isExisting()) return true;
     for (const heading of INBOX_TERMINAL_STATES) {
       if (await $(`strong=${heading}`).isExisting()) return true;
     }
     return false;
   }, { timeoutMsg: "repository surface did not settle" });
-  if (await $("main .back-button").isExisting()) {
-    await $("main .back-button").click();
-    await $(".inbox-pane").waitForDisplayed();
-  }
 }
 
 async function openSelectedRepository(expectedPath) {
@@ -167,11 +162,11 @@ describe("bundled desktop lifecycle", () => {
     await $(`.sidebar-children button.sidebar-branch-row`).click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await expect($('span[aria-label="Review scope"]')).toHaveText("Committed only");
-    await $('button=Worktrees').click();
+    await $(`button=Overview`).click();
     await $(`.sidebar-children button.sidebar-worktree-row`).click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await $('button=All changes').click();
-    await $('button=Worktrees').click();
+    await $(`button=Overview`).click();
     await $(`button[aria-label="Pin repository"]`).click();
     await expect($("div.nav-section-label=Pinned")).toBeDisplayed();
     await browser.refresh();
@@ -213,7 +208,7 @@ describe("bundled desktop lifecycle", () => {
     rmSync(removed, { recursive: true });
     await browser.refresh();
     await expect($("strong=Worktrees unavailable")).toBeDisplayed();
-    await expect($("h1=Worktrees")).toBeDisplayed();
+    await expect($("h1=removed-repository")).toBeDisplayed();
 
     const large = path.join(fixtureRoot, "large-search-repository");
     createRepository(large, "e2e-search-main");
@@ -236,7 +231,7 @@ describe("bundled desktop lifecycle", () => {
     await browser.waitUntil(async () => (await $$(".palette-results > button")).length === 50);
     await expect($('[aria-label="Search result pages"]')).toHaveText(expect.stringContaining("1-50 of 101"));
     await $('button[aria-label="Close search"]').click();
-    await expect($("h1=Worktrees")).toBeDisplayed();
+    await expect($("h1=large-search-repository")).toBeDisplayed();
     expect(existsSync(hookMarker)).toBe(false);
 
     if (process.env.WORKTREEVIEW_E2E_FORCE_FAILURE === "1") {
@@ -289,7 +284,7 @@ describe("bundled desktop lifecycle", () => {
 
     select(switchRepository);
     await openSelectedRepository(switchRepository);
-    await expect($("h1=Worktrees")).toBeDisplayed();
+    await expect($("h1=review-switch-repository")).toBeDisplayed();
     assert.equal(await $('section[aria-label="Code review"]').isExisting(), false);
 
     await $('button[aria-label="Find repositories and worktrees"]').click();
@@ -307,7 +302,7 @@ describe("bundled desktop lifecycle", () => {
     await expect(repositoryPaletteResult).toBeDisplayed();
     await repositoryPaletteResult.click();
     await showWorktreeList();
-    await expect($("h1=Worktrees")).toBeDisplayed();
+    await expect($("h1=review-switch-repository")).toBeDisplayed();
     assert.equal(await $('section[aria-label="Code review"]').isExisting(), false);
 
     await $('button[aria-label="Find repositories and worktrees"]').click();

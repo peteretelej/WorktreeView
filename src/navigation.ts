@@ -3,6 +3,7 @@ export type GoneSurface = { kind: "worktree" | "branch"; identity_key: string; l
 export type SurfacePinRef = { kind: "worktree" | "branch"; identity_key: string; pinned_at: number };
 export type SurfaceListing = { gone: GoneSurface[]; pinned: SurfacePinRef[] };
 export type ChangedFile = { path: string; status: string; untracked: boolean };
+export type RefInventory = { heads: string[]; remotes: string[]; tags: string[]; default_base: string | null };
 export type ReviewScope = "all" | "committed";
 export type ReviewTarget = { kind: "worktree"; worktree: Worktree } | { kind: "ref"; name: string } | { kind: "commit"; sha: string; parents: string[]; defaultBaseAncestor: boolean };
 export type ReviewIdentity = { repoPath: string; base: string; target: ReviewTarget; scope: ReviewScope; reversed: boolean };

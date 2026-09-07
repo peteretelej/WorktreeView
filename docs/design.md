@@ -4,6 +4,16 @@
   inline with a gone badge; every other disappeared surface collects in a
   searchable per-repo Archived section so months of deleted branches stay
   findable without cluttering the live sidebar.
+- Opening a project lands on its overview, not a bare history surface: the
+  repository's worktrees with checked-out branch, HEAD, and uncommitted
+  change count (main worktree first), with one-click access to reviews and
+  the working-changes view. Commit history remains a permanent sidebar
+  fixture.
+- A worktree review offers three presets: Working changes pins the base to
+  the checked-out branch tip so only uncommitted content shows, All changes
+  reviews everything against the base with uncommitted content included, and
+  Committed only drops the uncommitted content. "Working changes" follows
+  the working-directory-changes convention other Git clients use.
 - Settings (appearance, interface zoom, diff display, dark and light
   themes) persist locally.
 - Commit history is a permanent sidebar fixture rather than a surface you

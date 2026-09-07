@@ -9,8 +9,8 @@ mod testutil;
 
 use commands::{
     get_settings, list_commits, list_refs, list_repos, list_review_changes, list_surfaces,
-    list_worktrees, open_repo, read_review_patch, set_repo_pinned, set_settings,
-    set_surface_pinned,
+    list_worktree_status, list_worktrees, open_repo, read_review_patch, set_repo_pinned,
+    set_settings, set_surface_pinned,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -169,6 +169,7 @@ pub fn run() {
             open_repo,
             list_repos,
             list_worktrees,
+            list_worktree_status,
             set_repo_pinned,
             set_surface_pinned,
             list_refs,

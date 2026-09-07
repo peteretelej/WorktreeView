@@ -47,6 +47,15 @@ pub(crate) fn parse_untracked_paths(output: &[u8]) -> Result<Vec<String>, Comman
         .collect()
 }
 
+// Counts `status --porcelain=v1 -z` entries. With --no-renames every entry is
+// exactly one NUL-terminated field, so non-empty segments are the count.
+pub(crate) fn parse_status_count(output: &[u8]) -> u32 {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .count() as u32
+}
+
 pub(crate) fn parse_name_status(output: &[u8]) -> Result<Vec<ChangedFile>, CommandError> {
     let mut fields = output.split(|byte| *byte == 0);
     let mut files = Vec::new();

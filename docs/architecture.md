@@ -8,9 +8,9 @@ normalized domain data through narrow, typed Tauri commands.
 ## Backend (`src-tauri/src`)
 
 - `commands.rs`: thin typed IPC adapters. The full command surface:
-  `open_repo`, `list_repos`, `list_worktrees`, `set_repo_pinned`,
-  `set_surface_pinned`, `get_settings`, `set_settings`, `list_refs`,
-  `list_commits`, `list_review_changes`, `list_surfaces`,
+  `open_repo`, `list_repos`, `list_worktrees`, `list_worktree_status`,
+  `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
+  `list_refs`, `list_commits`, `list_review_changes`, `list_surfaces`,
   `read_review_patch`.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
   (4 MiB per stream), a 10 second deadline, and kill-on-drop cancellation.
@@ -48,10 +48,12 @@ locale to C. The full rationale is in the repo `AGENTS.md`.
 
 ## Frontend (`src/`)
 
-A flat React + Vite app: `App.tsx` (shell and review views), `settings.tsx`,
-`diff.ts` (diff presentation helpers), `navigation.ts` (back and forward
-review history), and `surfaces.ts` (surface pin and archive helpers). Unit
-tests for the utilities run with `npm run test:unit`.
+A flat React + Vite app: `App.tsx` (shell, project overview, and review
+views), `settings.tsx`, `diff.ts` (diff presentation helpers),
+`navigation.ts` (back and forward review history), `reviewPresets.ts`
+(review base and worktree scope preset helpers), and `surfaces.ts` (surface
+pin and archive helpers). Unit tests for the utilities run with
+`npm run test:unit`.
 
 ## Persistence
 
