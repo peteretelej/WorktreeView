@@ -97,4 +97,5 @@ jobs:
         # workflows; workflow_dispatch is the documented exception.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: gh workflow run tauri-e2e.yml --ref main
