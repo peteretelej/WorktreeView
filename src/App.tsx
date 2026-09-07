@@ -29,6 +29,7 @@ const HUNKS_PAGE_SIZE = 50;
 const BRANCH_PAGE_SIZE = 50;
 const PATCH_LINE_PAGE_SIZE = 500;
 const COMMIT_PAGE_SIZE = 100;
+const PATCH_CACHE_LIMIT = 32;
 
 // Zoom is applied to the whole webview; a failure (browser preview, refused
 // call) keeps the current scale, so the call is best-effort.
@@ -185,7 +186,7 @@ function App() {
   const [history, setHistory] = useState<HistoryState | null>(null); const [historyRefs, setHistoryRefs] = useState<RefInventory>({ heads: [], remotes: [], tags: [], default_base: null }); const [historyDismissedRepos, setHistoryDismissedRepos] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<Settings>(defaultSettings); const [settingsSaveError, setSettingsSaveError] = useState("");
   const paletteRef = useRef<HTMLDialogElement>(null); const paletteOpenerRef = useRef<HTMLElement | null>(null);
-  const indexGenerationRef = useRef(0); const patchGenerationRef = useRef(0); const reviewIdentityRef = useRef<ReviewIdentity | null>(null); const patchIdentityRef = useRef(""); const historyGenerationRef = useRef(0); const navigateRef = useRef<(delta: number) => void>(() => undefined); const zoomActionsRef = useRef<{ step: (direction: 1 | -1) => void; reset: () => void }>({ step: () => undefined, reset: () => undefined }); const zoomLiveRef = useRef(DEFAULT_ZOOM);
+  const indexGenerationRef = useRef(0); const patchGenerationRef = useRef(0); const reviewIdentityRef = useRef<ReviewIdentity | null>(null); const patchIdentityRef = useRef(""); const patchCacheRef = useRef(new Map<string, FilePatch>()); const historyGenerationRef = useRef(0); const navigateRef = useRef<(delta: number) => void>(() => undefined); const zoomActionsRef = useRef<{ step: (direction: 1 | -1) => void; reset: () => void }>({ step: () => undefined, reset: () => undefined }); const zoomLiveRef = useRef(DEFAULT_ZOOM);
   const [nav] = useState(createNavigationHistory);
   const location = useSyncExternalStore(nav.subscribe, nav.current);
   const reviewLocation = location.kind === "review" ? location : null;
@@ -296,6 +297,7 @@ function App() {
     ++patchGenerationRef.current;
     reviewIdentityRef.current = identity;
     patchIdentityRef.current = "";
+    patchCacheRef.current.clear();
     const entry: AppLocation = { kind: "review", identity, selectedFile: null, filePage: 0, hunkPage: 0 };
     const current = nav.current();
     if (current.kind === "review" && current.identity.repoPath === repoPath && sameReviewTarget(current.identity.target, target)) nav.replace(entry); else nav.push(entry);
@@ -363,6 +365,7 @@ function App() {
     ++patchGenerationRef.current;
     reviewIdentityRef.current = identity;
     patchIdentityRef.current = "";
+    patchCacheRef.current.clear();
     setReviewLoading(true); setReviewIndex(null); setPatch(null); setPatchError(""); setPatchLoading(false);
     try {
       const index = await invoke<ReviewIndex>("list_review_changes", { path: target.kind === "worktree" ? target.worktree.path : nextRepoPath, repoPath: nextRepoPath, base: nextBase, headRef: target.kind === "ref" ? target.name : target.kind === "commit" ? target.sha : null, committedOnly: nextScope === "committed", reversed: nextReversed });
@@ -391,10 +394,27 @@ function App() {
     const patchIdentity = patchIdentityOf(identity, file);
     const generation = ++patchGenerationRef.current;
     patchIdentityRef.current = patchIdentity;
+    // Commit patches are immutable and worktree patches share the review
+    // index's snapshot freshness, so a cached patch renders without
+    // respawning Git. Reinserting keeps recency order for eviction.
+    const cached = patchCacheRef.current.get(patchIdentity);
+    if (cached) {
+      patchCacheRef.current.delete(patchIdentity);
+      patchCacheRef.current.set(patchIdentity, cached);
+      setPatch(cached); setPatchError(""); setPatchLoading(false);
+      return;
+    }
     setPatch(null); setPatchError(""); setPatchLoading(true);
     try {
       const nextPatch = await invoke<FilePatch>("read_review_patch", { path: identity.target.kind === "worktree" ? identity.target.worktree.path : identity.repoPath, base: identity.base, headRef: identity.target.kind === "ref" ? identity.target.name : identity.target.kind === "commit" ? identity.target.sha : null, committedOnly: identity.scope === "committed", reversed: identity.reversed, file: file.path, untracked: file.untracked });
-      if (generation === patchGenerationRef.current && patchIdentityRef.current === patchIdentity && sameReview(reviewIdentityRef.current, identity)) setPatch(nextPatch);
+      if (generation === patchGenerationRef.current && patchIdentityRef.current === patchIdentity && sameReview(reviewIdentityRef.current, identity)) {
+        patchCacheRef.current.set(patchIdentity, nextPatch);
+        if (patchCacheRef.current.size > PATCH_CACHE_LIMIT) {
+          const oldest = patchCacheRef.current.keys().next().value;
+          if (oldest !== undefined) patchCacheRef.current.delete(oldest);
+        }
+        setPatch(nextPatch);
+      }
     } catch (error) {
       if (generation !== patchGenerationRef.current || patchIdentityRef.current !== patchIdentity || !sameReview(reviewIdentityRef.current, identity)) return;
       const code = typeof error === "object" && error !== null && "code" in error ? String((error as CommandError).code) : "";

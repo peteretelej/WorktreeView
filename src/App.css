@@ -980,7 +980,10 @@ button:disabled {
 .hunk-list.wrap-lines .diff-line.half { grid-template-columns: 42px minmax(0, 1fr); }
 .index-skeleton, .patch-skeleton { padding: 8px; }
 .index-skeleton i, .patch-skeleton i { display: block; height: 25px; margin-bottom: 6px; border-radius: 3px; background: var(--surface-2); opacity: .7; }
-.patch-skeleton { padding: 24px; }
+/* A patch fetch often finishes well under 200ms (cache hits, small diffs);
+   staying invisible for the delay keeps quick loads from flashing bars. */
+.patch-skeleton { padding: 24px; opacity: 0; animation: patch-skeleton-appear 120ms ease-out 200ms forwards; }
+@keyframes patch-skeleton-appear { to { opacity: 1; } }
 .patch-skeleton i { height: 22px; margin-bottom: 9px; }
 
 .project-row-wrap .sidebar-worktree-row,

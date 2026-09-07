@@ -20,6 +20,11 @@ later optimization target.
 
 - Large collections and diffs are rendered virtualized or windowed. A full
   large diff is never rendered into the DOM.
+- Selected file patches are cached in memory for the life of the review,
+  keyed by the same identity the backend fetch uses. Revisiting a file
+  renders from the cache with no Git spawn; the cache resets when the
+  review's base, target, scope, or direction changes, matching the index's
+  snapshot freshness.
 
 ## Desktop e2e as a floor
 
