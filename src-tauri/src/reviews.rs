@@ -746,6 +746,11 @@ fn validate_submission(payload: &SubmissionPayload) -> Result<(), CommandError> 
     for finding in &payload.findings {
         require_non_empty(&finding.title, "A finding title")?;
         require_char_cap(&finding.title, MAX_FINDING_TITLE_CHARS, "A finding title")?;
+        if finding.body.len() > MAX_TEXT_BODY_BYTES {
+            return Err(invalid_submission(format!(
+                "A finding body exceeds the {MAX_TEXT_BODY_BYTES} byte cap."
+            )));
+        }
         finding_anchor(finding)?;
     }
     Ok(())
@@ -1628,6 +1633,17 @@ mod tests {
         }];
         assert_eq!(
             ingest(&pool, "/demo", &text).await.unwrap_err().code,
+            "invalid_submission"
+        );
+
+        // Finding bodies cap at 256 KiB as well.
+        let mut finding_body = payload();
+        finding_body.findings[0].body = "a".repeat(MAX_TEXT_BODY_BYTES + 1);
+        assert_eq!(
+            ingest(&pool, "/demo", &finding_body)
+                .await
+                .unwrap_err()
+                .code,
             "invalid_submission"
         );
 
