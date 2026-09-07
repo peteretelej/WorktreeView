@@ -321,7 +321,7 @@ describe("bundled desktop lifecycle", () => {
     const baseSearch = await $('input[aria-controls="review-base-options"]');
     await baseSearch.click();
     await browser.waitUntil(async () => (await $$('#review-base-options > button[role="option"]')).length === 50);
-    await expect($('#review-base-options [aria-label="Review base branch pages"]')).toHaveText(expect.stringContaining("1-50 of 123"));
+    await expect($('#review-base-options [aria-label="Base branch pages"]')).toHaveText(expect.stringContaining("1-50 of 123"));
     await browser.keys("Escape");
     await browser.execute(() => {
       const buttons = Array.from(document.querySelectorAll(".scope-toggle button"));
