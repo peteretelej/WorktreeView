@@ -12,7 +12,9 @@ normalized domain data through narrow, typed Tauri commands.
   `remove_repo`, `get_branch_inventory`, `fetch_project`,
   `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
   `list_refs`, `list_commits`, `list_review_changes`, `list_surfaces`,
-  `read_review_patch`.
+  `read_review_patch`, `create_comment`, `list_comments`,
+  `reply_comment`, `set_comment_resolved`, `edit_comment`,
+  `match_comment_anchors`.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
   (4 MiB per stream), a deadline (10 seconds for local probes, 60 for the
   fetch the refresh action runs), and kill-on-drop cancellation.
@@ -34,6 +36,15 @@ normalized domain data through narrow, typed Tauri commands.
   ride the same pass and skip the fallback probe.
 - `review.rs`: assembles review data (changed files, patches, commits,
   refs) from Git results.
+- `reviews.rs`: owns the comment substrate: review identity
+  resolve-or-create, comment storage and threads, write-time anchor hash
+  (FNV-1a over marker-free line content) and snippet capture, and the
+  drift matcher. `match_comment_anchors` is one batched command that takes
+  the loaded file's parsed lines and returns per-comment statuses
+  (current, moved with the nearest re-anchored line, outdated); the
+  frontend only maps display sides to logical sides and places the
+  results. Anchor-shape validation lives here and is authoritative for
+  the package.
 - `cache.rs`: SQLite-backed history cache for commit pages and ancestry
   marks, keyed by resolved SHAs.
 - `retrospection.rs`: records reviewed worktree and branch identities
@@ -61,20 +72,38 @@ A flat React + Vite app: `App.tsx` (shell, project overview, and review
 views), `settings.tsx`, `diff.ts` (diff presentation helpers),
 `highlight.ts` (progressive diff token highlighting over Shiki),
 `navigation.ts` (back and forward review history), `reviewPresets.ts`
-(review base and worktree scope preset helpers), and `surfaces.ts` (surface
-pin and archive helpers). Unit tests for the utilities run with
+(review base and worktree scope preset helpers), `surfaces.ts` (surface
+pin and archive helpers), `comments.ts` (comment mirror types and
+logical-side helpers) with `comments.tsx` (comment hook, stream panel,
+and inline composers), and `markdown.tsx` rendering comment bodies through
+`react-markdown` with `rehype-sanitize`'s default schema
+(`markdown-schema.ts` keeps the schema constant unit-testable). Unit tests
+for the utilities run with
 `npm run test:unit`.
 
 ## Persistence
 
-SQLite stores repositories, pin order, settings, and retrospected surface
-identities. It also caches commit history: `list_commits` resolves the start
+SQLite stores repositories, pin order, settings, retrospected surface
+identities, review sessions with their comments (and, from the next phase,
+submissions), plus a commit history cache: `list_commits` resolves the start
 ref with one fresh `git rev-parse`, then serves log pages and default-base
 ancestry marks from the cache when the resolved SHAs match what was fetched
 before. Pages key on `(repo_path, start_sha, against_sha, skip, limit)` with
 commit rows keyed by SHA, and ancestry marks on `(commit_sha, against_sha)`;
 a branch move changes the resolved SHA, so stale pages are never served.
 Cache writes are best-effort and never fail an open.
+
+Reviews key on `(repo_path, base_sha, target_key, target_kind)` where the
+SHAs are resolved (the worktree path for live worktree targets), so a moved
+branch naturally starts a new comment session. Comments reference their
+review, optionally a parent comment (one root plus flat replies), and
+optionally a file or logical line range; line comments carry the write-time
+anchor hash and bounded snippet that drift detection needs later. All three
+tables cascade from the `repos` row, as do the older repo-scoped caches.
+The whole schema is one consolidated `0001` migration; a store recorded
+under an older migration set diverges from the embedded baseline and is
+set aside as `worktreeview.sqlite3.bak` at startup while a fresh store is
+rebuilt, so no manual deletion is needed.
 
 Retrospected surfaces key on `(repo_path, kind, identity_key)` and carry the
 recorded label, head, pin state, and row origin (`review` for recorded
@@ -106,5 +135,6 @@ Migrations are append-only
 (CONTRIBUTING.md), so divergence is not expected on normal upgrades; desktop
 e2e containers rebuild their database on every run. Review flows remain
 read-only; the refresh action's fetch is the one Git write, and it touches
-remote-tracking refs only (see
-[safety-model.md](safety-model.md)).
+remote-tracking refs only. Comment and submission data lives only in the
+app store, so a set-aside backup retains it. See
+[safety-model.md](safety-model.md).

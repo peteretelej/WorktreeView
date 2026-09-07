@@ -8,6 +8,11 @@ use crate::review::{
     ReviewIndex,
 };
 use crate::retrospection::{list_surfaces_in_pool, set_surface_pinned_in_pool, SurfaceListing};
+use crate::reviews::{
+    create_comment_in_pool, edit_comment_in_pool, list_comments_in_pool,
+    match_comment_anchors_in_pool, reply_comment_in_pool, set_comment_resolved_in_pool,
+    AnchorStatus, Comment, CommentDraft, PatchLine,
+};
 use crate::store::{
     get_settings_in_pool, load_repos, open_repo_path, remove_repo_in_pool, set_repo_pinned_in_pool,
     set_settings_in_pool, Repo, Settings,
@@ -268,6 +273,89 @@ pub(crate) async fn read_review_patch(
         reversed,
         file,
         untracked,
+    )
+    .await
+}
+
+// Review identity keys on resolved SHAs: the frontend derives base_sha and
+// target_key from the loaded ReviewIndex, never from symbolic ref names.
+#[tauri::command]
+pub(crate) async fn create_comment(
+    repo_path: String,
+    base_sha: String,
+    target_key: String,
+    target_kind: String,
+    draft: CommentDraft,
+    state: tauri::State<'_, AppState>,
+) -> Result<Comment, CommandError> {
+    create_comment_in_pool(
+        &state.pool,
+        &repo_path,
+        &base_sha,
+        &target_key,
+        &target_kind,
+        &draft,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn list_comments(
+    repo_path: String,
+    base_sha: String,
+    target_key: String,
+    target_kind: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<Comment>, CommandError> {
+    list_comments_in_pool(&state.pool, &repo_path, &base_sha, &target_key, &target_kind).await
+}
+
+#[tauri::command]
+pub(crate) async fn reply_comment(
+    parent_id: i64,
+    body: String,
+    severity: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Comment, CommandError> {
+    reply_comment_in_pool(&state.pool, parent_id, &body, severity).await
+}
+
+#[tauri::command]
+pub(crate) async fn set_comment_resolved(
+    comment_id: i64,
+    resolved: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<Comment, CommandError> {
+    set_comment_resolved_in_pool(&state.pool, comment_id, resolved).await
+}
+
+#[tauri::command]
+pub(crate) async fn edit_comment(
+    comment_id: i64,
+    body: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Comment, CommandError> {
+    edit_comment_in_pool(&state.pool, comment_id, &body).await
+}
+
+#[tauri::command]
+pub(crate) async fn match_comment_anchors(
+    repo_path: String,
+    base_sha: String,
+    target_key: String,
+    target_kind: String,
+    file_path: String,
+    lines: Vec<PatchLine>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<AnchorStatus>, CommandError> {
+    match_comment_anchors_in_pool(
+        &state.pool,
+        &repo_path,
+        &base_sha,
+        &target_key,
+        &target_kind,
+        &file_path,
+        &lines,
     )
     .await
 }

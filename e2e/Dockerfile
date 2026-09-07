@@ -29,8 +29,6 @@ COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs src-tauri/taur
 COPY src-tauri/capabilities ./src-tauri/capabilities
 COPY src-tauri/icons ./src-tauri/icons
 COPY src-tauri/migrations/0001_init.sql ./src-tauri/migrations/0001_init.sql
-COPY src-tauri/migrations/0002_retrospection.sql ./src-tauri/migrations/0002_retrospection.sql
-COPY src-tauri/migrations/0003_surface_pins.sql ./src-tauri/migrations/0003_surface_pins.sql
 COPY src-tauri/src/ ./src-tauri/src/
 COPY e2e ./e2e
 

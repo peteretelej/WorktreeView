@@ -708,11 +708,11 @@ mod tests {
         assert_eq!(commit_count, 1);
     }
 
-    // The orphan sweep and foreign-key rebuild inside 0003 run against a
-    // hand-built pre-migration database so orphans can exist at all; the
-    // migration SQL is the exact file the runner executes.
+    // The consolidated baseline is create-only: the exact file the migration
+    // runner embeds must build every table, with repo-scoped cascades, in
+    // one step.
     #[tokio::test]
-    async fn the_pin_migration_sweeps_orphans_and_unreferenced_content() {
+    async fn the_consolidated_baseline_cascades_repo_scoped_rows() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(sqlx::sqlite::SqliteConnectOptions::new())
@@ -722,115 +722,109 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::raw_sql(include_str!("../migrations/0002_retrospection.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
         sqlx::query(
             "INSERT INTO repos (path, name, last_opened_at, created_at) \
-             VALUES ('/kept', 'kept', 1, 1), ('/other', 'other', 2, 2)",
+             VALUES ('/kept', 'kept', 1, 1), ('/dropped', 'dropped', 2, 2)",
         )
         .execute(&pool)
         .await
         .unwrap();
-        let kept_sha = "a".repeat(40);
-        let other_sha = "b".repeat(40);
-        let orphan_only_sha = "c".repeat(40);
-        let unreferenced_sha = "d".repeat(40);
-        for (repo_path, sha) in [
-            ("/kept", &kept_sha),
-            ("/other", &other_sha),
-            ("/orphan", &orphan_only_sha),
-        ] {
+        let shared_sha = "a".repeat(40);
+        for repo_path in ["/kept", "/dropped"] {
             sqlx::query(
                 "INSERT INTO log_pages (repo_path, start_sha, against_sha, skip, limit_value, commit_shas, has_more) \
                  VALUES (?, ?, '', 0, 1, ?, 0)",
             )
             .bind(repo_path)
-            .bind(sha)
-            .bind(format!("[\"{sha}\"]"))
+            .bind(&shared_sha)
+            .bind(format!("[\"{shared_sha}\"]"))
             .execute(&pool)
             .await
             .unwrap();
-        }
-        for sha in [&kept_sha, &other_sha, &orphan_only_sha, &unreferenced_sha] {
             sqlx::query(
-                "INSERT INTO commits (sha, subject, author, date, refs, parents) \
-                 VALUES (?, 's', 'a', 'd', '[]', '[]')",
+                "INSERT INTO retrospected_surfaces (repo_path, kind, identity_key, label, detail, head_sha, last_seen_at) \
+                 VALUES (?, 'branch', 'refs/heads/live', 'live', 'refs/heads/live', ?, 5)",
             )
-            .bind(sha)
+            .bind(repo_path)
+            .bind(&shared_sha)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO reviews (repo_path, base_sha, target_key, target_kind, created_at) \
+                 VALUES (?, ?, ?, 'worktree', 3)",
+            )
+            .bind(repo_path)
+            .bind(&shared_sha)
+            .bind(repo_path)
             .execute(&pool)
             .await
             .unwrap();
         }
         sqlx::query(
-            "INSERT INTO ancestry_marks (commit_sha, against_sha, non_ancestor) \
-             VALUES (?, ?, 1), (?, ?, 0)",
+            "INSERT INTO commits (sha, subject, author, date, refs, parents) \
+             VALUES (?, 's', 'a', 'd', '[]', '[]')",
         )
-        .bind(&kept_sha)
-        .bind(&other_sha)
-        .bind(&unreferenced_sha)
-        .bind(&kept_sha)
+        .bind(&shared_sha)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let dropped_reviews: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM reviews WHERE repo_path = '/dropped'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let dropped_review = dropped_reviews[0];
+        sqlx::query(
+            "INSERT INTO submissions (review_id, agent_name, agent_model, sections_json, created_at) \
+             VALUES (?, 'agent', 'model', '{}', 4)",
+        )
+        .bind(dropped_review)
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO retrospected_surfaces (repo_path, kind, identity_key, label, detail, head_sha, last_seen_at) \
-             VALUES ('/kept', 'branch', 'refs/heads/live', 'live', 'refs/heads/live', ?, 5), \
-                    ('/orphan', 'branch', 'refs/heads/orphan', 'orphan', 'refs/heads/orphan', ?, 6)",
+            "INSERT INTO comments (review_id, author_kind, author_name, body, created_at) \
+             VALUES (?, 'human', 'you', 'note', 5)",
         )
-        .bind(&kept_sha)
-        .bind(&orphan_only_sha)
+        .bind(dropped_review)
         .execute(&pool)
         .await
         .unwrap();
 
-        sqlx::raw_sql(include_str!("../migrations/0003_surface_pins.sql"))
+        sqlx::query("DELETE FROM repos WHERE path = '/dropped'")
             .execute(&pool)
             .await
             .unwrap();
 
+        // Repo-scoped rows cascade away with the repos row; shared content
+        // rows keyed by SHA survive.
         let page_repos: Vec<String> =
             sqlx::query_scalar("SELECT repo_path FROM log_pages ORDER BY repo_path")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(page_repos, ["/kept", "/other"]);
-        let surfaces: Vec<(String, Option<i64>, String)> =
-            sqlx::query_as("SELECT repo_path, pinned_at, origin FROM retrospected_surfaces")
+        assert_eq!(page_repos, ["/kept"]);
+        let surface_repos: Vec<String> =
+            sqlx::query_scalar("SELECT repo_path FROM retrospected_surfaces ORDER BY repo_path")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(
-            surfaces,
-            [("/kept".to_string(), None, "review".to_string())]
-        );
-        let commit_shas: Vec<String> = sqlx::query_scalar("SELECT sha FROM commits ORDER BY sha")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-        assert_eq!(commit_shas, [kept_sha.clone(), other_sha.clone()]);
-        let marks: Vec<(String, String)> =
-            sqlx::query_as("SELECT commit_sha, against_sha FROM ancestry_marks")
+        assert_eq!(surface_repos, ["/kept"]);
+        let review_repos: Vec<String> =
+            sqlx::query_scalar("SELECT repo_path FROM reviews ORDER BY repo_path")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(marks, [(kept_sha, other_sha)]);
-
-        // The rebuilt tables enforce the foreign keys on this pool.
-        sqlx::query("DELETE FROM repos WHERE path = '/kept'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let page_repos: Vec<String> = sqlx::query_scalar("SELECT repo_path FROM log_pages")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-        assert_eq!(page_repos, ["/other"]);
-        let surface_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM retrospected_surfaces")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(surface_count, 0);
+        assert_eq!(review_repos, ["/kept"]);
+        let submission_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM submissions").fetch_one(&pool).await.unwrap();
+        assert_eq!(submission_count, 0);
+        let comment_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM comments").fetch_one(&pool).await.unwrap();
+        assert_eq!(comment_count, 0);
+        let commit_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM commits").fetch_one(&pool).await.unwrap();
+        assert_eq!(commit_count, 1);
     }
 }

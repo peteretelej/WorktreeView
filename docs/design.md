@@ -45,6 +45,29 @@
   worktree in the worktree list) and stays anchored when a commit review
   opens. Picking a commit shows that commit's own diff against its parent.
 
+## Reviews as durable objects
+
+- A review session persists its comments locally, keyed by review identity
+  `(repo_path, base_sha, target_key, target_kind)`. The base and target are
+  resolved SHAs (or the worktree path for a live worktree review), so a
+  moved branch starts a fresh session by construction. Review scope and
+  layout direction are not part of the identity: the same comments show in
+  both scopes and either layout direction.
+- Comments anchor to the review, to a file, or to a logical line range in a
+  file (LEFT is the old side of the unreversed diff, RIGHT the new side).
+  Every line comment captures a hash of the anchored lines' text plus a
+  bounded snippet at write time, because that content is uncapturable later.
+- Drift is detected against the loaded patch: unchanged content at the same
+  line is current; the same content near the original line re-anchors the
+  inline display and shows a moved marker; anything else shows an outdated
+  badge in the comment stream alongside the write-time snippet. File-level
+  and review-level comments do not drift.
+- Threads are a root comment plus flat replies; resolve/reopen lives on the
+  root. Authors are the local human user (`you`; no account system in v0)
+  or agents, and the merged comment stream filters by author. Comments are
+  created by selecting a line or range in the diff, with review-level and
+  file-level entry points always available.
+
 ## Non-goals
 
 - Review flows never stage, commit, checkout, push, or manage worktrees.

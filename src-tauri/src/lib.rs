@@ -4,14 +4,17 @@ mod git;
 mod overview;
 mod retrospection;
 mod review;
+mod reviews;
 mod store;
 #[cfg(test)]
 mod testutil;
 
 use commands::{
-    fetch_project, get_branch_inventory, get_settings, list_commits, list_refs, list_repos,
-    list_review_changes, list_surfaces, list_worktree_status, list_worktrees, open_repo,
-    read_review_patch, remove_repo, set_repo_pinned, set_settings, set_surface_pinned,
+    create_comment, edit_comment, fetch_project, get_branch_inventory, get_settings,
+    list_comments, list_commits, list_refs, list_repos, list_review_changes, list_surfaces,
+    list_worktree_status, list_worktrees, match_comment_anchors, open_repo, read_review_patch,
+    remove_repo, reply_comment, set_comment_resolved, set_repo_pinned, set_settings,
+    set_surface_pinned,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -123,10 +126,10 @@ async fn connect_store_pool(
         ));
     }
     // A checksum mismatch means the embedded migration set diverged from the
-    // one that wrote the store, e.g. after a migration squash. The store only
-    // holds saved repos, pins, and settings plus regenerable caches, so it is
-    // set aside under one fixed backup name and rebuilt rather than blocking
-    // startup.
+    // one that wrote the store, e.g. after a migration squash. The store
+    // holds saved repos, pins, settings, comments, and submissions plus
+    // regenerable caches; set-aside keeps all of it in one fixed backup and
+    // rebuilds rather than blocking startup.
     if !matches!(error, sqlx::migrate::MigrateError::VersionMismatch(_)) {
         return Err(format!("Could not migrate repository storage: {error}"));
     }
@@ -201,7 +204,13 @@ pub fn run() {
             list_surfaces,
             read_review_patch,
             get_settings,
-            set_settings
+            set_settings,
+            create_comment,
+            list_comments,
+            reply_comment,
+            set_comment_resolved,
+            edit_comment,
+            match_comment_anchors
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -298,7 +307,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions.len(), 3);
+        assert_eq!(versions.len(), 1);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await
@@ -357,7 +366,7 @@ mod tests {
                 .fetch_one(&sqlx::SqlitePool::connect_with(backup).await.unwrap())
                 .await
                 .unwrap();
-        assert_eq!(preserved.0, 3);
+        assert_eq!(preserved.0, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

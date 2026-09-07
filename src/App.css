@@ -1516,3 +1516,50 @@ button:disabled {
   .settings-nav-sections { flex-direction: row; gap: 4px; }
   .settings-content { padding: 18px 16px 32px; }
 }
+
+/* Comment layer: merged stream, inline threads, and composers. */
+.review-body.comments-visible { grid-template-columns: 300px minmax(0, 1fr) 300px; }
+.comment-stream { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-left: 1px solid var(--border); background: var(--surface); }
+.comment-stream-body { min-height: 0; flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.comment-filter { display: flex; height: 26px; flex: none; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.comment-filter button { flex: 1; border: 0; border-right: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; text-transform: uppercase; }
+.comment-filter button:last-child { border-right: 0; }
+.comment-filter button.active { background: var(--primary-soft); color: var(--foreground); }
+.comment-empty { padding: 14px 10px; color: var(--muted); font-size: 11px; text-align: center; }
+.comment-thread { display: flex; flex-direction: column; gap: 6px; }
+.comment-card { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--elevated, var(--background)); font-size: 12px; }
+.comment-card.comment-state-outdated { border-color: var(--danger); }
+.comment-card.comment-resolved { opacity: 0.75; }
+.comment-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; color: var(--muted); font-size: 10px; }
+.comment-author { color: var(--foreground); font-weight: 600; }
+.comment-badge { padding: 1px 5px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 9px; text-transform: uppercase; }
+.comment-badge.severity-P0 { border-color: var(--danger); color: var(--danger); }
+.comment-badge.severity-P1 { border-color: var(--danger); color: var(--danger); }
+.comment-state-badge { border-color: var(--danger); color: var(--danger); }
+.comment-resolved-badge { color: var(--ok); border-color: var(--ok); }
+.comment-time { margin-left: auto; }
+.comment-body { overflow-wrap: anywhere; }
+.comment-body p { margin: 0 0 4px; }
+.comment-body p:last-child { margin-bottom: 0; }
+.comment-body pre { overflow-x: auto; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--code-surface); font: 11px/1.5 var(--font-mono); }
+.comment-body code { font: 11px var(--font-mono); }
+.comment-snippet { margin: 6px 0 0; padding: 6px 8px; overflow-x: auto; border: 1px dashed var(--border); border-radius: 4px; background: var(--code-surface); color: var(--muted); font: 11px/1.5 var(--font-mono); }
+.comment-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.comment-actions button { padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
+.comment-actions button:hover { color: var(--foreground); }
+.comment-anchor { display: inline-flex; gap: 6px; margin-right: auto; overflow: hidden; color: var(--muted); font-size: 10px; }
+.comment-composer { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.comment-composer textarea { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--foreground); font: 12px/1.5 inherit; resize: vertical; }
+.comment-composer-actions { display: flex; align-items: center; gap: 6px; }
+.comment-composer-actions select { height: 24px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--foreground); font-size: 10px; }
+.comment-composer-panel { display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.comment-composer-panel.inline { margin: 4px 0 8px 93px; }
+.comment-composer-panel .eyebrow { margin: 0; }
+.inline-comment { margin: 2px 0 6px 93px; }
+.diff-line.commentable { cursor: pointer; }
+.diff-line.comment-selected { outline: 1px solid var(--primary); outline-offset: -1px; }
+.patch-heading-meta { display: inline-flex; align-items: center; gap: 8px; }
+
+@media (max-width: 1100px) {
+  .review-body.comments-visible { grid-template-columns: minmax(180px, 32%) minmax(0, 1fr) minmax(220px, 30%); }
+}
