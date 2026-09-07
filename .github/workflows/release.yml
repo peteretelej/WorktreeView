@@ -84,3 +84,17 @@ jobs:
           uploadUpdaterJson: false
           uploadUpdaterSignatures: false
           args: ${{ matrix.args }}
+
+  trigger-desktop-e2e:
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch desktop e2e for the published release
+        # A release created by GITHUB_TOKEN does not itself trigger other
+        # workflows; workflow_dispatch is the documented exception.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run tauri-e2e.yml --ref main

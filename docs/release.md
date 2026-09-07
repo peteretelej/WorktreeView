@@ -33,8 +33,9 @@ GitHub Actions runs two workflows:
   diagnostics retained for 14 days.
 - Release: a `v*` tag push builds Tauri bundles for Windows (NSIS and
   MSI), macOS (dmg, x64 and arm64), and Linux (deb, rpm, AppImage) and
-  publishes them to a GitHub Release for the tag. The publish event is
-  what triggers the desktop e2e suite.
+  publishes them to a GitHub Release for the tag, then dispatches the
+  desktop e2e suite (a release created by the workflow token does not
+  itself trigger other workflows).
 
 Release builds are unsigned in early releases: Windows shows a
 SmartScreen warning, and macOS requires right-click Open (or
