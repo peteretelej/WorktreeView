@@ -987,13 +987,8 @@ button:disabled {
 .patch-skeleton i { height: 22px; margin-bottom: 9px; }
 
 .project-row-wrap .sidebar-worktree-row,
-.project-row-wrap .sidebar-branch-row { padding-right: 26px; }
-/* Sidebar surface rows carry both a history and a pin control; the pin sits
-   left of the history button, so widen the rows to clear both. */
-.project-row-wrap .sidebar-worktree-row,
 .project-row-wrap .sidebar-branch-row,
-.project-row-wrap .archived-row { padding-right: 48px; }
-.project-row-wrap .surface-pin { right: 24px; }
+.project-row-wrap .archived-row { padding-right: 26px; }
 .gone-badge { flex: none; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 8px; text-transform: uppercase; }
 .archived-section { margin: 0 0 5px 21px; border-left: 1px solid var(--border); }
 .archived-heading { display: flex; height: 28px; align-items: center; gap: 6px; padding: 0 6px 0 4px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
@@ -1003,10 +998,6 @@ button:disabled {
 .archived-row:hover { background: var(--surface-2); color: var(--foreground); }
 .archived-row span, .archived-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .archived-section .page-controls { min-height: 30px; padding: 3px; }
-.history-button { position: absolute; top: 50%; right: 4px; display: inline-flex; width: 20px; height: 20px; align-items: center; justify-content: center; transform: translateY(-50%); border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; opacity: 0; }
-.project-row-wrap:hover .history-button,
-.history-button:focus-visible { opacity: 1; }
-.history-button:hover { background: var(--surface-3); color: var(--foreground); }
 .commits-bar { display: flex; min-height: 0; flex: 1; flex-direction: column; border-top: 1px solid var(--border); }
 .commits-bar-heading { display: flex; height: 30px; flex: none; align-items: center; justify-content: space-between; padding: 0 6px 0 10px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
 .commits-bar-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1024,12 +1015,10 @@ button:disabled {
 .commits-load-more { flex: none; margin: 4px 6px; padding: 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--foreground); cursor: pointer; font-size: 10px; }
 .commits-load-more:disabled { cursor: not-allowed; opacity: 0.55; }
 .history-subject { overflow: hidden; margin: 2px 0 0; color: var(--foreground); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.nav-collapsed .commits-bar,
-.nav-collapsed .history-button { display: none; }
+.nav-collapsed .commits-bar { display: none; }
 
 @media (max-width: 960px) {
-  .commits-bar,
-  .history-button { display: none; }
+  .commits-bar { display: none; }
 }
 
 @media (max-width: 760px) {
