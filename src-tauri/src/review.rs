@@ -70,8 +70,22 @@ async fn capture_untracked_file_before_open<F>(
 where
     F: FnOnce(),
 {
-    let (exit_code, stdout, stderr) =
-        run_git(root, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
+    // The pathspec is literal, so a name containing glob metacharacters
+    // still matches itself; bounding the check to the selected path avoids
+    // a full worktree walk on every untracked patch read.
+    let pathspec = format!(":(literal){file}");
+    let (exit_code, stdout, stderr) = run_git(
+        root,
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            &pathspec,
+        ],
+    )
+    .await?;
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
     }
@@ -1072,6 +1086,43 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(missing.code, "git_execution");
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn untracked_patch_checks_the_selected_path_literally() {
+        let repo = test_repo("untracked-literal-pathspec");
+        std::fs::write(repo.join("foo[1].txt"), "bracket\n").unwrap();
+
+        // A glob pathspec would not match this literal name; the literal
+        // pathspec must, or bracketed names would render as invalid_path.
+        let bracketed = review_patch(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            None,
+            false,
+            false,
+            "foo[1].txt".into(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(bracketed.text.contains("bracket"));
+
+        // A near-miss name that the path could glob-expand to stays invalid.
+        let near_miss = review_patch(
+            repo.to_str().unwrap().into(),
+            "HEAD".into(),
+            None,
+            false,
+            false,
+            "foo1.txt".into(),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(near_miss.code, "invalid_path");
 
         std::fs::remove_dir_all(repo).unwrap();
     }
