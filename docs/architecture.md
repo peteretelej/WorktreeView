@@ -11,9 +11,9 @@ normalized domain data through narrow, typed Tauri commands.
   `open_repo`, `list_repos`, `list_worktrees`, `list_worktree_status`,
   `remove_repo`, `get_branch_inventory`, `fetch_project`,
   `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
-  `list_refs`, `list_commits`, `list_review_changes`, `list_surfaces`,
-  `read_review_patch`, `open_review_file`, `create_comment`, `list_comments`,
-  `list_submissions`, `reply_comment`, `set_comment_resolved`,
+  `list_refs`, `list_commits`, `describe_commit`, `list_review_changes`,
+  `list_surfaces`, `read_review_patch`, `open_review_file`, `create_comment`,
+  `list_comments`, `list_submissions`, `reply_comment`, `set_comment_resolved`,
   `edit_comment`, `match_comment_anchors`.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
   (4 MiB per stream), a deadline (10 seconds for local probes, 60 for the

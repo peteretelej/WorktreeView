@@ -12,6 +12,9 @@ export type ReviewScope = "all" | "committed";
 export type ReviewTarget = { kind: "worktree"; worktree: Worktree } | { kind: "ref"; name: string } | { kind: "commit"; sha: string; parents: string[]; defaultBaseAncestor: boolean };
 export type ReviewIdentity = { repoPath: string; base: string; target: ReviewTarget; scope: ReviewScope; reversed: boolean };
 export type CommitInfo = { sha: string; subject: string; author: string; date: string; refs: string[]; parents: string[]; default_base_ancestor: boolean };
+// One describe_commit record: a rev (abbreviated hashes included) resolved to
+// its full SHA plus title, body, and parents.
+export type CommitDetail = { sha: string; subject: string; body: string; parents: string[] };
 
 export type AppLocation =
   | { kind: "inbox" }

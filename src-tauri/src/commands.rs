@@ -4,8 +4,8 @@ use crate::git::{
 };
 use crate::overview::{branch_inventory, BranchInventory};
 use crate::review::{
-    commit_page, refs_inventory, review_changes, review_patch, FilePatch, RefInventory,
-    ReviewIndex,
+    commit_detail, commit_page, refs_inventory, review_changes, review_patch, CommitDetail,
+    FilePatch, RefInventory, ReviewIndex,
 };
 use crate::retrospection::{list_surfaces_in_pool, set_surface_pinned_in_pool, SurfaceListing};
 use crate::reviews::{
@@ -275,6 +275,16 @@ pub(crate) async fn read_review_patch(
         untracked,
     )
     .await
+}
+
+// One commit's identity by rev (abbreviated hashes included): the ref picker's
+// direct hash insert and the commit title/description surfaces both read it.
+#[tauri::command]
+pub(crate) async fn describe_commit(
+    path: String,
+    rev: String,
+) -> Result<CommitDetail, CommandError> {
+    commit_detail(path, rev).await
 }
 
 // Handing a reviewed file to the OS shell is user-initiated and must stay

@@ -41,6 +41,14 @@ pub struct FilePatch {
     pub(crate) text: String,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct CommitDetail {
+    pub sha: String,
+    pub subject: String,
+    pub body: String,
+    pub parents: Vec<String>,
+}
+
 fn review_index_args(format: &str, range: &str, reversed: bool) -> Vec<String> {
     let mut args = vec!["diff".into()];
     if reversed {
@@ -267,6 +275,63 @@ fn head_decoration_label(commits: &[CommitInfo]) -> String {
         }
     }
     String::new()
+}
+
+// One commit's identity: full SHA, title, body, and parents. The rev may be
+// an abbreviated hash, so resolution runs before the read; an unresolvable
+// rev is the caller's "no such commit" signal, not an execution failure.
+pub(crate) async fn commit_detail(path: String, rev: String) -> Result<CommitDetail, CommandError> {
+    validate_ref(&rev, "rev")?;
+    let path = canonical_path(&path)?;
+    let sha = resolve_ref(&path, &rev).await?;
+    let owned_args = vec![
+        "log".into(),
+        "-1".into(),
+        // One record, two separators by strength: the body starts at a NUL
+        // (commit messages never carry one) so nothing in the message can
+        // shift the parents field, and the head reassembles a subject that
+        // embeds the field separator.
+        "--format=%H%x1f%s%x1f%P%x00%b".into(),
+        sha.clone(),
+    ];
+    let args = git_args(&owned_args);
+    let (exit_code, stdout, stderr) = run_git(&path, &args).await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    parse_commit_detail(&stdout, &sha)
+}
+
+fn parse_commit_detail(output: &[u8], sha: &str) -> Result<CommitDetail, CommandError> {
+    let malformed = || {
+        CommandError::new(
+            "git_output_malformed",
+            "Git returned malformed commit data.",
+        )
+    };
+    let text = std::str::from_utf8(output).map_err(|_| malformed())?;
+    let record = text.trim_end_matches('\n');
+    let (head, body) = record.split_once('\0').ok_or_else(malformed)?;
+    let fields: Vec<&str> = head.split('\u{1f}').collect();
+    if fields.len() < 3 {
+        return Err(malformed());
+    }
+    let last = fields.len();
+    let parents: Vec<String> = fields[last - 1].split_whitespace().map(str::to_string).collect();
+    // Parents are always full hex SHAs in %P; anything else means the record
+    // is not shaped like a log entry.
+    if parents
+        .iter()
+        .any(|parent| !parent.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(malformed());
+    }
+    Ok(CommitDetail {
+        sha: sha.to_string(),
+        subject: fields[1..last - 1].join("\u{1f}"),
+        parents,
+        body: body.trim_end().to_string(),
+    })
 }
 
 pub(crate) async fn commit_page(
@@ -1934,6 +1999,63 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(symbolic.code, "unresolvable_ref");
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_detail_resolves_hashes_and_reads_bodies() {
+        let repo = test_repo("commit-detail");
+        let root_sha = test_rev_parse(&repo, "HEAD");
+        std::fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
+        test_git(&repo, &["add", "tracked.txt"]);
+        test_git(
+            &repo,
+            &[
+                "commit",
+                "--quiet",
+                "-m",
+                "titled commit\n\nfirst paragraph\n\nsecond paragraph\n",
+            ],
+        );
+        let head_sha = test_rev_parse(&repo, "HEAD");
+
+        let abbreviated = commit_detail(repo.to_str().unwrap().into(), head_sha[..7].into())
+            .await
+            .unwrap();
+        assert_eq!(abbreviated.sha, head_sha);
+        assert_eq!(abbreviated.subject, "titled commit");
+        assert_eq!(abbreviated.body, "first paragraph\n\nsecond paragraph");
+        assert_eq!(abbreviated.parents, [root_sha.clone()]);
+
+        let root = commit_detail(repo.to_str().unwrap().into(), root_sha.clone())
+            .await
+            .unwrap();
+        assert_eq!(root.subject, "initial");
+        assert_eq!(root.body, "");
+        assert!(root.parents.is_empty());
+
+        // A separator byte inside the subject must not shift the parents out
+        // of their field: the head reassembles the subject verbatim.
+        std::fs::write(repo.join("tracked.txt"), "again\n").unwrap();
+        test_git(&repo, &["add", "tracked.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "tricky\u{1f}subject"]);
+        let tricky_sha = test_rev_parse(&repo, "HEAD");
+        let tricky = commit_detail(repo.to_str().unwrap().into(), tricky_sha)
+            .await
+            .unwrap();
+        assert_eq!(tricky.subject, "tricky\u{1f}subject");
+        assert_eq!(tricky.parents, [head_sha]);
+
+        let missing = commit_detail(repo.to_str().unwrap().into(), "deadbeef".into())
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, "unresolvable_ref");
+
+        let flagged = commit_detail(repo.to_str().unwrap().into(), "--exec=x".into())
+            .await
+            .unwrap_err();
+        assert_eq!(flagged.code, "invalid_path");
 
         std::fs::remove_dir_all(repo).unwrap();
     }

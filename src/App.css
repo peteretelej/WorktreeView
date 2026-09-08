@@ -965,7 +965,20 @@ h2 {
   opacity: 1;
 }
 
-.worktree-row:hover .worktree-path .copy-button.ghost {
+.commit-hash {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.worktree-row:hover .copy-button.ghost,
+.worktree-row:focus-within .copy-button.ghost,
+.commit-row:hover .copy-button.ghost,
+.commit-row:focus-within .copy-button.ghost,
+.review-identity:hover .copy-button.ghost,
+.review-identity:focus-within .copy-button.ghost {
   opacity: 0.7;
 }
 
@@ -1391,6 +1404,10 @@ button:disabled {
 .branch-options > button { flex: none; overflow: hidden; padding: 6px 7px; border: 0; border-radius: 3px; background: transparent; color: var(--foreground); cursor: pointer; font: 11px var(--font-mono); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .branch-options > button:hover, .branch-options > button:focus-visible, .branch-options > button[aria-selected="true"] { background: var(--primary-soft); }
 .branch-options > span { padding: 8px; color: var(--muted); font-size: 10px; text-align: center; }
+.branch-options > button.commit-option { display: flex; gap: 7px; align-items: baseline; color: var(--primary); }
+.branch-options > button.commit-option:hover, .branch-options > button.commit-option:focus-visible { color: var(--foreground); }
+.branch-options > button.commit-option code { flex: none; }
+.branch-options > button.commit-option span { overflow: hidden; text-overflow: ellipsis; }
 .branch-options .page-controls { position: sticky; bottom: -4px; flex: none; background: var(--elevated); }
 .swap-button { height: 29px; padding: 0 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); }
 .scope-toggle { display: flex; height: 29px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
@@ -1470,8 +1487,9 @@ button:disabled {
 .commits-bar-heading .icon-button { width: 22px; height: 22px; flex: none; }
 .commits-bar-actions { display: flex; flex: none; gap: 2px; align-items: center; }
 .commit-list { min-height: 0; flex: 1; overflow-y: auto; padding: 2px 4px 6px; }
-.commit-row { display: flex; width: 100%; flex-direction: column; gap: 2px; padding: 5px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
+.commit-row { display: flex; width: 100%; flex-direction: column; gap: 2px; padding: 5px 6px; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
 .commit-row:hover { background: var(--surface-2); color: var(--foreground); }
+.commit-row:focus-visible { outline: 1px solid var(--primary); outline-offset: -1px; }
 .commit-row.selected { background: var(--primary-soft); color: var(--foreground); }
 .commit-subject { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .commit-meta { display: flex; overflow: hidden; align-items: center; gap: 6px; font: 9px var(--font-mono); white-space: nowrap; }
@@ -1480,7 +1498,15 @@ button:disabled {
 .commit-ref { flex: none; overflow: hidden; max-width: 90px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 8px; text-overflow: ellipsis; text-transform: uppercase; }
 .commits-load-more { flex: none; margin: 4px 6px; padding: 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--foreground); cursor: pointer; font-size: 10px; }
 .commits-load-more:disabled { cursor: not-allowed; opacity: 0.55; }
-.history-subject { overflow: hidden; margin: 2px 0 0; color: var(--foreground); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+/* The description is reading material, not identity: collapsed by default,
+   opened on demand with the whole body prewrapped. */
+.commit-description { margin-top: 6px; color: var(--muted); font-size: 10px; }
+.commit-description summary { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; list-style: none; user-select: none; }
+.commit-description summary::-webkit-details-marker { display: none; }
+.commit-description summary:hover, .commit-description[open] summary { color: var(--foreground); }
+.commit-description summary svg { transition: transform 120ms ease; }
+.commit-description[open] summary svg { transform: rotate(90deg); }
+.commit-description p { margin: 6px 0 0; max-width: 560px; max-height: 180px; overflow-y: auto; padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--foreground); font: 11px/1.5 var(--font-mono); white-space: pre-wrap; }
 .nav-collapsed .commits-bar { display: none; }
 
 @media (max-width: 960px) {
@@ -1597,18 +1623,13 @@ button:disabled {
 .composer textarea::placeholder { color: var(--muted); }
 .composer-preview { min-height: 84px; max-height: 360px; overflow-y: auto; padding: 8px 10px; border: 1px dashed var(--border); border-radius: 5px; background: var(--background); }
 .composer-preview-empty { margin: 0; color: var(--muted); font-size: 11px; }
-.comment-composer-actions { display: flex; align-items: center; gap: 6px; }
+.comment-composer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .comment-composer-actions .primary-button, .comment-composer-actions .secondary-button, .comment-composer-actions .danger-button { display: inline-flex; align-items: center; gap: 5px; flex: none; width: auto; margin-top: 0; height: 26px; padding: 0 10px; }
-.comment-composer-actions .danger-button { margin-right: auto; }
-.severity-picker { display: inline-flex; height: 24px; flex: none; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
-.severity-picker button { padding: 0 8px; border: 0; border-right: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
-.severity-picker button:last-child { border-right: 0; }
-.severity-picker button:hover { color: var(--foreground); }
-.severity-picker button.active { background: var(--primary-soft); color: var(--foreground); }
-.composer-hint { margin-right: auto; color: var(--muted); font-size: 9px; white-space: nowrap; }
-.composer-hint-inline { margin-right: 0; }
-.composer-hint kbd { padding: 0 3px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 3px; background: var(--surface-2); font: 9px var(--font-mono); }
-.comment-composer-actions .primary-button, .comment-composer-actions .secondary-button { flex: none; width: auto; margin-top: 0; }
+/* Extras (delete) lead the row; Cancel and submit close it on the right. */
+.comment-composer-actions .secondary-button { margin-left: auto; }
+.severity-select { height: 26px; max-width: 120px; padding: 0 2px 0 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--muted); font: 10px var(--font-sans); }
+.severity-select:hover, .severity-select.set { color: var(--foreground); }
+.comment-composer-actions .primary-button kbd { padding: 0 4px; border-color: color-mix(in oklch, currentColor 40%, transparent); background: transparent; color: inherit; opacity: 0.75; }
 .comment-composer-panel { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--foreground); font: 12px/1.55 var(--font-sans); box-shadow: var(--shadow-dropdown); }
 .comment-composer-panel.inline { max-width: 640px; margin: 4px 0 8px 93px; }
 .comment-composer-panel .eyebrow { margin: 0; }
