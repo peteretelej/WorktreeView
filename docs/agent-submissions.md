@@ -31,8 +31,9 @@ A section is `{ "kind": string, "title": string, "body": string }`. The
 kind vocabulary is app-owned; the body carries the content.
 
 - `brief`, `walkthrough`, `notes`: markdown bodies, rendered through the
-  app's sanitized markdown renderer (default schema; scripts and raw HTML
-  never reach the DOM).
+  app's sanitized markdown renderer (GFM extensions such as tables, task
+  lists, and strikethrough render; scripts and raw HTML never reach the
+  DOM).
 - `html`: static client HTML, rendered in a sandboxed iframe. The sandbox
   denies scripts and forms and gives the document an opaque origin; the
   app's Content Security Policy applies to the frame, so external fetches

@@ -1277,6 +1277,7 @@ button:disabled {
 .nav-collapsed .search-trigger span,
 .nav-collapsed .search-trigger kbd,
 .nav-collapsed .nav-section-label,
+.nav-collapsed .sidebar-empty,
 .nav-collapsed .project-copy,
 .nav-collapsed .sidebar-footer span,
 .nav-collapsed .open-repository-button span,
@@ -1315,6 +1316,7 @@ button:disabled {
   .search-trigger span,
   .search-trigger kbd,
   .nav-section-label,
+  .sidebar-empty,
   .project-copy,
   .sidebar-footer span,
   .open-repository-button span,
@@ -1520,50 +1522,106 @@ button:disabled {
 /* Comment layer: merged stream, inline threads, and composers. */
 .review-body.comments-visible { grid-template-columns: 300px minmax(0, 1fr) 300px; }
 .comment-stream { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-left: 1px solid var(--border); background: var(--surface); }
-.comment-stream-body { min-height: 0; flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.comment-stream-body { min-height: 0; flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+.pane-heading-actions { display: flex; align-items: center; gap: 6px; }
 .comment-filter { display: flex; height: 26px; flex: none; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
-.comment-filter button { flex: 1; border: 0; border-right: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; text-transform: uppercase; }
+.comment-filter button { flex: 1; border: 0; border-right: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
 .comment-filter button:last-child { border-right: 0; }
+.comment-filter button:hover { color: var(--foreground); }
 .comment-filter button.active { background: var(--primary-soft); color: var(--foreground); }
-.comment-empty { padding: 14px 10px; color: var(--muted); font-size: 11px; text-align: center; }
+.comment-empty { padding: 16px 12px; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-size: 11px; line-height: 1.6; text-align: center; }
 .comment-thread { display: flex; flex-direction: column; gap: 6px; }
-.comment-card { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--elevated, var(--background)); font-size: 12px; }
+.comment-card { padding: 9px 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--elevated, var(--background)); font-size: 12px; }
+.comment-card:hover { border-color: var(--surface-3); }
 .comment-card.comment-state-outdated { border-color: var(--danger); }
-.comment-card.comment-resolved { opacity: 0.75; }
-.comment-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; color: var(--muted); font-size: 10px; }
-.comment-author { color: var(--foreground); font-weight: 600; }
-.comment-badge { padding: 1px 5px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 9px; text-transform: uppercase; }
-.comment-badge.severity-P0 { border-color: var(--danger); color: var(--danger); }
+.comment-card.comment-resolved { opacity: 0.72; }
+.comment-head { display: flex; align-items: center; gap: 6px; min-height: 20px; margin-bottom: 5px; color: var(--muted); font-size: 10px; }
+.comment-author { color: var(--foreground); font-weight: 600; font-size: 11px; }
+.comment-model { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 9px var(--font-mono); }
+.comment-badge { padding: 1px 5px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; }
+.comment-badge.severity-P0 { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
 .comment-badge.severity-P1 { border-color: var(--danger); color: var(--danger); }
-.comment-state-badge { border-color: var(--danger); color: var(--danger); }
-.comment-resolved-badge { color: var(--ok); border-color: var(--ok); }
+.comment-state-badge { border-color: var(--warn); color: var(--warn); }
+.comment-resolved-badge { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
 .comment-time { margin-left: auto; }
-.comment-body { overflow-wrap: anywhere; }
-.comment-body p { margin: 0 0 4px; }
+.comment-copy { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.comment-copy:hover { background: var(--surface-2); color: var(--foreground); }
+.comment-copy.copied { color: var(--ok); }
+
+/* Markdown bodies: comments and agent submissions share the renderer, so
+   the typography lives on .comment-body and holds up at 12px in a narrow
+   stream column. */
+.comment-body { overflow-wrap: anywhere; font-size: 12px; line-height: 1.55; }
+.comment-body p { margin: 0 0 5px; }
 .comment-body p:last-child { margin-bottom: 0; }
-.comment-body pre { overflow-x: auto; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--code-surface); font: 11px/1.5 var(--font-mono); }
-.comment-body code { font: 11px var(--font-mono); }
-.comment-snippet { margin: 6px 0 0; padding: 6px 8px; overflow-x: auto; border: 1px dashed var(--border); border-radius: 4px; background: var(--code-surface); color: var(--muted); font: 11px/1.5 var(--font-mono); }
-.comment-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
-.comment-actions button { padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
+.comment-body h1, .comment-body h2, .comment-body h3, .comment-body h4, .comment-body h5, .comment-body h6 { margin: 8px 0 4px; font-size: 12px; font-weight: 650; line-height: 1.35; }
+.comment-body h1:first-child, .comment-body h2:first-child, .comment-body h3:first-child { margin-top: 0; }
+.comment-body h1 { font-size: 13px; }
+.comment-body ul, .comment-body ol { margin: 0 0 5px; padding-left: 18px; }
+.comment-body li { margin: 1px 0; }
+.comment-body li > input[type="checkbox"] { width: 11px; height: 11px; margin-right: 4px; vertical-align: -1px; accent-color: var(--primary); }
+.comment-body blockquote { margin: 0 0 5px; padding: 2px 0 2px 9px; border-left: 2px solid var(--primary); color: var(--muted); }
+.comment-body blockquote p:last-child { margin-bottom: 0; }
+.comment-body code { padding: 0 3px; border: 1px solid var(--border); border-radius: 3px; background: var(--code-surface); font: 10.5px var(--font-mono); }
+.comment-body pre { overflow-x: auto; margin: 0 0 5px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--code-surface); }
+.comment-body pre:last-child { margin-bottom: 0; }
+.comment-body pre code { padding: 0; border: 0; background: transparent; font: 10.5px/1.55 var(--font-mono); }
+.comment-body table { display: block; max-width: 100%; margin: 0 0 5px; overflow-x: auto; border-collapse: collapse; font-size: 11px; }
+.comment-body th, .comment-body td { padding: 3px 7px; border: 1px solid var(--border); text-align: left; }
+.comment-body th { background: var(--surface-2); font-weight: 600; }
+.comment-body img { max-width: 100%; border-radius: 4px; }
+.comment-body hr { margin: 8px 0; border: 0; border-top: 1px solid var(--border); }
+.comment-body a { color: var(--primary); }
+.comment-snippet { margin: 7px 0 0; padding: 6px 8px; overflow-x: auto; border: 1px dashed var(--border); border-radius: 4px; background: var(--code-surface); color: var(--muted); font: 11px/1.5 var(--font-mono); }
+.comment-actions { display: flex; align-items: center; gap: 10px; margin-top: 7px; }
+.comment-actions button { padding: 2px 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 10.5px; }
 .comment-actions button:hover { color: var(--foreground); }
-.comment-anchor { display: inline-flex; gap: 6px; margin-right: auto; overflow: hidden; color: var(--muted); font-size: 10px; }
-.comment-composer { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
-.comment-composer textarea { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--foreground); font: 12px/1.5 inherit; resize: vertical; }
+.comment-anchor { display: inline-flex; gap: 6px; margin-right: auto; min-width: 0; overflow: hidden; color: var(--muted); font-size: 10px; }
+.comment-anchor code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Composer: toolbar, autosizing editor, preview, and actions. */
+.comment-composer { display: flex; flex-direction: column; gap: 7px; margin-top: 6px; }
+.composer { display: flex; flex-direction: column; gap: 6px; }
+.composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.composer-tools { display: flex; align-items: center; gap: 1px; }
+.composer-tool { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.composer-tool:hover { background: var(--surface-3); color: var(--foreground); }
+.composer-tool-gap { width: 1px; height: 14px; margin: 0 3px; background: var(--border); }
+.composer-tabs { display: flex; height: 22px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.composer-tabs button { display: inline-flex; align-items: center; gap: 4px; padding: 0 8px; border: 0; border-right: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
+.composer-tabs button:last-child { border-right: 0; }
+.composer-tabs button.active { background: var(--primary-soft); color: var(--foreground); }
+.composer textarea { width: 100%; min-height: 84px; max-height: 360px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--background); color: var(--foreground); font: 12px/1.55 inherit; resize: none; overflow-y: auto; }
+.composer textarea:focus-visible { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-soft); }
+.composer textarea::placeholder { color: var(--muted); }
+.composer-preview { min-height: 84px; max-height: 360px; overflow-y: auto; padding: 8px 10px; border: 1px dashed var(--border); border-radius: 5px; background: var(--background); }
+.composer-preview-empty { margin: 0; color: var(--muted); font-size: 11px; }
 .comment-composer-actions { display: flex; align-items: center; gap: 6px; }
 .comment-composer-actions select { height: 24px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--foreground); font-size: 10px; }
-.comment-composer-panel { display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.composer-hint { margin-right: auto; color: var(--muted); font-size: 9px; white-space: nowrap; }
+.composer-hint kbd { padding: 0 3px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 3px; background: var(--surface-2); font: 9px var(--font-mono); }
+.comment-composer-panel { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); box-shadow: var(--shadow-dropdown); }
 .comment-composer-panel.inline { margin: 4px 0 8px 93px; }
 .comment-composer-panel .eyebrow { margin: 0; }
 .inline-comment { margin: 2px 0 6px 93px; }
+
+/* Selection affordances on diff rows: the plus sits over the first gutter
+   cell on hover, and a text selection gets its own comment entry chip. */
+.diff-line { position: relative; }
 .diff-line.commentable { cursor: pointer; }
 .diff-line.comment-selected { outline: 1px solid var(--primary); outline-offset: -1px; }
+.comment-plus { position: absolute; top: 0; bottom: 0; left: 0; display: none; width: 42px; align-items: center; justify-content: center; border: 0; border-radius: 4px 0 0 4px; background: var(--primary); color: var(--brand-foreground); cursor: pointer; font: 600 13px/1 var(--font-mono); z-index: 1; }
+.diff-line.commentable:hover .comment-plus { display: flex; }
+.selection-comment-chip { align-self: flex-start; margin: 4px 0 8px 93px; padding: 3px 11px; border: 1px solid var(--primary); border-radius: 999px; background: var(--primary-soft); color: var(--foreground); cursor: pointer; font-size: 11px; box-shadow: var(--shadow-dropdown); }
+.selection-comment-chip:hover { background: var(--primary); color: var(--brand-foreground); }
 .patch-heading-meta { display: inline-flex; align-items: center; gap: 8px; }
+.patch-open-error { margin: 8px 14px 0; padding: 6px 8px; border: 1px solid var(--danger); border-radius: 5px; background: var(--danger-soft); color: var(--foreground); font-size: 11px; }
 
 .reviews-strip { display: flex; flex-direction: column; gap: 6px; flex: none; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
 .reviews-strip-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; font-size: 10px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.04em; }
-.submission-card { border: 1px solid var(--border); border-radius: 6px; background: var(--elevated, var(--background)); font-size: 12px; }
-.submission-toggle { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 8px; border: 0; background: transparent; color: var(--foreground); cursor: pointer; font: inherit; text-align: left; }
+.submission-card { position: relative; border: 1px solid var(--border); border-radius: 6px; background: var(--elevated, var(--background)); font-size: 12px; }
+.submission-toggle { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 30px 6px 8px; border: 0; background: transparent; color: var(--foreground); cursor: pointer; font: inherit; text-align: left; }
+.submission-copy { position: absolute; top: 4px; right: 4px; }
 .submission-agent { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .submission-model { color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .submission-toggle .comment-time { flex: none; }

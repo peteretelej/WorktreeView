@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
 import { CommentBody } from "./markdown.tsx";
+import { copyText } from "./clipboard.ts";
 import type { ReviewKey } from "./comments.ts";
-import { sectionView, type Submission, type SubmissionSection } from "./canvas.ts";
+import { formatSubmissionForCopy, sectionView, type Submission, type SubmissionSection } from "./canvas.ts";
 
 // Static client html rendered in a sandboxed iframe: the empty sandbox
 // attribute denies scripts, forms, and same-origin (opaque origin), and the
@@ -34,6 +35,13 @@ export function SectionCard({ section }: { section: SubmissionSection }) {
 
 function SubmissionCard({ submission }: { submission: Submission }) {
   const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    if (await copyText(formatSubmissionForCopy(submission))) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    }
+  }
   return <article className="submission-card">
     <button className="submission-toggle" type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
       {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -41,6 +49,7 @@ function SubmissionCard({ submission }: { submission: Submission }) {
       <span className="submission-model">{submission.agent_model}</span>
       <span className="comment-time" title={new Date(submission.created_at).toLocaleString()}>{new Date(submission.created_at).toLocaleDateString()}</span>
     </button>
+    <button className="comment-copy submission-copy" type="button" aria-label="Copy review as markdown" title="Copy review as markdown" onClick={() => void copy()}>{copied ? <Check size={12} /> : <Copy size={12} />}</button>
     {open && <div className="submission-sections">
       {submission.command_context && <p className="submission-context" title="Command context">{submission.command_context}</p>}
       {submission.sections.map((section, index) => <SectionCard key={index} section={section} />)}

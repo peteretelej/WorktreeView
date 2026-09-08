@@ -90,6 +90,72 @@ export function draftFromSelection(selection: RowSelection, lines: DiffLine[], r
   return { body: "", severity: null, file_path: filePath, side: logicalSide(selection.displaySide, reversed), start_line: start, end_line: end, lines: selected };
 }
 
+// A row selection as the composer carries it: the raw range plus an
+// optional text-selection excerpt captured when the composer opened.
+export type CommentSelection = RowSelection & { excerpt?: string };
+
+// Selected diff text becomes a blockquote pre-filled above the comment; an
+// empty or whitespace-only selection quotes nothing.
+export function quoteExcerpt(text: string): string {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n").map((line) => line.trimEnd());
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  if (lines.length === 0) return "";
+  return lines.map((line) => (line === "" ? ">" : `> ${line}`)).join("\n") + "\n\n";
+}
+
+// Compact anchor label for cards and exports; the side letter follows the
+// display side so a reversed layout labels rows as the user sees them.
+export function anchorLabel(comment: Pick<ReviewComment, "file_path" | "side" | "start_line" | "end_line">, reversed = false): string {
+  if (comment.file_path === null) return "review";
+  if (comment.side === null || comment.start_line === null) return comment.file_path;
+  const side = logicalSide(comment.side, reversed) === "LEFT" ? "L" : "R";
+  const range = comment.end_line !== null && comment.end_line !== comment.start_line ? `-${comment.end_line}` : "";
+  return `${comment.file_path} ${side}${comment.start_line}${range}`;
+}
+
+function authorLabel(comment: ReviewComment): string {
+  return comment.author_kind === "agent" && comment.author_model ? `${comment.author_name} (${comment.author_model})` : comment.author_name;
+}
+
+function commentHeader(comment: ReviewComment, reversed: boolean): string {
+  const severity = comment.severity ? ` (${comment.severity})` : "";
+  return `**${authorLabel(comment)}**${severity} on ${anchorLabel(comment, reversed)}:`;
+}
+
+// One comment as markdown with its author and anchor context, ready to
+// paste where the reader has no access to the review.
+export function formatCommentForCopy(comment: ReviewComment, reversed = false): string {
+  return `${commentHeader(comment, reversed)}\n\n${comment.body.trim()}\n`;
+}
+
+function quoteReply(comment: ReviewComment): string {
+  const severity = comment.severity ? ` (${comment.severity})` : "";
+  const body = comment.body.trim().split("\n").map((line) => (line === "" ? ">" : `> ${line}`)).join("\n");
+  return `> **${authorLabel(comment)}**${severity}:\n> \n${body}\n`;
+}
+
+export function formatThreadForCopy(thread: CommentThread, reversed = false): string {
+  const parts = [formatCommentForCopy(thread.comment, reversed)];
+  for (const reply of thread.replies) parts.push(quoteReply(reply));
+  return parts.join("\n");
+}
+
+// The stream's copy-all export: every visible thread with anchor, state,
+// severity, and quoted replies, numbered for easy reference in a reply.
+export function exportThreadsMarkdown(threads: CommentThread[], reversed = false): string {
+  if (threads.length === 0) return "No comments.\n";
+  const open = threads.filter((thread) => thread.comment.resolved_at === null).length;
+  const blocks = threads.map((thread, index) => {
+    const comment = thread.comment;
+    const state = comment.resolved_at !== null ? "resolved" : "open";
+    const severity = comment.severity ? `, ${comment.severity}` : "";
+    const head = `### ${index + 1}. ${anchorLabel(comment, reversed)}, ${state}${severity}`;
+    const date = new Date(comment.created_at).toISOString().slice(0, 10);
+    return `${head}\n${commentHeader(comment, reversed)} ${date}\n\n${comment.body.trim()}\n${thread.replies.map((reply) => `\n${quoteReply(reply)}`).join("")}`;
+  });
+  return `## Review comments: ${threads.length} thread${threads.length === 1 ? "" : "s"}, ${open} open\n\n${blocks.join("\n")}`;
+}
+
 // Roots in post order with their flat replies; replies stay attached to
 // their root even when the author filter would hide them.
 export function commentThreads(comments: ReviewComment[]): CommentThread[] {

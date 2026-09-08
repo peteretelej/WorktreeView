@@ -3,12 +3,17 @@ import assert from "node:assert/strict";
 import type { DiffLine } from "./diff.ts";
 import type { ReviewIdentity } from "./navigation.ts";
 import {
+  anchorLabel,
   commentThreads,
   draftFromSelection,
+  exportThreadsMarkdown,
   filterThreadsByAuthor,
+  formatCommentForCopy,
+  formatThreadForCopy,
   inlinePlacement,
   lineContent,
   logicalSide,
+  quoteExcerpt,
   reviewKeyOf,
   toPatchLines,
   type ReviewComment,
@@ -160,4 +165,42 @@ test("inline placement follows statuses and flips under reversal", () => {
   assert.equal(inlinePlacement(reviewLevel, null, false), null);
   const fileLevel = comment({ id: 3, parent_id: null, file_path: "f" });
   assert.equal(inlinePlacement(fileLevel, null, false), null);
+});
+
+test("quoteExcerpt block-quotes selected text and drops trailing blanks", () => {
+  assert.equal(quoteExcerpt("part of a line"), "> part of a line\n\n");
+  assert.equal(quoteExcerpt("two\nlines\r\n\n"), "> two\n> lines\n\n");
+  assert.equal(quoteExcerpt(""), "");
+  assert.equal(quoteExcerpt("  \n"), "");
+});
+
+test("anchor labels use display sides and collapse single-line ranges", () => {
+  assert.equal(anchorLabel({ file_path: "f", side: "LEFT", start_line: 3, end_line: 3 }), "f L3");
+  assert.equal(anchorLabel({ file_path: "f", side: "RIGHT", start_line: 3, end_line: 5 }), "f R3-5");
+  assert.equal(anchorLabel({ file_path: "f", side: "LEFT", start_line: 3, end_line: 5 }, true), "f R3-5");
+  assert.equal(anchorLabel({ file_path: "f", side: null, start_line: null, end_line: null }), "f");
+  assert.equal(anchorLabel({ file_path: null, side: null, start_line: null, end_line: null }), "review");
+});
+
+test("comment copy keeps author, severity, anchor, and body context", () => {
+  const body = formatCommentForCopy(comment({ id: 1, parent_id: null, author_name: "you", severity: "P1", file_path: "f.ts", side: "RIGHT", start_line: 3, end_line: 5, body: "line **one**\nline two" }));
+  assert.equal(body, "**you** (P1) on f.ts R3-5:\n\nline **one**\nline two\n");
+  const agent = formatCommentForCopy(comment({ id: 2, parent_id: null, author_kind: "agent", author_name: "agent-x", author_model: "model-1", body: "hi" }));
+  assert.equal(agent, "**agent-x (model-1)** on review:\n\nhi\n");
+});
+
+test("thread copy quotes replies under the root", () => {
+  const root = comment({ id: 1, parent_id: null, body: "root" });
+  const reply = comment({ id: 2, parent_id: 1, author_name: "agent", body: "first\nsecond" });
+  assert.equal(formatThreadForCopy({ comment: root, replies: [reply] }), "**you** on review:\n\nroot\n\n> **agent**:\n> \n> first\n> second\n");
+});
+
+test("export numbers threads and counts open ones", () => {
+  const open = comment({ id: 1, parent_id: null, file_path: "a.ts", side: "RIGHT", start_line: 2, severity: "P0", created_at: 1000, body: "first" });
+  const resolved = comment({ id: 2, parent_id: null, resolved_at: 2000, created_at: 1500, body: "done" });
+  const text = exportThreadsMarkdown([{ comment: open, replies: [] }, { comment: resolved, replies: [] }]);
+  assert.ok(text.startsWith("## Review comments: 2 threads, 1 open\n"));
+  assert.ok(text.includes("### 1. a.ts R2, open, P0"));
+  assert.ok(text.includes("### 2. review, resolved"));
+  assert.equal(exportThreadsMarkdown([]), "No comments.\n");
 });

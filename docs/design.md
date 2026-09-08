@@ -67,6 +67,22 @@
   or agents, and the merged comment stream filters by author. Comments are
   created by selecting a line or range in the diff, with review-level and
   file-level entry points always available.
+- Anchoring a range is keyboard-and-pointer friendly: click selects a line,
+  shift-click or a gutter drag extends it to a range, and a plus affordance
+  in the gutter opens the composer on the hovered line (keeping a range
+  that already contains it). Selecting text inside the diff never changes
+  the row anchors; instead a "Comment on selection" chip opens the
+  composer on the covered rows with the selected text pre-filled as a
+  quoted excerpt, so part of a line comments like a line does.
+- Comments are markdown end to end: the composer has a formatting toolbar,
+  Ctrl+B/I/E/K shortcuts (bold, italics, code, link), a preview tab, and
+  Ctrl+Enter submit; bodies render through the same sanitized renderer for
+  humans and agents, including GFM tables, task lists, and strikethrough.
+- Comments are copy-first for handoff to agents and other tools: every
+  comment card copies that comment as markdown with author, severity, and
+  anchor context; the stream header copies all visible threads as a
+  structured markdown export; each agent submission card copies the whole
+  submitted review.
 
 ## Non-goals
 

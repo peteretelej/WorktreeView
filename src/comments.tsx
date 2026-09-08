@@ -1,25 +1,32 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Check, Copy } from "lucide-react";
 import type { DiffLine } from "./diff.ts";
 import type { ReviewIdentity } from "./navigation.ts";
+import { copyText } from "./clipboard.ts";
 import { CommentBody } from "./markdown.tsx";
+import { MarkdownComposer } from "./composer.tsx";
 import {
+  anchorLabel,
   commentThreads,
   draftFromSelection,
+  exportThreadsMarkdown,
   filterThreadsByAuthor,
+  formatCommentForCopy,
   inlinePlacement,
+  quoteExcerpt,
   reviewKeyOf,
   toPatchLines,
   type AnchorStatus,
   type AuthorFilter,
   type CommentDraft,
+  type CommentSelection,
   type CommentSeverity,
   type CommentThread,
   type DisplaySide,
   type ReviewComment,
   type ReviewIndexSummary,
   type ReviewKey,
-  type RowSelection,
 } from "./comments.ts";
 
 // The comment layer attaches to any rendered review identity: one hook at
@@ -129,17 +136,38 @@ function severityLabel(severity: string) {
   return `severity ${severity}`;
 }
 
-function CommentCard({ comment, status, actions }: { comment: ReviewComment; status: AnchorStatus | null; actions?: ReactNode }) {
+// Copy feedback shared by the per-card and copy-all buttons; the check
+// mark outlives the copy by a beat so the click reads as done.
+function useCopied() {
+  const [copied, setCopied] = useState(false);
+  function copy(text: string) {
+    void copyText(text).then((ok) => {
+      if (!ok) return;
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
+  }
+  return { copied, copy };
+}
+
+function CopyMark({ copied }: { copied: boolean }) {
+  return copied ? <Check size={12} /> : <Copy size={12} />;
+}
+
+function CommentCard({ comment, status, reversed = false, actions }: { comment: ReviewComment; status: AnchorStatus | null; reversed?: boolean; actions?: ReactNode }) {
   const state = comment.parent_id === null ? status?.state ?? null : null;
+  const { copied, copy } = useCopied();
   return <article className={`comment-card comment-state-${state ?? "none"} ${comment.resolved_at !== null ? "comment-resolved" : ""}`}>
     <header className="comment-head">
       <span className="comment-author">{comment.author_name}</span>
       {comment.author_kind === "agent" && <span className="comment-badge">agent</span>}
+      {comment.author_model && <span className="comment-model" title={comment.author_model}>{comment.author_model}</span>}
       {comment.severity && <span className={`comment-badge comment-severity severity-${comment.severity}`} title={severityLabel(comment.severity)}>{comment.severity}</span>}
       {state === "moved" && <span className="comment-badge comment-state-badge">moved</span>}
       {state === "outdated" && <span className="comment-badge comment-state-badge">outdated</span>}
       {comment.resolved_at !== null && <span className="comment-badge comment-resolved-badge">resolved</span>}
       <span className="comment-time" title={new Date(comment.created_at).toLocaleString()}>{new Date(comment.created_at).toLocaleDateString()}</span>
+      <button className="comment-copy" type="button" aria-label="Copy comment as markdown" title="Copy as markdown" onClick={() => copy(formatCommentForCopy(comment, reversed))}>{<CopyMark copied={copied} />}</button>
     </header>
     <CommentBody text={comment.body} />
     {state === "outdated" && comment.snippet && <pre className="comment-snippet"><code>{comment.snippet}</code></pre>}
@@ -150,10 +178,11 @@ function CommentCard({ comment, status, actions }: { comment: ReviewComment; sta
 function MiniComposer({ placeholder, submitLabel, busy, onSubmit, onCancel }: { placeholder: string; submitLabel: string; busy: boolean; onSubmit: (body: string) => void; onCancel: () => void }) {
   const [body, setBody] = useState("");
   return <div className="comment-composer">
-    <textarea aria-label={placeholder} placeholder={placeholder} value={body} rows={3} onChange={(event) => setBody(event.currentTarget.value)} />
+    <MarkdownComposer value={body} onChange={setBody} placeholder={placeholder} autoFocus onSubmit={() => { if (body.trim() !== "") onSubmit(body); }} onCancel={onCancel} />
     <div className="comment-composer-actions">
-      <button className="primary-button" type="button" disabled={busy || body.trim() === ""} onClick={() => onSubmit(body)}>{submitLabel}</button>
+      <span className="composer-hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
       <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
+      <button className="primary-button" type="button" disabled={busy || body.trim() === ""} onClick={() => onSubmit(body)}>{submitLabel}</button>
     </div>
   </div>;
 }
@@ -162,17 +191,18 @@ function severityOptions(): Array<CommentSeverity | ""> {
   return ["", "P0", "P1", "P2", "P3"] as Array<CommentSeverity | "">;
 }
 
-export function DraftComposer({ placeholder, submitLabel, onSubmit, onCancel }: { placeholder: string; submitLabel: string; onSubmit: (draft: { body: string; severity: CommentSeverity | null }) => void; onCancel: () => void }) {
-  const [body, setBody] = useState("");
+export function DraftComposer({ placeholder, submitLabel, initialBody = "", onSubmit, onCancel }: { placeholder: string; submitLabel: string; initialBody?: string; onSubmit: (draft: { body: string; severity: CommentSeverity | null }) => void; onCancel: () => void }) {
+  const [body, setBody] = useState(initialBody);
   const [severity, setSeverity] = useState<CommentSeverity | "">("");
   return <div className="comment-composer">
-    <textarea aria-label={placeholder} placeholder={placeholder} value={body} rows={3} onChange={(event) => setBody(event.currentTarget.value)} />
+    <MarkdownComposer value={body} onChange={setBody} placeholder={placeholder} autoFocus onSubmit={() => { if (body.trim() !== "") onSubmit({ body, severity: severity === "" ? null : severity }); }} onCancel={onCancel} />
     <div className="comment-composer-actions">
       <select aria-label="Comment severity" value={severity} onChange={(event) => setSeverity(event.currentTarget.value as CommentSeverity | "")}>
         {severityOptions().map((option) => <option key={option || "none"} value={option}>{option === "" ? "No severity" : option}</option>)}
       </select>
-      <button className="primary-button" type="button" disabled={body.trim() === ""} onClick={() => onSubmit({ body, severity: severity === "" ? null : severity })}>{submitLabel}</button>
+      <span className="composer-hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
       <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
+      <button className="primary-button" type="button" disabled={body.trim() === ""} onClick={() => onSubmit({ body, severity: severity === "" ? null : severity })}>{submitLabel}</button>
     </div>
   </div>;
 }
@@ -180,7 +210,7 @@ export function DraftComposer({ placeholder, submitLabel, onSubmit, onCancel }: 
 // A thread with its actions: resolve/reopen on the root only, flat replies,
 // an inline reply composer, and last-write-wins editing. Exported for the
 // inline cards the patch panes render at anchored rows.
-export function CommentThreadView({ thread, status, comments }: { thread: CommentThread; status: AnchorStatus | null; comments: CommentsApi }) {
+export function CommentThreadView({ thread, status, comments, reversed = false }: { thread: CommentThread; status: AnchorStatus | null; comments: CommentsApi; reversed?: boolean }) {
   const [replying, setReplying] = useState(false);
   const [editing, setEditing] = useState<number | null>(null);
   const root = thread.comment;
@@ -191,23 +221,30 @@ export function CommentThreadView({ thread, status, comments }: { thread: Commen
       <button type="button" onClick={() => setEditing(comment.id)}>Edit</button>
     </div>;
   return <div className="comment-thread" data-comment-id={root.id}>
-    <CommentCard comment={root} status={status} actions={<>
+    <CommentCard comment={root} status={status} reversed={reversed} actions={<>
       <div className="comment-actions">
-        {root.file_path !== null && <span className="comment-anchor"><code>{root.file_path}</code>{root.side !== null && root.start_line !== null && <span> {root.side} {root.start_line}{root.end_line !== null && root.end_line !== root.start_line ? `-${root.end_line}` : ""}</span>}</span>}
+        {root.file_path !== null && <span className="comment-anchor" title={`${root.side === "LEFT" ? "Old" : "New"} side of ${root.file_path}`}><code>{anchorLabel(root, reversed)}</code></span>}
         <button type="button" onClick={() => void comments.setResolved(root.id, !resolved)}>{resolved ? "Reopen" : "Resolve"}</button>
         <button type="button" onClick={() => setReplying(!replying)}>{replying ? "Cancel" : "Reply"}</button>
       </div>
       {editControls(root)}
     </>} />
-    {thread.replies.map((reply) => <CommentCard key={reply.id} comment={reply} status={null} actions={editControls(reply)} />)}
+    {thread.replies.map((reply) => <CommentCard key={reply.id} comment={reply} status={null} reversed={reversed} actions={editControls(reply)} />)}
     {replying && <MiniComposer placeholder="Reply" submitLabel="Reply" busy={false} onSubmit={(body) => { setReplying(false); void comments.reply(root.id, body); }} onCancel={() => setReplying(false)} />}
   </div>;
 }
 
-export function CommentStream({ comments, strip }: { comments: CommentsApi; strip?: ReactNode }) {
+export function CommentStream({ comments, reversed = false, strip }: { comments: CommentsApi; reversed?: boolean; strip?: ReactNode }) {
+  const { copied, copy } = useCopied();
   if (!comments.key) return null;
   return <aside className="comment-stream" aria-label="Comments">
-    <div className="pane-heading"><strong>Comments</strong><span>{comments.threads.length}</span></div>
+    <div className="pane-heading">
+      <strong>Comments</strong>
+      <span className="pane-heading-actions">
+        <span>{comments.threads.length}</span>
+        <button className="comment-copy" type="button" aria-label="Copy all comments as markdown" title="Copy all comments as markdown" disabled={comments.visibleThreads.length === 0} onClick={() => copy(exportThreadsMarkdown(comments.visibleThreads, reversed))}>{<CopyMark copied={copied} />}</button>
+      </span>
+    </div>
     <div className="comment-stream-body">
       {strip}
       <div className="comment-filter" role="group" aria-label="Filter comments by author">
@@ -218,20 +255,24 @@ export function CommentStream({ comments, strip }: { comments: CommentsApi; stri
         <DraftComposer placeholder="Comment on this review" submitLabel="Comment" onSubmit={({ body, severity }) => { void comments.create({ body, severity, file_path: null, side: null, start_line: null, end_line: null, lines: [] }).then(comments.closeComposer); }} onCancel={comments.closeComposer} />
       </div>}
       {comments.visibleThreads.length === 0
-        ? <div className="comment-empty">No comments{comments.author === "all" ? " yet" : ` from ${comments.author} authors`}. Select a diff line or use a comment button.</div>
-        : comments.visibleThreads.map((thread) => <CommentThreadView key={thread.comment.id} thread={thread} status={comments.statuses[thread.comment.id] ?? null} comments={comments} />)}
+        ? <div className="comment-empty">No comments{comments.author === "all" ? " yet" : ` from ${comments.author} authors`}. Click a diff line to comment; shift-click or drag the line numbers for a range.</div>
+        : comments.visibleThreads.map((thread) => <CommentThreadView key={thread.comment.id} thread={thread} status={comments.statuses[thread.comment.id] ?? null} comments={comments} reversed={reversed} />)}
     </div>
   </aside>;
 }
 
 // Selection-driven inline composer: rendered by the patch panes right under
-// the selected row and converted to a logical-side draft on submit.
-export function InlineCommentComposer({ selection, filePath, lines, reversed, comments, onDone }: { selection: RowSelection; filePath: string; lines: DiffLine[]; reversed: boolean; comments: CommentsApi; onDone: () => void }) {
+// the selected row and converted to a logical-side draft on submit. A text
+// selection captured when the composer opened rides along as a quoted
+// excerpt pre-filled above the comment body.
+export function InlineCommentComposer({ selection, filePath, lines, reversed, comments, onDone }: { selection: CommentSelection; filePath: string; lines: DiffLine[]; reversed: boolean; comments: CommentsApi; onDone: () => void }) {
+  const range = selection.start === selection.end ? `line ${selection.start}` : `lines ${selection.start}-${selection.end}`;
   return <div className="comment-composer-panel inline">
-    <p className="eyebrow">Comment on {filePath} {selection.start === selection.end ? `line ${selection.start}` : `lines ${selection.start}-${selection.end}`}</p>
+    <p className="eyebrow">Comment on {filePath} {range}</p>
     <DraftComposer
       placeholder="Add comment"
       submitLabel="Comment"
+      initialBody={quoteExcerpt(selection.excerpt ?? "")}
       onSubmit={({ body, severity }) => {
         const draft = draftFromSelection(selection, lines, reversed, filePath);
         if (!draft) return;

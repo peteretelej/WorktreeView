@@ -36,3 +36,16 @@ export function sectionView(section: SubmissionSection): SectionView {
     fallback: !native,
   };
 }
+
+// One submission as markdown for pasting into another tool or agent chat:
+// author context first, then every section under its label or title.
+export function formatSubmissionForCopy(submission: Submission): string {
+  const date = new Date(submission.created_at).toISOString().slice(0, 10);
+  const head = `Review submitted by **${submission.agent_name}** (${submission.agent_model}) on ${date}`;
+  const sections = submission.sections.map((section) => {
+    const title = section.title || sectionView(section).label;
+    return `## ${title}\n\n${section.body.trim()}`;
+  });
+  const context = submission.command_context ? `\nCommand context: ${submission.command_context}\n` : "";
+  return `${head}\n${context}\n${sections.join("\n\n")}\n`;
+}

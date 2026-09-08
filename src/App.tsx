@@ -3,16 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, ArrowRight, Check, ChevronDown, ChevronRight, ChevronsLeft, CircleDot, Code, Columns2, Command, Copy, FileDiff, FolderGit2, GitBranch, HardDrive, Inbox, ListTree, MessageSquare, MoreVertical, Pin, PinOff, RefreshCw, Search, Settings as SettingsIcon, Space, Trash2, WrapText, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, ChevronDown, ChevronRight, ChevronsLeft, CircleDot, Code, Columns2, Command, Copy, ExternalLink, FileDiff, FolderGit2, FolderOpen, GitBranch, HardDrive, Inbox, ListTree, MessageSquare, MoreVertical, Pin, PinOff, RefreshCw, Search, Settings as SettingsIcon, Space, Trash2, WrapText, X } from "lucide-react";
 import { createNavigationHistory, sameReviewTarget, type AppLocation, type BranchInventory, type BranchSummary, type ChangedFile, type CommitInfo, type GoneSurface, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type SurfaceListing, type Worktree } from "./navigation";
 import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
 import { SettingsPage, applyTheme, defaultSettings, getSettings, persistSettings, type DiffLayout, type Settings } from "./settings";
 import { DEFAULT_ZOOM, snapZoom, stepZoom, zoomShortcut } from "./zoom";
 import { pairHunkLines, type DiffLine } from "./diff";
 import { hunkSideSources, languageForPath, splitWhitespace, tokenizeHunk, type HighlightToken, type TokenLine } from "./highlight";
-import { filterGoneSurfaces, goneSurfaceLabel, pinnedSurfaces, recentWorktrees, surfacePinIndex, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces";
+import { filterGoneSurfaces, goneSurfaceLabel, pinnedSurfaces, recentWorktrees, reviewFileWorktree, surfacePinIndex, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces";
 import { CommentStream, CommentThreadView, DraftComposer, InlineCommentComposer, inlineCards, selectableRow, useReviewComments, type CommentsApi } from "./comments.tsx";
 import { ReviewsStrip } from "./canvas.tsx";
+import { copyText } from "./clipboard";
 import type { DisplaySide } from "./comments";
 import "./App.css";
 
@@ -117,30 +118,6 @@ function originSlug(url: string) {
   return url.replace(/\.git$/i, "").replace(/^(https?|ssh|git):\/\//i, "").replace(/^[^/@]+@/, "").replace(":", "/");
 }
 
-// navigator.clipboard is unavailable without a focused document (tests,
-// background windows); the hidden-textarea fallback covers those cases.
-async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    try {
-      const area = document.createElement("textarea");
-      area.value = text;
-      area.setAttribute("readonly", "");
-      area.style.position = "fixed";
-      area.style.opacity = "0";
-      document.body.appendChild(area);
-      area.select();
-      const copied = document.execCommand("copy");
-      area.remove();
-      return copied;
-    } catch {
-      return false;
-    }
-  }
-}
-
 function CopyButton({ value, label, ghost = false }: { value: string; label: string; ghost?: boolean }) {
   const [copied, setCopied] = useState(false);
   return <button className={`copy-button ${ghost ? "ghost" : ""} ${copied ? "copied" : ""}`} type="button" aria-label={label} title={copied ? "Copied" : label} onClick={async (event) => { event.stopPropagation(); if (await copyText(value)) { setCopied(true); setTimeout(() => setCopied(false), 1200); } }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button>;
@@ -197,8 +174,31 @@ function parseHunks(text: string) {
   return hunks;
 }
 
-function paginateHunks(hunks: ParsedHunk[]) {
-  const pages: RenderedHunk[][] = [];
+// A DOM text selection mapped onto display rows. Commentable rows carry
+// side/line data attributes; selections spanning both diff sides (split
+// layout) or landing on non-row content map to nothing.
+type TextSelectionRange = { displaySide: DisplaySide; start: number; end: number; text: string };
+
+// The pane's in-progress row selection keeps the anchor/focus form; the
+// composer receives it normalized to start/end with any excerpt attached.
+type PaneSelection = { displaySide: DisplaySide; anchor: number; focus: number; excerpt?: string };
+
+function textSelectionRange(pane: HTMLElement | null): TextSelectionRange | null {
+  const selection = document.getSelection();
+  if (!pane || !selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+  const range = selection.getRangeAt(0);
+  if (!pane.contains(range.commonAncestorContainer)) return null;
+  const rowOf = (node: Node) => (node instanceof Element ? node : node.parentElement)?.closest<HTMLElement>(".diff-line[data-side]");
+  const startRow = rowOf(range.startContainer);
+  const endRow = rowOf(range.endContainer);
+  if (!startRow || !endRow || startRow.dataset.side === undefined || startRow.dataset.side !== endRow.dataset.side) return null;
+  const start = Number(startRow.dataset.line);
+  const end = Number(endRow.dataset.line);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return { displaySide: startRow.dataset.side as DisplaySide, start: Math.min(start, end), end: Math.max(start, end), text: selection.toString().slice(0, 2000) };
+}
+
+function paginateHunks(hunks: ParsedHunk[]) {  const pages: RenderedHunk[][] = [];
   let page: RenderedHunk[] = [];
   let lineCount = 0;
   const finishPage = () => {
@@ -906,8 +906,8 @@ function ReviewView({ repoPath, liveWorktree, target, refs, base, scope, reverse
     </header>
     {!base && !loading ? <Empty icon={<GitBranch size={24} />} title="Choose a base branch to review" detail="This review has no default base." action={<RefPicker id="prompt-review-base" label="Choose base" refs={allRefs} value={base} exclude={target.kind === "worktree" ? [] : [targetName]} onChange={onBaseChange} />} /> : <div className="review-body comments-visible">
       <FileIndexPane base={base} index={index} loading={loading} selectedFile={selectedFile} filePage={filePage} onFilePage={onFilePage} onFile={onFile} />
-      <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} hunkPage={hunkPage} diffPrefs={diffPrefs} reversed={reversed} comments={comments} onHunkPage={onHunkPage} />
-      <CommentStream comments={comments} strip={<ReviewsStrip reviewKey={comments.key} />} />
+      <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} hunkPage={hunkPage} diffPrefs={diffPrefs} reversed={reversed} comments={comments} onHunkPage={onHunkPage} onDiskWorktree={reviewFileWorktree(target, selectedFile, reversed)} />
+      <CommentStream comments={comments} reversed={reversed} strip={<ReviewsStrip reviewKey={comments.key} />} />
     </div>}
   </section>;
 }
@@ -920,30 +920,92 @@ function FileIndexPane({ base, index, loading, selectedFile, filePage, onFilePag
   return <aside className="file-index" aria-label="Changed files"><div className="pane-heading"><strong>Changed files</strong><span>{files.length}</span></div>{loading ? <div className="index-skeleton">{Array.from({ length: 7 }, (_, i) => <i key={i} />)}</div> : index?.error ? <Empty icon={<CircleDot size={20} />} title="Review unavailable" detail={index.error} /> : files.length === 0 ? <Empty icon={<CircleDot size={20} />} title={`No changes vs ${shortToken(base)}`} detail="Try a different base branch." /> : <><div className="file-list" role="listbox" aria-label="Changed files">{visibleFiles.map((file) => <button key={file.path} type="button" role="option" aria-selected={selectedFile?.path === file.path} className={`file-row status-${file.status.toLowerCase()} ${selectedFile?.path === file.path ? "selected" : ""}`} title={file.path} onClick={() => onFile(file)} onKeyDown={(event) => { const current = visibleFiles.findIndex((item) => item.path === file.path); const next = event.key === "ArrowDown" ? current + 1 : event.key === "ArrowUp" ? current - 1 : -1; if (next >= 0 && next < visibleFiles.length) { event.preventDefault(); onFile(visibleFiles[next]); (event.currentTarget.parentElement?.children[next] as HTMLElement)?.focus(); } }}><b>{file.status}</b><span>{file.path}</span></button>)}</div>{pages > 1 && <Pager label="Changed file pages" page={page} pages={pages} total={files.length} size={WORKTREE_PAGE_SIZE} onPage={onFilePage} />}</>}</aside>;
 }
 
-function PatchPane({ selectedFile, patch, patchError, patchLoading, hunkPage, diffPrefs, reversed, comments, onHunkPage }: { selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; hunkPage: number; diffPrefs: DiffPreferences; reversed: boolean; comments: CommentsApi; onHunkPage: (page: number) => void }) {
+function PatchPane({ selectedFile, patch, patchError, patchLoading, hunkPage, diffPrefs, reversed, comments, onHunkPage, onDiskWorktree }: { selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; hunkPage: number; diffPrefs: DiffPreferences; reversed: boolean; comments: CommentsApi; onHunkPage: (page: number) => void; onDiskWorktree?: string | null }) {
+  const [openError, setOpenError] = useState("");
+  useEffect(() => setOpenError(""), [selectedFile?.path]);
+  const openOnDisk = (reveal: boolean) => {
+    if (!onDiskWorktree || !selectedFile) return;
+    invoke("open_review_file", { worktreePath: onDiskWorktree, path: selectedFile.path, reveal }).then(() => setOpenError("")).catch((error) => setOpenError(errorMessage(error)));
+  };
   // The parse is memoized so DiffLine objects keep their identity across
   // preference-driven re-renders; the token map is keyed by that identity.
   const hunks = useMemo(() => patch && !patch.binary ? parseHunks(patch.text) : [], [patch]);
-  const [selection, setSelection] = useState<{ displaySide: DisplaySide; anchor: number; focus: number } | null>(null);
+  const [selection, setSelection] = useState<PaneSelection | null>(null);
+  // A DOM text selection inside the patch (part of a line or across lines)
+  // offers itself as a comment target without disturbing row anchors.
+  const [textSelection, setTextSelection] = useState<TextSelectionRange | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const paneRef = useRef<HTMLElement | null>(null);
+  const gutterDragRef = useRef<{ side: DisplaySide } | null>(null);
+  const suppressRowClickRef = useRef(false);
   const patchPages = paginateHunks(hunks);
   const patchPage = Math.min(hunkPage, Math.max(0, patchPages.length - 1));
   const visibleHunks = patchPages[patchPage] ?? [];
   const split = diffPrefs.layout === "split";
   const whitespace = diffPrefs.whitespaceVisible;
   const commentsActive = comments.key !== null;
-  useEffect(() => { setSelection(null); }, [selectedFile?.path]);
+  useEffect(() => { setSelection(null); setTextSelection(null); }, [selectedFile?.path]);
+  useEffect(() => {
+    function read() { setTextSelection(textSelectionRange(paneRef.current)); }
+    document.addEventListener("selectionchange", read);
+    return () => document.removeEventListener("selectionchange", read);
+  }, []);
+  // A gutter drag ends wherever the pointer lifts; the click it would leave
+  // behind on the row is swallowed exactly once.
+  useEffect(() => {
+    function endDrag() {
+      if (gutterDragRef.current === null) return;
+      gutterDragRef.current = null;
+      suppressRowClickRef.current = true;
+      setDragging(false);
+    }
+    window.addEventListener("mouseup", endDrag);
+    return () => window.removeEventListener("mouseup", endDrag);
+  }, []);
   const normalized = selection ? { displaySide: selection.displaySide, start: Math.min(selection.anchor, selection.focus), end: Math.max(selection.anchor, selection.focus) } : null;
   const cardsFor: ReturnType<typeof inlineCards> = selectedFile ? inlineCards(comments, selectedFile.path, reversed) : new Map();
   const patchLines = hunks.flatMap((hunk) => hunk.lines);
   function selectRow(side: DisplaySide, number: number, extend: boolean) {
     setSelection((current) => extend && current && current.displaySide === side ? { displaySide: side, anchor: current.anchor, focus: number } : { displaySide: side, anchor: number, focus: number });
   }
+  function beginGutterDrag(side: DisplaySide, number: number) {
+    suppressRowClickRef.current = false;
+    gutterDragRef.current = { side };
+    setDragging(true);
+    setSelection({ displaySide: side, anchor: number, focus: number });
+  }
+  function extendDrag(side: DisplaySide, number: number) {
+    if (!gutterDragRef.current || gutterDragRef.current.side !== side) return;
+    setSelection((current) => current && current.displaySide === side ? { ...current, focus: number } : { displaySide: side, anchor: number, focus: number });
+  }
+  function rowClick(side: DisplaySide, number: number, extend: boolean) {
+    if (suppressRowClickRef.current) { suppressRowClickRef.current = false; return; }
+    // A live text selection means the user is copying code, not picking rows.
+    if (textSelection) return;
+    selectRow(side, number, extend);
+  }
+  function plusComment(side: DisplaySide, number: number) {
+    // Inside an existing same-side range the plus keeps the whole range;
+    // anywhere else it starts a single-line comment.
+    setSelection((current) => current && current.displaySide === side && number >= Math.min(current.anchor, current.focus) && number <= Math.max(current.anchor, current.focus)
+      ? { displaySide: side, anchor: Math.min(current.anchor, current.focus), focus: Math.max(current.anchor, current.focus) }
+      : { displaySide: side, anchor: number, focus: number });
+  }
   const inlineAfter = (side: DisplaySide, number: number | null) => {
     if (number === null) return null;
     const cards = cardsFor.get(`${side}:${number}`) ?? [];
-    return <>{cards.map(({ thread }) => <div className="inline-comment" key={thread.comment.id}><CommentThreadView thread={thread} status={comments.statuses[thread.comment.id] ?? null} comments={comments} /></div>)}{normalized && normalized.displaySide === side && number === normalized.end && selectedFile && <InlineCommentComposer selection={normalized} filePath={selectedFile.path} lines={patchLines} reversed={reversed} comments={comments} onDone={() => setSelection(null)} />}</>;
+    const composerHere = !dragging && selection !== null && normalized !== null && normalized.displaySide === side && number === normalized.end;
+    const chipHere = textSelection !== null && textSelection.displaySide === side && number === textSelection.end && !composerHere;
+    return <>{cards.map(({ thread }) => <div className="inline-comment" key={thread.comment.id}><CommentThreadView thread={thread} status={comments.statuses[thread.comment.id] ?? null} comments={comments} reversed={reversed} /></div>)}
+      {composerHere && selectedFile && <InlineCommentComposer selection={{ displaySide: selection.displaySide, start: normalized.start, end: normalized.end, excerpt: selection.excerpt }} filePath={selectedFile.path} lines={patchLines} reversed={reversed} comments={comments} onDone={() => setSelection(null)} />}
+      {chipHere && textSelection && <button className="selection-comment-chip" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => setSelection({ displaySide: textSelection.displaySide, anchor: textSelection.start, focus: textSelection.end, excerpt: textSelection.text })}>Comment on selection</button>}</>;
   };
-  const selectedClass = (side: DisplaySide, number: number | null) => normalized && normalized.displaySide === side && number !== null && number >= normalized.start && number <= normalized.end ? " comment-selected" : "";
+  const selectedClass = (side: DisplaySide, number: number | null) => {
+    if (number === null) return "";
+    if (normalized && normalized.displaySide === side && number >= normalized.start && number <= normalized.end) return " comment-selected";
+    if (textSelection && textSelection.displaySide === side && number >= textSelection.start && number <= textSelection.end) return " comment-selected";
+    return "";
+  };
   // Highlighting is progressive: lines paint as plain text immediately, and
   // token spans swap in once their whole hunk has been tokenized in the
   // worker (one hunk spans page slices coherently). Tokenization runs off
@@ -976,11 +1038,12 @@ function PatchPane({ selectedFile, patch, patchError, patchLoading, hunkPage, di
     return () => { cancelled = true; };
   }, [patch, patchPage, lang]);
   const tokensOf = (line: DiffLine) => tokenMap?.get(line);
-  return <section className="patch-pane" aria-label="File patch">{selectedFile && <div className="patch-heading"><code title={selectedFile.path}>{selectedFile.path}</code><span className="patch-heading-meta"><span>{selectedFile.status}</span>{comments.key && <button className="icon-button" type="button" aria-label="Comment on file" title="Comment on file" onClick={() => comments.openFileComposer(selectedFile.path)}><MessageSquare size={13} /></button>}</span></div>}{comments.composer?.kind === "file" && selectedFile && comments.composer.filePath === selectedFile.path && <div className="comment-composer-panel"><p className="eyebrow">Comment on {selectedFile.path}</p><DraftComposer placeholder={`Comment on ${selectedFile.path}`} submitLabel="Comment" onSubmit={({ body, severity }) => { void comments.create({ body, severity, file_path: selectedFile.path, side: null, start_line: null, end_line: null, lines: [] }).then(comments.closeComposer); }} onCancel={comments.closeComposer} /></div>}{patchLoading ? <div className="patch-skeleton" aria-label="Loading patch"><i /><i /><i /><i /></div> : patchError ? <Empty icon={<FileDiff size={24} />} title="Patch not rendered" detail={patchError} /> : !selectedFile ? <Empty icon={<FileDiff size={24} />} title="Select a changed file" detail="The patch is rendered one file at a time." /> : patch?.binary ? <Empty icon={<FileDiff size={24} />} title="Binary file changed" detail={selectedFile.path} /> : patch?.text === "" ? <Empty icon={<CircleDot size={24} />} title="No changes in this file" detail="The selected file has no renderable patch." /> : patchPages.length === 0 ? <pre className="patch-metadata"><code>{patch?.text}</code></pre> : <><div className={`hunk-list ${split ? "split-layout" : ""} ${diffPrefs.lineWrap ? "wrap-lines" : ""}`}>{visibleHunks.map((hunk, hunkIndex) => <div className="hunk" key={`${hunk.header}-${hunkIndex}`}><div className="hunk-header">{hunk.header}</div>{split ? <div className="split-rows">{pairHunkLines(hunk.lines).map((row, rowIndex) => <Fragment key={`${row.old?.oldLine}-${row.new?.newLine}-${rowIndex}`}>{row.old ? <DiffHalf side="LEFT" gutter={row.old.oldLine} text={row.old.text} whitespace={whitespace} tokens={tokensOf(row.old)} commentsActive={commentsActive} selected={selectedClass("LEFT", row.old.oldLine)} onSelect={selectRow} /> : <div className="diff-line half" />}{inlineAfter("LEFT", row.old?.oldLine ?? null)}{row.new ? <DiffHalf side="RIGHT" gutter={row.new.newLine} text={row.new.text} whitespace={whitespace} tokens={tokensOf(row.new)} commentsActive={commentsActive} selected={selectedClass("RIGHT", row.new.newLine)} onSelect={selectRow} /> : <div className="diff-line half" />}{inlineAfter("RIGHT", row.new?.newLine ?? null)}</Fragment>)}</div> : hunk.lines.map((line, lineIndex) => { const target = commentsActive ? selectableRow(line) : null; return <Fragment key={`${line.oldLine}-${line.newLine}-${lineIndex}`}><div className={`diff-line ${line.text.startsWith("+") ? "addition" : line.text.startsWith("-") ? "deletion" : ""}${target ? " commentable" : ""}${target ? selectedClass(target.side, target.number) : ""}`} onClick={target ? (event) => selectRow(target.side, target.number, event.shiftKey) : undefined}><span className="line-number">{line.oldLine ?? ""}</span><span className="line-number">{line.newLine ?? ""}</span><code>{diffLineContent(line.text, whitespace, tokensOf(line))}</code></div>{target && inlineAfter(target.side, target.number)}</Fragment>; })}</div>)}</div>{patchPages.length > 1 && <Pager label="Patch pages" page={patchPage} pages={patchPages.length} total={patchPages.length} size={1} pageLabel onPage={onHunkPage} />}</>}</section>;
+  return <section ref={paneRef} className="patch-pane" aria-label="File patch">{selectedFile && <div className="patch-heading"><code title={selectedFile.path}>{selectedFile.path}</code><span className="patch-heading-meta"><span>{selectedFile.status}</span>{onDiskWorktree && <><button className="icon-button" type="button" aria-label="Open file" title="Open file" onClick={() => openOnDisk(false)}><ExternalLink size={13} /></button><button className="icon-button" type="button" aria-label="Reveal in file explorer" title="Reveal in file explorer" onClick={() => openOnDisk(true)}><FolderOpen size={13} /></button></>}{comments.key && <button className="icon-button" type="button" aria-label="Comment on file" title="Comment on file" onClick={() => comments.openFileComposer(selectedFile.path)}><MessageSquare size={13} /></button>}</span></div>}{openError && <p className="patch-open-error" role="status">{openError}</p>}{comments.composer?.kind === "file" && selectedFile && comments.composer.filePath === selectedFile.path && <div className="comment-composer-panel"><p className="eyebrow">Comment on {selectedFile.path}</p><DraftComposer placeholder={`Comment on ${selectedFile.path}`} submitLabel="Comment" onSubmit={({ body, severity }) => { void comments.create({ body, severity, file_path: selectedFile.path, side: null, start_line: null, end_line: null, lines: [] }).then(comments.closeComposer); }} onCancel={comments.closeComposer} /></div>}{patchLoading ? <div className="patch-skeleton" aria-label="Loading patch"><i /><i /><i /><i /></div> : patchError ? <Empty icon={<FileDiff size={24} />} title="Patch not rendered" detail={patchError} /> : !selectedFile ? <Empty icon={<FileDiff size={24} />} title="Select a changed file" detail="The patch is rendered one file at a time." /> : patch?.binary ? <Empty icon={<FileDiff size={24} />} title="Binary file changed" detail={selectedFile.path} /> : patch?.text === "" ? <Empty icon={<CircleDot size={24} />} title="No changes in this file" detail="The selected file has no renderable patch." /> : patchPages.length === 0 ? <pre className="patch-metadata"><code>{patch?.text}</code></pre> : <><div className={`hunk-list ${split ? "split-layout" : ""} ${diffPrefs.lineWrap ? "wrap-lines" : ""}`}>{visibleHunks.map((hunk, hunkIndex) => <div className="hunk" key={`${hunk.header}-${hunkIndex}`}><div className="hunk-header">{hunk.header}</div>{split ? <div className="split-rows">{pairHunkLines(hunk.lines).map((row, rowIndex) => <Fragment key={`${row.old?.oldLine}-${row.new?.newLine}-${rowIndex}`}>{row.old ? <DiffHalf side="LEFT" gutter={row.old.oldLine} text={row.old.text} whitespace={whitespace} tokens={tokensOf(row.old)} commentsActive={commentsActive} selected={selectedClass("LEFT", row.old.oldLine)} onRowClick={rowClick} onGutterDown={beginGutterDrag} onEnter={extendDrag} onPlus={plusComment} /> : <div className="diff-line half" />}{inlineAfter("LEFT", row.old?.oldLine ?? null)}{row.new ? <DiffHalf side="RIGHT" gutter={row.new.newLine} text={row.new.text} whitespace={whitespace} tokens={tokensOf(row.new)} commentsActive={commentsActive} selected={selectedClass("RIGHT", row.new.newLine)} onRowClick={rowClick} onGutterDown={beginGutterDrag} onEnter={extendDrag} onPlus={plusComment} /> : <div className="diff-line half" />}{inlineAfter("RIGHT", row.new?.newLine ?? null)}</Fragment>)}</div> : hunk.lines.map((line, lineIndex) => { const target = commentsActive ? selectableRow(line) : null; return <Fragment key={`${line.oldLine}-${line.newLine}-${lineIndex}`}><div className={`diff-line ${line.text.startsWith("+") ? "addition" : line.text.startsWith("-") ? "deletion" : ""}${target ? " commentable" : ""}${target ? selectedClass(target.side, target.number) : ""}`} data-side={target?.side} data-line={target?.number} onClick={target ? (event) => rowClick(target.side, target.number, event.shiftKey) : undefined} onMouseEnter={target ? () => extendDrag(target.side, target.number) : undefined}><span className="line-number" onMouseDown={target ? (event) => { event.preventDefault(); beginGutterDrag(target.side, target.number); } : undefined}>{line.oldLine ?? ""}</span><span className="line-number" onMouseDown={target ? (event) => { event.preventDefault(); beginGutterDrag(target.side, target.number); } : undefined}>{line.newLine ?? ""}</span><code>{diffLineContent(line.text, whitespace, tokensOf(line))}</code>{target && <button type="button" className="comment-plus" aria-label={`Comment on ${target.side === "LEFT" ? "old" : "new"} line ${target.number}`} title="Add comment" onMouseDown={(event) => event.preventDefault()} onClick={(event) => { event.stopPropagation(); plusComment(target.side, target.number); }}>+</button>}</div>{target && inlineAfter(target.side, target.number)}</Fragment>; })}</div>)}</div>{patchPages.length > 1 && <Pager label="Patch pages" page={patchPage} pages={patchPages.length} total={patchPages.length} size={1} pageLabel onPage={onHunkPage} />}</>}</section>;
 }
 
-function DiffHalf({ side, gutter, text, whitespace, tokens, commentsActive, selected, onSelect }: { side: DisplaySide; gutter: number | null; text: string; whitespace: boolean; tokens?: TokenLine; commentsActive: boolean; selected: string; onSelect: (side: DisplaySide, number: number, extend: boolean) => void }) {
-  return <div className={`diff-line half ${text.startsWith("+") ? "addition" : text.startsWith("-") ? "deletion" : ""}${commentsActive ? " commentable" : ""}${selected}`} onClick={commentsActive && gutter !== null ? (event) => onSelect(side, gutter, event.shiftKey) : undefined}><span className="line-number">{gutter ?? ""}</span><code>{diffLineContent(text, whitespace, tokens)}</code></div>;
+function DiffHalf({ side, gutter, text, whitespace, tokens, commentsActive, selected, onRowClick, onGutterDown, onEnter, onPlus }: { side: DisplaySide; gutter: number | null; text: string; whitespace: boolean; tokens?: TokenLine; commentsActive: boolean; selected: string; onRowClick: (side: DisplaySide, number: number, extend: boolean) => void; onGutterDown: (side: DisplaySide, number: number) => void; onEnter: (side: DisplaySide, number: number) => void; onPlus: (side: DisplaySide, number: number) => void }) {
+  const target = commentsActive && gutter !== null;
+  return <div className={`diff-line half ${text.startsWith("+") ? "addition" : text.startsWith("-") ? "deletion" : ""}${target ? " commentable" : ""}${selected}`} data-side={target ? side : undefined} data-line={target ? gutter : undefined} onClick={target ? (event) => onRowClick(side, gutter, event.shiftKey) : undefined} onMouseEnter={target ? () => onEnter(side, gutter) : undefined}><span className="line-number" onMouseDown={target ? (event) => { event.preventDefault(); onGutterDown(side, gutter); } : undefined}>{gutter ?? ""}</span><code>{diffLineContent(text, whitespace, tokens)}</code>{target && <button type="button" className="comment-plus" aria-label={`Comment on ${side === "LEFT" ? "old" : "new"} line ${gutter}`} title="Add comment" onMouseDown={(event) => event.preventDefault()} onClick={(event) => { event.stopPropagation(); onPlus(side, gutter); }}>+</button>}</div>;
 }
 
 function DiffToggles({ settings, onChange }: { settings: Settings; onChange: (next: Settings) => void }) {
