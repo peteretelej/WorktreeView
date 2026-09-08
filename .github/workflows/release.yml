@@ -53,7 +53,9 @@ jobs:
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        timeout-minutes: 2
+        # The timeout also covers the post-build cache save, which is the
+        # slow half on Windows' multi-gigabyte target directory.
+        timeout-minutes: 15
         with:
           workspaces: src-tauri
           key: ${{ matrix.args }}
