@@ -183,6 +183,33 @@ type TextSelectionRange = { displaySide: DisplaySide; start: number; end: number
 // composer receives it normalized to start/end with any excerpt attached.
 type PaneSelection = { displaySide: DisplaySide; anchor: number; focus: number; excerpt?: string };
 
+// The excerpt is read from the range rather than selection.toString():
+// the floating Comment chip is inserted inside the end row, so the live
+// range can expand over its label and toString() would quote it. Rows are
+// the excerpt's line units; chip text never counts as selected.
+function rangeExcerpt(range: Range): string {
+  const slice = (node: Text): string => {
+    let value = node.nodeValue ?? "";
+    if (node === range.startContainer) value = value.slice(range.startOffset);
+    if (node === range.endContainer) value = value.slice(0, node === range.startContainer ? range.endOffset - range.startOffset : range.endOffset);
+    return value;
+  };
+  const root = range.commonAncestorContainer;
+  if (root.nodeType === Node.TEXT_NODE) return slice(root as Text);
+  const texts: string[] = [];
+  let lastRow: Element | null = null;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!range.intersectsNode(node)) continue;
+    if (node.parentElement?.closest(".selection-comment-chip")) continue;
+    const row = node.parentElement?.closest(".diff-line") ?? null;
+    if (row !== null && row !== lastRow && texts.length > 0) texts.push("\n");
+    texts.push(slice(node as Text));
+    lastRow = row;
+  }
+  return texts.join("");
+}
+
 function textSelectionRange(pane: HTMLElement | null): TextSelectionRange | null {
   const selection = document.getSelection();
   if (!pane || !selection || selection.isCollapsed || selection.rangeCount === 0) return null;
@@ -195,7 +222,7 @@ function textSelectionRange(pane: HTMLElement | null): TextSelectionRange | null
   const start = Number(startRow.dataset.line);
   const end = Number(endRow.dataset.line);
   if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  return { displaySide: startRow.dataset.side as DisplaySide, start: Math.min(start, end), end: Math.max(start, end), text: selection.toString().slice(0, 2000) };
+  return { displaySide: startRow.dataset.side as DisplaySide, start: Math.min(start, end), end: Math.max(start, end), text: rangeExcerpt(range).slice(0, 2000) };
 }
 
 function paginateHunks(hunks: ParsedHunk[]) {  const pages: RenderedHunk[][] = [];

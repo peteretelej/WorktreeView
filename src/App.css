@@ -1621,7 +1621,7 @@ button:disabled {
 .diff-line { position: relative; }
 .diff-line.commentable { cursor: text; }
 .diff-line.comment-selected { outline: 1px solid var(--primary); outline-offset: -1px; }
-.selection-comment-chip { position: absolute; top: 100%; left: 93px; z-index: 5; padding: 2px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--elevated); color: var(--foreground); cursor: pointer; font: 11px/1.4 var(--font-sans); box-shadow: var(--shadow-dropdown); }
+.selection-comment-chip { position: absolute; top: 100%; left: 93px; z-index: 5; padding: 2px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--elevated); color: var(--foreground); cursor: pointer; font: 11px/1.4 var(--font-sans); user-select: none; -webkit-user-select: none; box-shadow: var(--shadow-dropdown); }
 .selection-comment-chip:hover { border-color: var(--primary); color: var(--primary); }
 .patch-heading-meta { display: inline-flex; align-items: center; gap: 8px; }
 .patch-open-error { margin: 8px 14px 0; padding: 6px 8px; border: 1px solid var(--danger); border-radius: 5px; background: var(--danger-soft); color: var(--foreground); font-size: 11px; }
