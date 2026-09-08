@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { filterGoneSurfaces, pinnedSurfaces, recentWorktrees, reviewFileRoot, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces.ts";
+import { filterGoneSurfaces, pinnedSurfaces, reviewFileRoot, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces.ts";
 import type { ChangedFile, GoneSurface, ReviewTarget } from "./navigation.ts";
 
 function goneSurface(overrides: Partial<GoneSurface> & { identity_key: string }): GoneSurface {
@@ -90,32 +90,6 @@ test("remote branch rows read as origin/name and gone labels stay short", () => 
 test("worktree keys normalize separators for pin comparison", () => {
   assert.equal(worktreeKey("C:\\repos\\demo"), worktreeKey("C:/repos/demo"));
   assert.equal(worktreeKey("/tmp/repo"), "/tmp/repo");
-});
-
-test("recent worktrees cap at the newest commits, skip pinned, and sink unknown dates", () => {
-  const worktrees = [
-    { path: "/wt/old", branch: "refs/heads/old", head: "a" },
-    { path: "/wt/pinned", branch: "refs/heads/pinned", head: "b" },
-    { path: "/wt/new", branch: "refs/heads/new", head: "c" },
-    { path: "/wt/detached", branch: "detached-head", head: "d" },
-    { path: "/wt/mid", branch: "refs/heads/mid", head: "e" },
-  ];
-  const dates = new Map([
-    ["refs/heads/old", 100],
-    ["refs/heads/pinned", 200],
-    ["refs/heads/new", 900],
-    ["refs/heads/mid", 500],
-  ]);
-  const recent = recentWorktrees(worktrees, dates, new Set([worktreeKey("/wt/pinned")]), 3);
-  assert.deepEqual(
-    recent.map((worktree) => worktree.path),
-    ["/wt/new", "/wt/mid", "/wt/old"],
-  );
-  // An empty inventory (not loaded yet) keeps list order under the cap.
-  assert.deepEqual(
-    recentWorktrees(worktrees, new Map(), new Set(), 2).map((worktree) => worktree.path),
-    ["/wt/old", "/wt/pinned"],
-  );
 });
 
 test("open-on-disk root prefers the owning checkout and falls back to the repo", () => {

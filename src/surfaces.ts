@@ -102,19 +102,6 @@ export function filterGoneSurfaces(surfaces: GoneSurface[], query: string): Gone
   return surfaces.filter((surface) => surface.label.toLowerCase().includes(needle) || surface.detail.toLowerCase().includes(needle));
 }
 
-// Sidebar children are capped: pinned surfaces stay explicit and everything
-// else shows the most recently committed worktrees. Worktrees on branches
-// with unknown dates (detached HEAD, inventory not loaded yet) keep their
-// list order behind dated ones.
-export function recentWorktrees(worktrees: Worktree[], dateByBranch: Map<string, number>, pinnedKeys: ReadonlySet<string>, limit: number): Worktree[] {
-  return worktrees
-    .filter((worktree) => !pinnedKeys.has(worktreeKey(worktree.path)))
-    .map((worktree, index) => ({ worktree, index, date: dateByBranch.get(worktree.branch) ?? 0 }))
-    .sort((left, right) => right.date - left.date || left.index - right.index)
-    .slice(0, limit)
-    .map((entry) => entry.worktree);
-}
-
 // Open/reveal only needs a plausible checkout root; the backend re-validates
 // the joined path at click time and refuses a missing file, so existence is
 // never probed at render. Prefer the checkout that owns the reviewed

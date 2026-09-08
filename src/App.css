@@ -935,13 +935,6 @@ h2 {
   min-width: 0;
 }
 
-/* The centered 22px copy button floats its small glyph away from the hash
-   and the next label; hug both here. */
-.commit-hash .copy-button {
-  width: 16px;
-  height: 16px;
-}
-
 .worktree-row:hover .copy-button.ghost,
 .worktree-row:focus-within .copy-button.ghost,
 .commit-row:hover .copy-button.ghost,
@@ -1382,6 +1375,7 @@ button:disabled {
 .scope-fixed { display: inline-flex; height: 29px; align-items: center; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--muted); font-size: 10px; }
 .review-status { display: flex; width: 100%; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
 .review-counts, .review-identity { color: var(--muted); font-size: 11px; }
+.review-identity { display: inline-flex; gap: 12px; }
 .review-body { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: 300px minmax(0, 1fr); }
 .file-index { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--border); background: var(--surface); }
 .pane-heading { display: flex; height: 36px; flex: none; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }

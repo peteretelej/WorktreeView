@@ -5,12 +5,12 @@
   remote-tracking ref exists, and a gone worktree reads as its worktree
   folder name rather than its branch, so a deleted worktree checked out on
   main does not masquerade as the main branch. The rest of the sidebar stays
-  capped: unpinned
-  children show only the most recently committed worktrees, so a repo with
-  dozens of agent worktrees and hundreds of branches keeps the group
-  scannable; everything else (all local and remote branches, and months of
-  disappeared surfaces in a searchable Archived tab) lives on the project
-  overview, reachable from the group's "All worktrees & branches" link.
+  quiet: unpinned children show only the repository's current checkout, so a
+  repo with dozens of agent worktrees and hundreds of branches keeps the
+  group scannable; everything else (all local and remote branches, and
+  months of disappeared surfaces in a searchable Archived tab) lives on the
+  project overview, reachable from the group's "All worktrees & branches"
+  link.
 - Opening a project lands on its overview, not a bare history surface. The
   header answers "what is this project": copyable chips for the project path,
   origin remote (or local-only), and default branch. A filter row with tabs

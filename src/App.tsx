@@ -10,7 +10,7 @@ import { SettingsPage, applyTheme, defaultSettings, getSettings, persistSettings
 import { DEFAULT_ZOOM, snapZoom, stepZoom, zoomShortcut } from "./zoom";
 import { hunksWithExpandedGaps, pairHunkLines, parseHunkHeader, patchGaps, splitFileLines, type DiffLine, type PatchGap } from "./diff";
 import { hunkSideSources, languageForPath, splitWhitespace, tokenizeHunk, type HighlightToken, type TokenLine } from "./highlight";
-import { filterGoneSurfaces, goneSurfaceLabel, pinnedSurfaces, recentWorktrees, reviewFileRoot, surfacePinIndex, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces";
+import { filterGoneSurfaces, goneSurfaceLabel, pinnedSurfaces, reviewFileRoot, surfacePinIndex, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces";
 import { CommentStream, CommentThreadView, DraftComposer, InlineCommentComposer, inlineCards, selectableRow, useReviewComments, type CommentsApi } from "./comments.tsx";
 import { ReviewsStrip } from "./canvas.tsx";
 import { copyText } from "./clipboard";
@@ -49,7 +49,6 @@ const PATCH_CACHE_LIMIT = 32;
 const FILE_CONTENT_CACHE_LIMIT = 8;
 // Sidebar children stay scannable: pinned surfaces plus the most recently
 // committed worktrees; everything else lives on the project overview.
-const SIDEBAR_WORKTREE_LIMIT = 6;
 const OVERVIEW_TABS: Array<{ id: OverviewTab; label: string; filter: string; pager: string; pageSize: number }> = [
   { id: "worktrees", label: "Worktrees", filter: "Filter worktrees", pager: "Worktree pages", pageSize: WORKTREE_PAGE_SIZE },
   { id: "branches", label: "Branches", filter: "Filter branches", pager: "Branch pages", pageSize: BRANCH_PAGE_SIZE },
@@ -868,10 +867,13 @@ function App() {
   // Children stay capped: pinned surfaces first, then the most recently
   // committed worktrees. Unpinned branches and archived surfaces live on
   // the project overview instead of growing the sidebar without bound.
-  const dateByBranch = new Map((inventories[repo.path]?.branches ?? []).map((branch) => [branch.ref_name, branch.commit_date]));
   const pinnedWorktrees = new Set(listing.pinned.filter((pin) => pin.kind === "worktree").map((pin) => worktreeKey(pin.identity_key)));
-  const activeWorktrees = recentWorktrees(repo.worktrees, dateByBranch, pinnedWorktrees, SIDEBAR_WORKTREE_LIMIT);
-  return <>{pinned.map(surfaceRow)}{activeWorktrees.map((worktree) => surfaceRow({ kind: "worktree", identityKey: worktree.path, label: shortToken(worktree.branch), startRef: null, worktreePath: worktree.path, pinnedAt: null, gone: false }))}<button className="sidebar-link-row" type="button" onClick={() => activateRepo(repo)}><ListTree size={12} /><span>All worktrees &amp; branches</span></button></>;
+  // Children stay quiet: pinned surfaces plus the repository's current
+  // checkout; every other branch and worktree lives on the project overview.
+  const currentWorktree = repo.path === activeRepoPath
+    ? repo.worktrees.find((worktree) => worktree.path === selectedWorktreePath)
+    : undefined;
+  return <>{pinned.map(surfaceRow)}{currentWorktree && !pinnedWorktrees.has(worktreeKey(currentWorktree.path)) && surfaceRow({ kind: "worktree", identityKey: currentWorktree.path, label: shortToken(currentWorktree.branch), startRef: null, worktreePath: currentWorktree.path, pinnedAt: null, gone: false })}<button className="sidebar-link-row" type="button" onClick={() => activateRepo(repo)}><ListTree size={12} /><span>All worktrees &amp; branches</span></button></>;
 };
   const statusMessage = loadError || (loading ? "Loading repositories..." : hydrating ? "Loading worktrees..." : ""); const searchPageCount = Math.max(1, Math.ceil(matchingResults.length / SEARCH_PAGE_SIZE)); const visibleSearchPage = Math.min(searchPage, searchPageCount - 1); const visibleSearchResults = matchingResults.slice(visibleSearchPage * SEARCH_PAGE_SIZE, (visibleSearchPage + 1) * SEARCH_PAGE_SIZE);
   const statusByPath: Record<string, number | null> = {};
