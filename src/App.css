@@ -652,19 +652,14 @@ kbd {
 
 .stat-value {
   color: var(--foreground);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 650;
   letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
 }
 
 .stat-value .warn-count {
   color: var(--warn);
-}
-
-.stat-unit {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 500;
 }
 
 .stat-label {
@@ -710,7 +705,7 @@ h2 {
 .table-header,
 .worktree-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1.3fr) minmax(170px, 1fr) minmax(170px, auto);
+  grid-template-columns: minmax(220px, 1.4fr) minmax(160px, auto) minmax(200px, 1fr);
   gap: 12px;
   align-items: center;
 }
@@ -893,7 +888,7 @@ h2 {
 .status-cell {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 6px;
   flex-wrap: wrap;
 }
@@ -944,7 +939,7 @@ h2 {
     grid-template-columns: minmax(0, 1fr) minmax(150px, auto);
   }
 
-  .table-header span:nth-child(2),
+  .table-header span:nth-child(3),
   .last-commit-cell {
     display: none;
   }
@@ -1242,15 +1237,6 @@ button:disabled {
   }
 
   .table-header {
-    display: none;
-  }
-
-  .worktree-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 7px 12px;
-  }
-
-  .status-cell {
     display: none;
   }
 }
