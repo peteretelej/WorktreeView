@@ -186,6 +186,7 @@ code,
   display: flex;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   flex-direction: column;
   border-right: 1px solid var(--border);
   background: var(--surface);
@@ -644,45 +645,6 @@ kbd {
   line-height: 1.45;
 }
 
-.stats-strip {
-  display: flex;
-  margin: 0 20px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  overflow-x: auto;
-}
-
-.stat {
-  min-width: 120px;
-  padding: 10px 16px;
-}
-
-.stat + .stat {
-  border-left: 1px solid var(--border);
-}
-
-.stat-value {
-  color: var(--foreground);
-  font-size: 16px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  font-variant-numeric: tabular-nums;
-}
-
-.stat-value .warn-count {
-  color: var(--warn);
-}
-
-.stat-label {
-  margin-top: 1px;
-  color: var(--muted);
-  font-size: 9px;
-  font-weight: 650;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 .eyebrow {
   margin: 0 0 3px;
   color: var(--muted);
@@ -973,6 +935,13 @@ h2 {
   min-width: 0;
 }
 
+/* The centered 22px copy button floats its small glyph away from the hash
+   and the next label; hug both here. */
+.commit-hash .copy-button {
+  width: 16px;
+  height: 16px;
+}
+
 .worktree-row:hover .copy-button.ghost,
 .worktree-row:focus-within .copy-button.ghost,
 .commit-row:hover .copy-button.ghost,
@@ -1062,10 +1031,6 @@ h2 {
   .table-header span:nth-child(3),
   .last-commit-cell {
     display: none;
-  }
-
-  .stats-strip {
-    flex-wrap: wrap;
   }
 
   .overview-filter {

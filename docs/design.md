@@ -13,10 +13,9 @@
   overview, reachable from the group's "All worktrees & branches" link.
 - Opening a project lands on its overview, not a bare history surface. The
   header answers "what is this project": copyable chips for the project path,
-  origin remote (or local-only), and default branch, above a stats strip
-  (worktree count, total uncommitted changes, branches ahead of their base,
-  branch counts). A filter row with tabs (Worktrees, Branches, Remote,
-  Archived) plus a search input scopes the inventory directly on the page.
+  origin remote (or local-only), and default branch. A filter row with tabs
+  (Worktrees, Branches, Remote, Archived) carrying per-tab inventory counts,
+  plus a search input, scopes the inventory directly on the page.
   The worktree tab (main worktree first) shows each worktree's branch, path,
   last commit (subject, author, age), and status chips: the changed chip
   opens the working-changes view, the ahead/behind chip opens the committed
