@@ -1597,23 +1597,28 @@ button:disabled {
 .composer-preview { min-height: 84px; max-height: 360px; overflow-y: auto; padding: 8px 10px; border: 1px dashed var(--border); border-radius: 5px; background: var(--background); }
 .composer-preview-empty { margin: 0; color: var(--muted); font-size: 11px; }
 .comment-composer-actions { display: flex; align-items: center; gap: 6px; }
-.comment-composer-actions select { height: 24px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--foreground); font-size: 10px; }
+.severity-picker { display: inline-flex; height: 24px; flex: none; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.severity-picker button { padding: 0 8px; border: 0; border-right: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
+.severity-picker button:last-child { border-right: 0; }
+.severity-picker button:hover { color: var(--foreground); }
+.severity-picker button.active { background: var(--primary-soft); color: var(--foreground); }
 .composer-hint { margin-right: auto; color: var(--muted); font-size: 9px; white-space: nowrap; }
 .composer-hint kbd { padding: 0 3px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 3px; background: var(--surface-2); font: 9px var(--font-mono); }
+.comment-composer-actions .primary-button, .comment-composer-actions .secondary-button { flex: none; width: auto; margin-top: 0; }
 .comment-composer-panel { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); box-shadow: var(--shadow-dropdown); }
-.comment-composer-panel.inline { margin: 4px 0 8px 93px; }
+.comment-composer-panel.inline { max-width: 640px; margin: 4px 0 8px 93px; }
 .comment-composer-panel .eyebrow { margin: 0; }
-.inline-comment { margin: 2px 0 6px 93px; }
+.inline-comment { max-width: 640px; margin: 2px 0 6px 93px; }
 
-/* Selection affordances on diff rows: the plus sits over the first gutter
-   cell on hover, and a text selection gets its own comment entry chip. */
+/* Selection affordances on diff rows: comments start only from explicit
+   intent (the row context menu, or the quiet chip after a text selection);
+   plain clicks and drags stay reading gestures. */
 .diff-line { position: relative; }
-.diff-line.commentable { cursor: pointer; }
+.diff-line.commentable { cursor: text; }
 .diff-line.comment-selected { outline: 1px solid var(--primary); outline-offset: -1px; }
-.comment-plus { position: absolute; top: 0; bottom: 0; left: 0; display: none; width: 42px; align-items: center; justify-content: center; border: 0; border-radius: 4px 0 0 4px; background: var(--primary); color: var(--brand-foreground); cursor: pointer; font: 600 13px/1 var(--font-mono); z-index: 1; }
-.diff-line.commentable:hover .comment-plus { display: flex; }
-.selection-comment-chip { align-self: flex-start; margin: 4px 0 8px 93px; padding: 3px 11px; border: 1px solid var(--primary); border-radius: 999px; background: var(--primary-soft); color: var(--foreground); cursor: pointer; font-size: 11px; box-shadow: var(--shadow-dropdown); }
-.selection-comment-chip:hover { background: var(--primary); color: var(--brand-foreground); }
+.selection-comment-chip { align-self: flex-start; margin: 4px 0 8px 93px; padding: 2px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--elevated); color: var(--foreground); cursor: pointer; font-size: 11px; box-shadow: var(--shadow-dropdown); }
+.selection-comment-chip:hover { border-color: var(--primary); color: var(--primary); }
+.diff-context-menu { position: fixed; z-index: 80; top: auto; right: auto; width: max-content; min-width: 180px; }
 .patch-heading-meta { display: inline-flex; align-items: center; gap: 8px; }
 .patch-open-error { margin: 8px 14px 0; padding: 6px 8px; border: 1px solid var(--danger); border-radius: 5px; background: var(--danger-soft); color: var(--foreground); font-size: 11px; }
 

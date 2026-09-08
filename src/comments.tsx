@@ -197,9 +197,9 @@ export function DraftComposer({ placeholder, submitLabel, initialBody = "", onSu
   return <div className="comment-composer">
     <MarkdownComposer value={body} onChange={setBody} placeholder={placeholder} autoFocus onSubmit={() => { if (body.trim() !== "") onSubmit({ body, severity: severity === "" ? null : severity }); }} onCancel={onCancel} />
     <div className="comment-composer-actions">
-      <select aria-label="Comment severity" value={severity} onChange={(event) => setSeverity(event.currentTarget.value as CommentSeverity | "")}>
-        {severityOptions().map((option) => <option key={option || "none"} value={option}>{option === "" ? "No severity" : option}</option>)}
-      </select>
+      <div className="severity-picker" role="radiogroup" aria-label="Comment severity">
+        {severityOptions().map((option) => <button key={option || "none"} type="button" role="radio" aria-checked={severity === option} className={severity === option ? "active" : ""} onClick={() => setSeverity(option)}>{option === "" ? "None" : option}</button>)}
+      </div>
       <span className="composer-hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
       <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
       <button className="primary-button" type="button" disabled={body.trim() === ""} onClick={() => onSubmit({ body, severity: severity === "" ? null : severity })}>{submitLabel}</button>

@@ -77,11 +77,16 @@ describe("desktop comments", () => {
     await fileRow.click();
     await expect($('code[title="reviewed.txt"]')).toBeDisplayed();
 
-    // Select the added line in the diff; the inline composer opens on the
-    // selection and posts a comment anchored to that line.
+    // Select the added line in the diff. A plain click only highlights the
+    // row; the context menu is the explicit entry point that opens the
+    // inline composer anchored to that line.
     const addedRow = await $('//div[contains(@class, "diff-line")][contains(@class, "addition")][contains(., "line two changed")]');
     await expect(addedRow).toBeDisplayed();
     await addedRow.click();
+    await addedRow.click({ button: "right" });
+    const menuEntry = await $('div[role="menu"] button[role="menuitem"]');
+    await menuEntry.waitForDisplayed();
+    await menuEntry.click();
     const composer = await $('textarea[aria-label="Add comment"]');
     await composer.waitForDisplayed();
     const body = "e2e says hello";

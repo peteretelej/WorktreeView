@@ -67,13 +67,13 @@
   or agents, and the merged comment stream filters by author. Comments are
   created by selecting a line or range in the diff, with review-level and
   file-level entry points always available.
-- Anchoring a range is keyboard-and-pointer friendly: click selects a line,
-  shift-click or a gutter drag extends it to a range, and a plus affordance
-  in the gutter opens the composer on the hovered line (keeping a range
-  that already contains it). Selecting text inside the diff never changes
-  the row anchors; instead a "Comment on selection" chip opens the
-  composer on the covered rows with the selected text pre-filled as a
-  quoted excerpt, so part of a line comments like a line does.
+- Anchoring stays a reading-first gesture: click selects a line, shift-click
+  or a gutter drag extends it to a range, and selecting text never disturbs
+  the row anchors. The composer opens only on explicit intent: right-click
+  a diff row to comment on the line, the highlighted range, or the live
+  text selection, or click the quiet chip that follows a text selection,
+  which pre-fills the selected text as a quoted excerpt, so part of a line
+  comments like a line does.
 - Comments are markdown end to end: the composer has a formatting toolbar,
   Ctrl+B/I/E/K shortcuts (bold, italics, code, link), a preview tab, and
   Ctrl+Enter submit; bodies render through the same sanitized renderer for
