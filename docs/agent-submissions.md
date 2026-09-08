@@ -2,10 +2,9 @@
 
 Agents deliver review output to WorktreeView as submissions: ordered typed
 sections, static html blocks, and findings that surface as ordinary agent
-comments. This page is the client contract for the submission schema as of
-this phase; the delivery transport (discovery file, `post_review` JSON-RPC
-method, arrival cue) is documented under [Delivery](#delivery) and lands
-with the loopback endpoint.
+comments. This page is the client contract for the submission schema and
+the delivery transport (discovery file, `post_review` JSON-RPC method,
+arrival cue) as of this phase.
 
 ## Submission schema
 
@@ -88,6 +87,88 @@ separates agent authors.
 
 ## Delivery
 
-Delivery transport is not part of this contract yet: the loopback
-endpoint, its bearer token, the discovery file, the `post_review` method,
-and the arrival cue land with the endpoint work.
+Agents deliver submissions over JSON-RPC 2.0 to an HTTP endpoint served
+inside the WorktreeView process. The listener binds `127.0.0.1` on an
+ephemeral port; nothing is reachable from outside the machine.
+
+### Discovery
+
+After a successful bind the app writes `agent-endpoint.json` into its app
+data directory (Linux `$XDG_DATA_HOME/com.etelej.worktreeview`, macOS
+`~/Library/Application Support/com.etelej.worktreeview`, Windows
+`%APPDATA%\com.etelej.worktreeview`):
+
+```json
+{ "port": 54321, "token": "<64 lowercase hex chars>" }
+```
+
+The token is 32 random bytes hex-encoded, generated fresh per boot and
+never persisted across restarts. Clients read the discovery file on
+startup and re-read it whenever the endpoint refuses their token.
+
+### Calling post_review
+
+POST to `http://127.0.0.1:<port>/` with an `Authorization: Bearer <token>`
+header and a JSON-RPC 2.0 request whose `params` combine the review
+identity fields with the submission schema above:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "post_review",
+  "params": {
+    "repo_path": "/repos/demo",
+    "base_sha": "3f2a...",
+    "target_key": "/repos/demo",
+    "target_kind": "worktree",
+    "agent_name": "my-agent",
+    "agent_model": "model-id",
+    "command_context": null,
+    "sections": [{ "kind": "brief", "title": "Summary", "body": "All good." }],
+    "findings": []
+  }
+}
+```
+
+`target_kind` is `"worktree"` (`target_key` is then the worktree path) or
+`"head"` (`target_key` is then the resolved target SHA). `base_sha` is the
+resolved base the review keys on. Unknown fields are rejected anywhere in
+`params`, as in the schema.
+
+Delivery is synchronous: a successful response returns the submission id
+after the submission and its finding comments are stored, and the app
+announces the arrival with a visible cue naming the agent.
+
+```json
+{ "jsonrpc": "2.0", "id": 1, "result": { "submission_id": 12 } }
+```
+
+### Errors
+
+Error responses carry `{ "code", "message" }`:
+
+| Code | Meaning |
+| --- | --- |
+| `-32700` | the body is not valid JSON |
+| `-32600` | the request is not JSON-RPC 2.0 |
+| `-32601` | method other than `post_review` (the endpoint is write-only v0) |
+| `-32602` | invalid params or submission-shape violation (store message passes through) |
+| `-32603` | internal error, such as a storage failure |
+| `-32001` | missing or wrong bearer token |
+| `-32002` | unknown review target: `repo_path` has no open repository |
+| `-32003` | request body exceeds the 3 MiB transport guard |
+
+HTTP status mirrors the transport-level outcomes: 401 for auth failures
+and 413 for oversized bodies, both with a JSON-RPC body; non-POST methods
+get 405 and unknown paths 404 with short plain-text bodies. All
+JSON-RPC-framed outcomes otherwise use 200.
+
+### Size caps and stale tokens
+
+The schema's ingest caps are authoritative; the transport adds only a
+coarse 3 MiB pre-parse guard, so a schema-legal submission is never
+transport-rejected. A 401 means the token no longer matches this boot:
+the app restarted or another instance owns the discovery file. Re-read
+the discovery file and retry with the fresh token; connection refusal
+simply means the app is not running.

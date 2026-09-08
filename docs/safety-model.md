@@ -36,10 +36,19 @@ repository cannot mutate it or execute code it defines.
 - Review computations make no network requests; inspection commands spawn
   with `GIT_NO_LAZY_FETCH`, so reading a repository can never pull objects
   from a remote.
-- The fetch above is the single deliberate network operation: it contacts
-  only the repository's own configured remotes, exactly as the user's Git
-  would from a terminal, with a wider 60 second deadline for slow links.
-  Remote and SSH review are still not implemented; they wait until their
+- The refresh fetch is the single deliberate outbound network operation: it
+  contacts only the repository's own configured remotes, exactly as the
+  user's Git would from a terminal, with a wider 60 second deadline for
+  slow links.
+- The app accepts agent submissions on a loopback-only, token-gated
+  endpoint inside the app process: it binds 127.0.0.1 only,
+  authenticates with a per-boot bearer token published to a discovery
+  file in the app data directory, and serves one write-only method
+  (`post_review`). See [agent-submissions.md](agent-submissions.md).
+- The local threat model is unchanged: any process running as the user
+  can already read the app's store, so the token guards against stale
+  clients and accidents, not against user-level processes.
+- Remote and SSH review are still not implemented; they wait until their
   execution, trust, latency, freshness, reconnection, and persistence model
   is settled.
 

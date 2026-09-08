@@ -8,6 +8,7 @@ mod reviews;
 mod store;
 #[cfg(test)]
 mod testutil;
+mod transport;
 
 use commands::{
     create_comment, edit_comment, fetch_project, get_branch_inventory, get_settings,
@@ -19,7 +20,8 @@ use commands::{
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::path::{Path, PathBuf};
-use tauri::Manager;
+use std::sync::Arc;
+use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
 struct AppState {
@@ -172,7 +174,7 @@ fn set_aside_store(db_path: &Path) -> std::io::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             initialize(app).map_err(|error| {
@@ -213,8 +215,17 @@ pub fn run() {
             edit_comment,
             match_comment_anchors
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            // Best-effort: stop the loopback listener so the server task
+            // removes the discovery file; nothing joins the task.
+            if let Some(endpoint) = app_handle.try_state::<transport::TransportHandle>() {
+                endpoint.shutdown();
+            }
+        }
+    });
 }
 
 fn initialize(app: &tauri::App) -> Result<(), String> {
@@ -234,7 +245,14 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
         })?;
         Ok::<_, String>(pool)
     })?;
-    app.manage(AppState { pool });
+    app.manage(AppState { pool: pool.clone() });
+    let app_handle = app.handle().clone();
+    let arrivals: transport::ArrivalSink = Arc::new(move |arrival| {
+        let _ = app_handle.emit("submission-received", arrival);
+    });
+    let endpoint = transport::start(pool, &data_dir, arrivals)
+        .map_err(|error| format!("Could not start the agent endpoint: {error}"))?;
+    app.manage(endpoint);
     Ok(())
 }
 

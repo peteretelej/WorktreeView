@@ -92,6 +92,14 @@ pub struct SubmissionPayload {
     findings: Vec<SubmissionFinding>,
 }
 
+impl SubmissionPayload {
+    // Read access for the transport's arrival event; submission semantics
+    // stay behind the ingest.
+    pub(crate) fn agent_name(&self) -> &str {
+        &self.agent_name
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmissionFinding {
@@ -756,10 +764,9 @@ fn validate_submission(payload: &SubmissionPayload) -> Result<(), CommandError> 
     Ok(())
 }
 
-// The only writer of submissions and agent comments: phase 3's HTTP
-// handler calls this unchanged. The submission and every finding comment
-// commit atomically or not at all.
-#[allow(dead_code)] // the phase 3 transport is the production caller
+// The only writer of submissions and agent comments: the loopback
+// transport's post_review handler calls this unchanged. The submission and
+// every finding comment commit atomically or not at all.
 pub(crate) async fn ingest_submission_in_pool(
     pool: &SqlitePool,
     repo_path: &str,
@@ -901,14 +908,6 @@ mod tests {
             old_line,
             new_line,
         }
-    }
-
-    async fn review_id_for(pool: &SqlitePool, repo_path: &str) -> i64 {
-        sqlx::query_scalar("SELECT id FROM reviews WHERE repo_path = ?")
-            .bind(repo_path)
-            .fetch_one(pool)
-            .await
-            .unwrap()
     }
 
     #[tokio::test]

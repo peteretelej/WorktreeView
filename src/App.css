@@ -1582,3 +1582,11 @@ button:disabled {
 @media (max-width: 1100px) {
   .review-body.comments-visible { grid-template-columns: minmax(180px, 32%) minmax(0, 1fr) minmax(220px, 30%); }
 }
+
+/* Submission arrival cue: a fixed badge announcing accepted agent
+   deliveries; activating it opens the targeted review, dismissing clears. */
+.arrival-cue { position: fixed; right: 16px; bottom: 16px; z-index: 60; display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--elevated); box-shadow: 0 4px 16px oklch(0 0 0 / 0.18); font-size: 12px; }
+.arrival-open { display: flex; align-items: center; gap: 6px; padding: 0; border: 0; background: transparent; color: var(--foreground); cursor: pointer; font: inherit; text-align: left; }
+.arrival-open strong { font-weight: 600; }
+.arrival-dismiss { flex: none; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.arrival-dismiss:hover { background: var(--surface-2); color: var(--foreground); }

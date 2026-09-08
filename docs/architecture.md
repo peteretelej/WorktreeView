@@ -51,6 +51,18 @@ normalized domain data through narrow, typed Tauri commands.
   comments with severity and submission reference in one transaction; the
   loopback transport calls it unchanged. `list_submissions` returns
   stored sections as typed entries, never raw JSON.
+- `transport.rs`: the loopback agent endpoint, the app's one inbound
+  network surface. An axum Router binds 127.0.0.1 on an ephemeral port
+  inside the app process, authenticated by a per-boot bearer token (32
+  random bytes via `getrandom`) published to `agent-endpoint.json` in the
+  app data dir after bind. It owns transport concerns only: bearer auth,
+  JSON-RPC 2.0 framing with the documented error-code matrix, and a
+  coarse 3 MiB pre-parse body guard. The single write-only method
+  `post_review` delegates to `ingest_submission_in_pool` unchanged and,
+  after a successful ingest, pushes a `submission-received` event to the
+  webview, which renders the arrival cue; the webview never listens on a
+  socket. Exit shutdown is best-effort: the app signals the server task,
+  which stops serving and removes the discovery file.
 - `cache.rs`: SQLite-backed history cache for commit pages and ancestry
   marks, keyed by resolved SHAs.
 - `retrospection.rs`: records reviewed worktree and branch identities
@@ -74,8 +86,9 @@ locale to C. The full rationale is in the repo `AGENTS.md`.
 
 ## Frontend (`src/`)
 
-A flat React + Vite app: `App.tsx` (shell, project overview, and review
-views), `settings.tsx`, `diff.ts` (diff presentation helpers),
+A flat React + Vite app: `App.tsx` (shell, project overview, review views,
+and the agent submission arrival cue), `settings.tsx`,
+`diff.ts` (diff presentation helpers),
 `highlight.ts` (progressive diff token highlighting over Shiki),
 `navigation.ts` (back and forward review history), `reviewPresets.ts`
 (review base and worktree scope preset helpers), `surfaces.ts` (surface
