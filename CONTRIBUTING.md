@@ -160,7 +160,7 @@ git push origin main v0.0.1
 The Release workflow builds Windows, macOS, and Linux bundles and
 attaches them to a draft GitHub Release. Review the draft, edit the
 notes if needed, then publish it; publishing also triggers the desktop
-e2e suite. Builds are unsigned in early releases.
+e2e suite. Builds are unsigned.
 
 ## Documentation
 

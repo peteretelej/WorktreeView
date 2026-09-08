@@ -37,7 +37,7 @@ GitHub Actions runs two workflows:
   desktop e2e suite (a release created by the workflow token does not
   itself trigger other workflows).
 
-Release builds are unsigned in early releases: Windows shows a
+Release builds are unsigned: Windows shows a
 SmartScreen warning, and macOS requires right-click Open (or
 `xattr -cr /Applications/WorktreeView.app`) on first launch. There is no
 updater channel yet, so installs upgrade by downloading the next
