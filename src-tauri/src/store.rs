@@ -70,6 +70,7 @@ pub struct Settings {
     pub diff_layout: DiffLayout,
     pub whitespace_visible: bool,
     pub line_wrap: bool,
+    pub syntax_visible: bool,
     pub zoom: f64,
 }
 
@@ -89,6 +90,7 @@ impl Default for Settings {
             diff_layout: DiffLayout::Unified,
             whitespace_visible: false,
             line_wrap: false,
+            syntax_visible: true,
             zoom: 1.0,
         }
     }
@@ -251,6 +253,11 @@ pub(crate) async fn get_settings_in_pool(pool: &SqlitePool) -> Result<Settings, 
                     settings.line_wrap = flag;
                 }
             }
+            "syntax_visible" => {
+                if let Some(flag) = settings_bool_from_value(&value) {
+                    settings.syntax_visible = flag;
+                }
+            }
             "zoom" => {
                 if let Ok(zoom) = value.parse::<f64>() {
                     settings.zoom = clamp_zoom(zoom);
@@ -275,6 +282,10 @@ pub(crate) async fn set_settings_in_pool(
             settings_bool_value(settings.whitespace_visible).to_string(),
         ),
         ("line_wrap", settings_bool_value(settings.line_wrap).to_string()),
+        (
+            "syntax_visible",
+            settings_bool_value(settings.syntax_visible).to_string(),
+        ),
         ("zoom", zoom.to_string()),
     ];
     let mut transaction = pool.begin().await?;

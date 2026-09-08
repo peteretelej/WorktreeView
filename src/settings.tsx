@@ -5,9 +5,9 @@ import { ZOOM_LEVELS, snapZoom } from "./zoom.ts";
 
 export type Theme = "system" | "light" | "dark";
 export type DiffLayout = "unified" | "split";
-export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; zoom: number };
+export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; syntax_visible: boolean; zoom: number };
 
-export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false, zoom: 1 };
+export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false, syntax_visible: true, zoom: 1 };
 
 export function getSettings() { return invoke<Settings>("get_settings"); }
 export function persistSettings(settings: Settings) { return invoke<Settings>("set_settings", { settings }); }
@@ -79,6 +79,10 @@ export function SettingsPage({ settings, saveError, onBack, onChange }: { settin
           <div className="settings-row-copy"><strong>Diff layout</strong><span>How changed files are rendered in reviews.</span></div>
           <div className="scope-toggle" role="group" aria-label="Diff layout">{DIFF_LAYOUT_OPTIONS.map((option) => <button key={option.value} type="button" className={settings.diff_layout === option.value ? "active" : ""} aria-pressed={settings.diff_layout === option.value} onClick={() => onChange({ ...settings, diff_layout: option.value })}>{option.label}</button>)}</div>
         </div>
+        <label className="settings-row settings-toggle">
+          <span className="settings-row-copy"><strong>Syntax highlighting</strong><span>Colorize code tokens in rendered patches.</span></span>
+          <input type="checkbox" checked={settings.syntax_visible} onChange={(event) => onChange({ ...settings, syntax_visible: event.currentTarget.checked })} />
+        </label>
         <label className="settings-row settings-toggle">
           <span className="settings-row-copy"><strong>Whitespace visibility</strong><span>Show whitespace changes in rendered patches.</span></span>
           <input type="checkbox" checked={settings.whitespace_visible} onChange={(event) => onChange({ ...settings, whitespace_visible: event.currentTarget.checked })} />

@@ -1038,6 +1038,10 @@ button:disabled {
 .diff-line code .shiki-token.italic { font-style: italic; }
 .diff-line code .shiki-token.bold { font-weight: 600; }
 .diff-line code .shiki-token.underline { text-decoration: underline; }
+.diff-toggles { display: flex; align-items: center; gap: 1px; }
+.diff-toggles .icon-button { width: 24px; height: 24px; border-radius: 4px; }
+.diff-toggles .icon-button.active { color: var(--primary); background: var(--primary-soft); }
+.review-status .diff-toggles { margin-left: auto; align-self: center; }
 .split-rows { display: grid; grid-template-columns: 42px 1fr 42px 1fr; }
 .diff-line.half { grid-column: span 2; grid-template-columns: 42px 1fr; }
 .diff-line.half + .diff-line.half { border-left: 1px solid var(--border); }
