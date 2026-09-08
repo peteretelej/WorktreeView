@@ -40,6 +40,7 @@
   --diff-addition-foreground: oklch(0.45 0.13 152);
   --diff-deletion-foreground: oklch(0.48 0.16 22);
   --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 [data-theme="dark"] {
@@ -1531,7 +1532,7 @@ button:disabled {
 .comment-filter button.active { background: var(--primary-soft); color: var(--foreground); }
 .comment-empty { padding: 16px 12px; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-size: 11px; line-height: 1.6; text-align: center; }
 .comment-thread { display: flex; flex-direction: column; gap: 6px; }
-.comment-card { padding: 9px 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--elevated, var(--background)); font-size: 12px; }
+.comment-card { padding: 9px 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--elevated, var(--background)); color: var(--foreground); font: 12px/1.55 var(--font-sans); }
 .comment-card:hover { border-color: var(--surface-3); }
 .comment-card.comment-state-outdated { border-color: var(--danger); }
 .comment-card.comment-resolved { opacity: 0.72; }
@@ -1605,20 +1606,20 @@ button:disabled {
 .composer-hint { margin-right: auto; color: var(--muted); font-size: 9px; white-space: nowrap; }
 .composer-hint kbd { padding: 0 3px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 3px; background: var(--surface-2); font: 9px var(--font-mono); }
 .comment-composer-actions .primary-button, .comment-composer-actions .secondary-button { flex: none; width: auto; margin-top: 0; }
-.comment-composer-panel { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); box-shadow: var(--shadow-dropdown); }
+.comment-composer-panel { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--foreground); font: 12px/1.55 var(--font-sans); box-shadow: var(--shadow-dropdown); }
 .comment-composer-panel.inline { max-width: 640px; margin: 4px 0 8px 93px; }
 .comment-composer-panel .eyebrow { margin: 0; }
 .inline-comment { max-width: 640px; margin: 2px 0 6px 93px; }
 
 /* Selection affordances on diff rows: comments start only from explicit
-   intent (the row context menu, or the quiet chip after a text selection);
-   plain clicks and drags stay reading gestures. */
+   intent (clicking a line number, or the chip after a text selection);
+   plain clicks and drags in the code stay reading gestures. The chip is an
+   overlay under its end row so the diff never shifts. */
 .diff-line { position: relative; }
 .diff-line.commentable { cursor: text; }
 .diff-line.comment-selected { outline: 1px solid var(--primary); outline-offset: -1px; }
-.selection-comment-chip { align-self: flex-start; margin: 4px 0 8px 93px; padding: 2px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--elevated); color: var(--foreground); cursor: pointer; font-size: 11px; box-shadow: var(--shadow-dropdown); }
+.selection-comment-chip { position: absolute; top: 100%; left: 93px; z-index: 5; padding: 2px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--elevated); color: var(--foreground); cursor: pointer; font: 11px/1.4 var(--font-sans); box-shadow: var(--shadow-dropdown); }
 .selection-comment-chip:hover { border-color: var(--primary); color: var(--primary); }
-.diff-context-menu { position: fixed; z-index: 80; top: auto; right: auto; width: max-content; min-width: 180px; }
 .patch-heading-meta { display: inline-flex; align-items: center; gap: 8px; }
 .patch-open-error { margin: 8px 14px 0; padding: 6px 8px; border: 1px solid var(--danger); border-radius: 5px; background: var(--danger-soft); color: var(--foreground); font-size: 11px; }
 
