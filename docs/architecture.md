@@ -12,7 +12,7 @@ normalized domain data through narrow, typed Tauri commands.
   `remove_repo`, `get_branch_inventory`, `fetch_project`,
   `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
   `list_refs`, `list_commits`, `list_review_changes`, `list_surfaces`,
-  `read_review_patch`, `create_comment`, `list_comments`,
+  `read_review_patch`, `open_review_file`, `create_comment`, `list_comments`,
   `list_submissions`, `reply_comment`, `set_comment_resolved`,
   `edit_comment`, `match_comment_anchors`.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
@@ -160,7 +160,12 @@ Migration handling is non-destructive: when the embedded migration set
 diverges from a store (as after the 0.0.1 consolidation), startup moves the
 store files to `worktreeview.sqlite3.bak`, overwriting any previous backup,
 and rebuilds the store; a store recording a migration version the running
-binary does not know fails startup with a message instead, untouched.
+binary does not know also keeps its files untouched, but startup asks
+whether to set it aside as the same backup and rebuild, or to quit so the
+app can be updated instead. Debug builds (`npm run dev`) keep their own
+store and endpoint registration in the same data directory
+(`worktreeview-dev.sqlite3`, `agent-endpoint-dev.json`), so alternating
+with an installed release never trades migration skew between the two.
 Migrations are append-only
 (CONTRIBUTING.md), so divergence is not expected on normal upgrades; desktop
 e2e containers rebuild their database on every run. Review flows remain

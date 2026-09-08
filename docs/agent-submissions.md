@@ -107,8 +107,10 @@ data directory (Linux `$XDG_DATA_HOME/com.etelej.worktreeview`, macOS
 ```
 
 The token is 32 random bytes hex-encoded, generated fresh per boot and
-never persisted across restarts. Clients read the discovery file on
-startup and re-read it whenever the endpoint refuses their token.
+never persisted across restarts. Debug builds write
+`agent-endpoint-dev.json` instead, so a dev instance and an installed
+release never claim each other's registration. Clients read the discovery
+file on startup and re-read it whenever the endpoint refuses their token.
 
 ### Calling post_review
 

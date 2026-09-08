@@ -14,15 +14,15 @@ use commands::{
     create_comment, edit_comment, fetch_project, get_branch_inventory, get_settings,
     list_comments, list_commits, list_refs, list_repos, list_review_changes, list_submissions,
     list_surfaces, list_worktree_status, list_worktrees, match_comment_anchors, open_repo,
-    read_review_patch, remove_repo, reply_comment, set_comment_resolved, set_repo_pinned,
-    set_settings, set_surface_pinned,
+    open_review_file, read_review_patch, remove_repo, reply_comment, set_comment_resolved,
+    set_repo_pinned, set_settings, set_surface_pinned,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 struct AppState {
     pool: SqlitePool,
@@ -105,27 +105,31 @@ fn canonical_path(path: &str) -> Result<PathBuf, CommandError> {
     Ok(canonical)
 }
 
+// A store recorded by a newer binary contains schema this build cannot
+// read; rebuilding over it would destroy that data, so opening refuses
+// and the caller decides between updating the app and setting it aside.
+#[derive(Debug)]
+enum StoreOpenError {
+    NewerStore,
+    Other(String),
+}
+
 async fn connect_store_pool(
     db_path: &Path,
     options: &SqliteConnectOptions,
-) -> Result<SqlitePool, String> {
+) -> Result<SqlitePool, StoreOpenError> {
     let pool = sqlx::SqlitePool::connect_with(options.clone())
         .await
-        .map_err(|error| format!("Could not connect to repository storage: {error}"))?;
+        .map_err(|error| {
+            StoreOpenError::Other(format!("Could not connect to repository storage: {error}"))
+        })?;
     let error = match sqlx::migrate!().run(&pool).await {
         Ok(()) => return Ok(pool),
         Err(error) => error,
     };
     pool.close().await;
-    // A store recorded by a newer binary contains schema this build cannot
-    // read; rebuilding over it would destroy that data, so startup fails and
-    // leaves every file as it is.
     if matches!(error, sqlx::migrate::MigrateError::VersionMissing(_)) {
-        return Err(format!(
-            "Repository storage {} was written by a newer version of \
-             WorktreeView; update the app, or remove the file to start fresh",
-            db_path.display()
-        ));
+        return Err(StoreOpenError::NewerStore);
     }
     // A checksum mismatch means the embedded migration set diverged from the
     // one that wrote the store, e.g. after a migration squash. The store
@@ -133,7 +137,58 @@ async fn connect_store_pool(
     // regenerable caches; set-aside keeps all of it in one fixed backup and
     // rebuilds rather than blocking startup.
     if !matches!(error, sqlx::migrate::MigrateError::VersionMismatch(_)) {
-        return Err(format!("Could not migrate repository storage: {error}"));
+        return Err(StoreOpenError::Other(format!(
+            "Could not migrate repository storage: {error}"
+        )));
+    }
+    set_aside_store(db_path).map_err(|error| {
+        StoreOpenError::Other(format!(
+            "Could not set aside incompatible repository storage at {}: {error}",
+            db_path.display()
+        ))
+    })?;
+    let pool = sqlx::SqlitePool::connect_with(options.clone())
+        .await
+        .map_err(|error| {
+            StoreOpenError::Other(format!("Could not connect to repository storage: {error}"))
+        })?;
+    sqlx::migrate!()
+        .run(&pool)
+        .await
+        .map_err(|error| {
+            StoreOpenError::Other(format!("Could not migrate repository storage: {error}"))
+        })?;
+    Ok(pool)
+}
+
+// The user never touches the store file: a newer-version store ends in an
+// explicit choice, and Start fresh reuses the set-aside so the newer
+// version can pick the data back up from the backup.
+async fn newer_store_resolution(
+    app: &tauri::App,
+    db_path: &Path,
+    options: &SqliteConnectOptions,
+) -> Result<SqlitePool, String> {
+    let start_fresh = app
+        .dialog()
+        .message(format!(
+            "Repository storage {} was written by a newer version of WorktreeView. \
+             Update the app to keep using it, or start fresh: the current store is \
+             kept as {}.bak and a new one is created.",
+            db_path.display(),
+            db_path.display()
+        ))
+        .title("WorktreeView")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Start fresh".to_string(),
+            "Quit".to_string(),
+        ))
+        .blocking_show();
+    if !start_fresh {
+        // Nothing has been initialized yet, so quitting directly avoids a
+        // second dialog from the setup error path.
+        std::process::exit(0);
     }
     set_aside_store(db_path).map_err(|error| {
         format!(
@@ -141,14 +196,15 @@ async fn connect_store_pool(
             db_path.display()
         )
     })?;
-    let pool = sqlx::SqlitePool::connect_with(options.clone())
-        .await
-        .map_err(|error| format!("Could not connect to repository storage: {error}"))?;
-    sqlx::migrate!()
-        .run(&pool)
-        .await
-        .map_err(|error| format!("Could not migrate repository storage: {error}"))?;
-    Ok(pool)
+    match connect_store_pool(db_path, options).await {
+        Ok(pool) => Ok(pool),
+        Err(StoreOpenError::Other(message)) => Err(message),
+        Err(StoreOpenError::NewerStore) => Err(format!(
+            "Repository storage {} still reports a newer version after being \
+             set aside",
+            db_path.display()
+        )),
+    }
 }
 
 // At most one backup set exists at a time; a later reset overwrites the
@@ -205,6 +261,7 @@ pub fn run() {
             list_review_changes,
             list_surfaces,
             read_review_patch,
+            open_review_file,
             get_settings,
             set_settings,
             create_comment,
@@ -234,12 +291,25 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
     })?;
     std::fs::create_dir_all(&data_dir)
         .map_err(|error| format!("Could not create application data directory: {error}"))?;
-    let db_path = data_dir.join("worktreeview.sqlite3");
+    // Dev builds keep their own store so alternating with an installed
+    // release never trades migration skew across the two channels.
+    let db_name = if cfg!(debug_assertions) {
+        "worktreeview-dev.sqlite3"
+    } else {
+        "worktreeview.sqlite3"
+    };
+    let db_path = data_dir.join(db_name);
     let options = SqliteConnectOptions::new()
         .filename(&db_path)
         .create_if_missing(true);
     let pool = tauri::async_runtime::block_on(async {
-        let pool = connect_store_pool(&db_path, &options).await?;
+        let pool = match connect_store_pool(&db_path, &options).await {
+            Ok(pool) => pool,
+            Err(StoreOpenError::NewerStore) => {
+                newer_store_resolution(app, &db_path, &options).await?
+            }
+            Err(StoreOpenError::Other(message)) => return Err(message),
+        };
         store::normalize_stored_paths(&pool).await.map_err(|error| {
             format!("Could not normalize stored repository paths: {error}")
         })?;
@@ -259,7 +329,7 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::plain_path;
-    use super::{connect_store_pool, SqliteConnectOptions};
+    use super::{connect_store_pool, set_aside_store, StoreOpenError, SqliteConnectOptions};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -389,14 +459,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[tokio::test]
-    async fn store_from_newer_version_refuses_untouched() {
-        let dir = crate::testutil::test_path("store-reset-refusal");
-        std::fs::create_dir_all(&dir).unwrap();
-        let db_path = dir.join("worktreeview.sqlite3");
-        let options = SqliteConnectOptions::new()
-            .filename(&db_path)
-            .create_if_missing(true);
+    // A store recorded by a version this build predates: a migration
+    // version beyond the embedded set, with its own marker table.
+    async fn seed_future_store(options: &SqliteConnectOptions) {
         let future = sqlx::SqlitePool::connect_with(options.clone()).await.unwrap();
         sqlx::query(
             "CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, \
@@ -416,9 +481,20 @@ mod tests {
         .await
         .unwrap();
         future.close().await;
+    }
+
+    #[tokio::test]
+    async fn store_from_newer_version_refuses_untouched() {
+        let dir = crate::testutil::test_path("store-reset-refusal");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("worktreeview.sqlite3");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+        seed_future_store(&options).await;
 
         let error = connect_store_pool(&db_path, &options).await.unwrap_err();
-        assert!(error.contains("newer version"), "{error}");
+        assert!(matches!(error, StoreOpenError::NewerStore));
         assert!(!dir.join("worktreeview.sqlite3.bak").exists());
 
         let untouched: Vec<(i64,)> =
@@ -427,6 +503,47 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(untouched, vec![(99,)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Start fresh consents to the same set-aside the checksum path uses,
+    // so this build rebuilds while the newer version keeps its data.
+    #[tokio::test]
+    async fn newer_store_is_set_aside_and_rebuilt_after_consent() {
+        let dir = crate::testutil::test_path("store-reset-newer");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("worktreeview.sqlite3");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+        seed_future_store(&options).await;
+
+        let error = connect_store_pool(&db_path, &options).await.unwrap_err();
+        assert!(matches!(error, StoreOpenError::NewerStore));
+
+        set_aside_store(&db_path).unwrap();
+
+        let pool = connect_store_pool(&db_path, &options).await.unwrap();
+        let versions: Vec<(i64,)> =
+            sqlx::query_as("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(versions.len(), 1);
+        sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let backup = SqliteConnectOptions::new()
+            .filename(dir.join("worktreeview.sqlite3.bak"));
+        let preserved: Vec<(i64,)> =
+            sqlx::query_as("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&sqlx::SqlitePool::connect_with(backup).await.unwrap())
+                .await
+                .unwrap();
+        assert_eq!(preserved, vec![(99,)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

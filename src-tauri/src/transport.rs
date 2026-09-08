@@ -233,7 +233,28 @@ struct EndpointDiscovery {
 }
 
 pub(crate) fn discovery_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("agent-endpoint.json")
+    // Matches the dev-suffixed store: the channels must not read or delete
+    // each other's endpoint registration.
+    let name = if cfg!(debug_assertions) {
+        "agent-endpoint-dev.json"
+    } else {
+        "agent-endpoint.json"
+    };
+    data_dir.join(name)
+}
+
+// A later-started instance may have overwritten the discovery file with its
+// own registration; removing that would orphan its endpoint, so only delete
+// a file that still describes this instance.
+fn remove_discovery_if_owned(path: &Path, port: u16, token: &str) {
+    let Ok(payload) = std::fs::read(path) else {
+        return;
+    };
+    if let Ok(discovery) = serde_json::from_slice::<EndpointDiscovery>(&payload) {
+        if discovery.port == port && discovery.token == token {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn write_discovery_file(path: &Path, port: u16, token: &str) -> Result<(), String> {
@@ -419,6 +440,7 @@ pub(crate) fn start(pool: SqlitePool, data_dir: &Path, arrivals: ArrivalSink) ->
         .port();
     let discovery = discovery_path(data_dir);
     write_discovery_file(&discovery, port, &token)?;
+    let cleanup_token = token.clone();
     let state = TransportState { pool, token, arrivals };
     let shutdown = Arc::new(AtomicBool::new(false));
     let exit = Arc::clone(&shutdown);
@@ -434,23 +456,23 @@ pub(crate) fn start(pool: SqlitePool, data_dir: &Path, arrivals: ArrivalSink) ->
     std::thread::Builder::new()
         .name("agent-endpoint".into())
         .spawn(move || {
-            let _ = runtime.block_on(async move {
-                let Ok(listener) = tokio::net::TcpListener::from_std(listener) else {
-                    let _ = std::fs::remove_file(&discovery);
-                    return;
-                };
-                loop {
-                    if exit.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let (mut stream, _) = match listener.accept().await {
-                        Ok(accepted) => accepted,
-                        Err(_) => break,
+                let _ = runtime.block_on(async move {
+                    let Ok(listener) = tokio::net::TcpListener::from_std(listener) else {
+                        remove_discovery_if_owned(&discovery, port, &cleanup_token);
+                        return;
                     };
-                    serve_connection(&mut stream, state.clone()).await;
-                }
-                let _ = std::fs::remove_file(&discovery);
-            });
+                    loop {
+                        if exit.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let (mut stream, _) = match listener.accept().await {
+                            Ok(accepted) => accepted,
+                            Err(_) => break,
+                        };
+                        serve_connection(&mut stream, state.clone()).await;
+                    }
+                    remove_discovery_if_owned(&discovery, port, &cleanup_token);
+                });
         })
         .map_err(|error| format!("Could not start the agent endpoint thread: {error}"))?;
     Ok(TransportHandle { shutdown })
@@ -530,6 +552,23 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "the discovery file must be owner-only");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Exit cleanup must not evict a registration another instance wrote;
+    // a stale file is survivable (clients re-read on refusal), an orphaned
+    // live endpoint is not.
+    #[test]
+    fn discovery_file_is_removed_only_when_owned() {
+        let dir = crate::testutil::test_path("transport-discovery-owned");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = discovery_path(&dir);
+        write_discovery_file(&path, 45123, "abc123").unwrap();
+
+        remove_discovery_if_owned(&path, 1, "other-token");
+        assert!(path.exists(), "a foreign registration must survive");
+        remove_discovery_if_owned(&path, 45123, "abc123");
+        assert!(!path.exists(), "an owned registration is removed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
