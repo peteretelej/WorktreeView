@@ -1,6 +1,7 @@
 mod cache;
 mod commands;
 mod git;
+mod overview;
 mod retrospection;
 mod review;
 mod store;
@@ -8,9 +9,9 @@ mod store;
 mod testutil;
 
 use commands::{
-    get_settings, list_commits, list_refs, list_repos, list_review_changes, list_surfaces,
-    list_worktree_status, list_worktrees, open_repo, read_review_patch, set_repo_pinned,
-    set_settings, set_surface_pinned,
+    get_branch_inventory, get_settings, list_commits, list_refs, list_repos, list_review_changes,
+    list_surfaces, list_worktree_status, list_worktrees, open_repo, read_review_patch, remove_repo,
+    set_repo_pinned, set_settings, set_surface_pinned,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -189,6 +190,8 @@ pub fn run() {
             list_repos,
             list_worktrees,
             list_worktree_status,
+            remove_repo,
+            get_branch_inventory,
             set_repo_pinned,
             set_surface_pinned,
             list_refs,

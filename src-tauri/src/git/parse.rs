@@ -32,6 +32,35 @@ pub struct CommitPage {
     pub has_more: bool,
 }
 
+// One `for-each-ref` record over refs/heads. `upstream` is the configured
+// upstream refname (None when the branch has none); `track` is the raw
+// `%(upstream:track)` text, resolved into ahead/behind counts by the caller.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BranchRecord {
+    pub(crate) ref_name: String,
+    pub(crate) head: String,
+    pub(crate) commit_date: i64,
+    pub(crate) author: String,
+    pub(crate) subject: String,
+    pub(crate) upstream: Option<String>,
+    pub(crate) track: String,
+}
+
+// The project-page view of a branch: identity plus just enough history and
+// sync state for the worktree table. ahead/behind are None when unknown (no
+// upstream and no fallback base, or a gone upstream).
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct BranchSummary {
+    pub(crate) ref_name: String,
+    pub(crate) head: String,
+    pub(crate) author: String,
+    pub(crate) subject: String,
+    pub(crate) commit_date: i64,
+    pub(crate) upstream: Option<String>,
+    pub(crate) ahead: Option<u32>,
+    pub(crate) behind: Option<u32>,
+}
+
 pub(crate) fn parse_untracked_paths(output: &[u8]) -> Result<Vec<String>, CommandError> {
     output
         .split(|byte| *byte == 0)
@@ -186,6 +215,56 @@ pub(crate) fn parse_commits(output: &[u8]) -> Result<Vec<CommitInfo>, CommandErr
         });
     }
     Ok(commits)
+}
+
+// `for-each-ref` records over refs/heads: a fixed five-field prefix (refname,
+// sha, committer date, author, subject) followed by upstream and track, all
+// joined by \x1f, each record terminated by \x1e. Crafted commits can carry
+// the separator bytes inside author or subject, so records with extra fields
+// reassemble the subject from the record end; structurally truncated records
+// are skipped rather than denying the whole inventory.
+pub(crate) fn parse_branch_records(output: &[u8]) -> Result<Vec<BranchRecord>, CommandError> {
+    let malformed = || {
+        CommandError::new(
+            "git_output_malformed",
+            "Git returned malformed branch data.",
+        )
+    };
+    let text = std::str::from_utf8(output).map_err(|_| malformed())?;
+    let mut branches = Vec::new();
+    for record in text.split('\u{1e}') {
+        let record = record.trim();
+        if record.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = record.split('\u{1f}').collect();
+        // A record separator inside commit metadata truncates both halves;
+        // dropping those rows beats denying the whole inventory.
+        if fields.len() < 7 {
+            continue;
+        }
+        if !fields[0].starts_with("refs/heads/") {
+            return Err(malformed());
+        }
+        let commit_date = fields[2]
+            .parse::<i64>()
+            .map_err(|_| malformed())?;
+        let last = fields.len();
+        branches.push(BranchRecord {
+            ref_name: fields[0].to_string(),
+            head: fields[1].to_string(),
+            commit_date,
+            author: fields[3].to_string(),
+            subject: fields[4..last - 2].join("\u{1f}"),
+            upstream: if fields[last - 2].is_empty() {
+                None
+            } else {
+                Some(fields[last - 2].to_string())
+            },
+            track: fields[last - 1].to_string(),
+        });
+    }
+    Ok(branches)
 }
 
 fn decode_git_path(value: &str) -> Result<String, ()> {
@@ -397,6 +476,58 @@ bare
             ["a.txt", "dir/b.txt"]
         );
         assert!(parse_untracked_paths(b"a\0\xff\0").is_err());
+    }
+
+    #[test]
+    fn parses_branch_records_with_edge_fields() {
+        let record = |refname: &str, upstream: &str, track: &str| {
+            format!(
+                "{refname}\u{1f}{}\u{1f}1768176000\u{1f}A U Thor\u{1f}handles, commas, 100% signs and naïve 🌲 subjects\u{1f}{upstream}\u{1f}{track}\u{1e}\n",
+                "a".repeat(40)
+            )
+        };
+        let output = format!(
+            "{}{}{}",
+            record("refs/heads/main", "refs/remotes/origin/main", ""),
+            record("refs/heads/feature", "", "[ahead 2, behind 1]"),
+            record("refs/heads/gone-upstream", "refs/remotes/origin/gone", "[gone]"),
+        );
+        let branches = parse_branch_records(output.as_bytes()).unwrap();
+        assert_eq!(branches.len(), 3);
+        assert_eq!(branches[0].ref_name, "refs/heads/main");
+        assert_eq!(branches[0].commit_date, 1768176000);
+        assert_eq!(branches[0].subject, "handles, commas, 100% signs and naïve 🌲 subjects");
+        assert_eq!(branches[0].upstream.as_deref(), Some("refs/remotes/origin/main"));
+        assert_eq!(branches[1].upstream, None);
+        assert_eq!(branches[1].track, "[ahead 2, behind 1]");
+        assert_eq!(branches[2].track, "[gone]");
+
+        assert!(parse_branch_records(b"").unwrap().is_empty());
+        // Truncated records (separator bytes inside metadata) are skipped.
+        let short_record = format!("refs/heads/main\u{1f}{}\u{1f}0\u{1f}a\u{1f}s\u{1e}\n", "a".repeat(40));
+        assert!(parse_branch_records(short_record.as_bytes()).unwrap().is_empty());
+        let not_a_branch = format!(
+            "refs/tags/v1\u{1f}{}\u{1f}0\u{1f}a\u{1f}s\u{1f}\u{1f}\u{1e}\n",
+            "a".repeat(40)
+        );
+        assert!(parse_branch_records(not_a_branch.as_bytes()).is_err());
+        let bad_date = format!(
+            "refs/heads/main\u{1f}{}\u{1f}not-a-date\u{1f}a\u{1f}s\u{1f}\u{1f}\u{1e}\n",
+            "a".repeat(40)
+        );
+        assert!(parse_branch_records(bad_date.as_bytes()).is_err());
+        // Separator bytes inside the subject reassemble into one record.
+        let split_subject = format!(
+            "refs/heads/main\u{1f}{}\u{1f}1768176000\u{1f}A\u{1f}broken\u{1f}subject\u{1f}refs/remotes/origin/main\u{1f}\u{1e}\n",
+            "a".repeat(40)
+        );
+        let branches = parse_branch_records(split_subject.as_bytes()).unwrap();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].subject, "broken\u{1f}subject");
+        assert_eq!(
+            branches[0].upstream.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
     }
 
     #[test]

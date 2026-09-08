@@ -1,13 +1,14 @@
 use crate::git::{
     git_execution_error, parse_status_count, parse_worktrees, run_git, CommitPage, Worktree,
 };
+use crate::overview::{branch_inventory, BranchInventory};
 use crate::review::{
     commit_page, refs_inventory, review_changes, review_patch, FilePatch, RefInventory,
     ReviewIndex,
 };
 use crate::retrospection::{list_surfaces_in_pool, set_surface_pinned_in_pool, SurfaceListing};
 use crate::store::{
-    get_settings_in_pool, load_repos, open_repo_path, set_repo_pinned_in_pool,
+    get_settings_in_pool, load_repos, open_repo_path, remove_repo_in_pool, set_repo_pinned_in_pool,
     set_settings_in_pool, Repo, Settings,
 };
 use crate::{canonical_path, AppState, CommandError};
@@ -122,6 +123,21 @@ pub(crate) async fn set_repo_pinned(
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<i64>, CommandError> {
     set_repo_pinned_in_pool(&state.pool, &path, pinned).await
+}
+
+#[tauri::command]
+pub(crate) async fn remove_repo(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    remove_repo_in_pool(&state.pool, &path).await
+}
+
+#[tauri::command]
+pub(crate) async fn get_branch_inventory(
+    path: String,
+) -> Result<BranchInventory, CommandError> {
+    branch_inventory(path).await
 }
 
 #[tauri::command]

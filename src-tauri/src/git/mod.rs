@@ -13,8 +13,9 @@ pub(crate) use filters::{
     configured_filter_names, filter_override_args, reject_applicable_filters,
 };
 pub(crate) use parse::{
-    parse_commits, parse_name_status, parse_numstat, parse_status_count, parse_untracked_paths,
-    parse_worktrees, ChangedFile, CommitInfo, CommitPage, Worktree,
+    parse_branch_records, parse_commits, parse_name_status, parse_numstat, parse_status_count,
+    parse_untracked_paths, parse_worktrees, BranchSummary, ChangedFile, CommitInfo, CommitPage,
+    Worktree,
 };
 pub(crate) use validate::{
     effective_head_ref, ensure_work_tree, primary_branch, resolve_empty_tree, resolve_ref,

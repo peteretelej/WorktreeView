@@ -177,6 +177,17 @@ pub(crate) async fn normalize_stored_paths(pool: &SqlitePool) -> Result<(), sqlx
     Ok(())
 }
 
+// Registry-only removal: the row delete cascades to repo-scoped cache and
+// retrospection tables; nothing on disk is touched. Unknown paths are
+// already gone, so removal is idempotent.
+pub(crate) async fn remove_repo_in_pool(pool: &SqlitePool, path: &str) -> Result<(), CommandError> {
+    sqlx::query("DELETE FROM repos WHERE path = ?")
+        .bind(path)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub(crate) async fn open_repo_path(path: &str, pool: &SqlitePool) -> Result<Repo, CommandError> {
     let canonical = canonical_path(path)?;
     ensure_work_tree(&canonical).await?;
@@ -565,6 +576,62 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(rows, [(plain.to_string(), Some(7), "pin".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn remove_repo_deletes_the_row_and_cascades() {
+        let pool = test_pool().await;
+        upsert_repo(&pool, "/kept", "kept", 1).await.unwrap();
+        upsert_repo(&pool, "/dropped", "dropped", 2).await.unwrap();
+        let commits = [crate::git::CommitInfo {
+            sha: "a".repeat(40),
+            subject: "cached".into(),
+            author: "A U Thor".into(),
+            date: "2026-01-02T03:04:05+00:00".into(),
+            refs: Vec::new(),
+            parents: Vec::new(),
+            default_base_ancestor: false,
+        }];
+        crate::cache::store_log_page(
+            &pool,
+            "/dropped",
+            &"a".repeat(40),
+            "",
+            0,
+            1,
+            &commits,
+            false,
+        )
+        .await;
+        crate::retrospection::record_surface_open(
+            &pool,
+            "/dropped",
+            "branch",
+            "refs/heads/dropped",
+            "dropped",
+            "refs/heads/dropped",
+            &"a".repeat(40),
+        )
+        .await;
+
+        remove_repo_in_pool(&pool, "/dropped").await.unwrap();
+        // Unknown paths are already gone: removal is idempotent.
+        remove_repo_in_pool(&pool, "/dropped").await.unwrap();
+
+        assert_eq!(load_repos(&pool).await.unwrap()[0].path, "/kept");
+        let pages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM log_pages WHERE repo_path = '/dropped'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(pages, 0);
+        let surfaces: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM retrospected_surfaces WHERE repo_path = '/dropped'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(surfaces, 0);
     }
 
     #[tokio::test]
