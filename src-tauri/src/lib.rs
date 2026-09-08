@@ -14,8 +14,9 @@ use commands::{
     create_comment, delete_comment, describe_commit, edit_comment, fetch_project,
     get_branch_inventory, get_settings, list_comments, list_commits, list_refs, list_repos,
     list_review_changes, list_submissions, list_surfaces, list_worktree_status, list_worktrees,
-    match_comment_anchors, open_repo, open_review_file, read_review_patch, remove_repo,
-    reply_comment, set_comment_resolved, set_repo_pinned, set_settings, set_surface_pinned,
+    match_comment_anchors, open_repo, open_review_file, read_review_file, read_review_patch,
+    remove_repo, reply_comment, set_comment_resolved, set_repo_pinned, set_settings,
+    set_surface_pinned,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -262,6 +263,7 @@ pub fn run() {
             list_review_changes,
             list_surfaces,
             read_review_patch,
+            read_review_file,
             open_review_file,
             get_settings,
             set_settings,

@@ -37,6 +37,17 @@
   reviews everything against the base with uncommitted content included, and
   Committed only drops the uncommitted content. "Working changes" follows
   the working-directory-changes convention other Git clients use.
+- Reading context never leaves the review surface. Gaps between hunks grow
+  inline expand controls that pull the hidden lines around a change into
+  the diff, and a Diff/File toggle swaps the patch pane's body to the
+  whole file as it exists on the diff's new side, with the patch's added
+  lines highlighted. The file list, review header, and comment stream stay
+  put through both, so a look at surrounding or full-file context costs
+  nothing to undo: toggling back restores the diff, page and scroll state
+  included, instead of stranding the reviewer on a separate file page.
+  Expanded lines are reading context, not comment anchors: existing
+  comments still render there, but new anchors stay on patch lines, where
+  write-time content and drift matching are defined.
 - Settings (appearance, interface zoom, diff display, dark and light
   themes) persist locally.
 - Commit history is a permanent sidebar fixture rather than a surface you

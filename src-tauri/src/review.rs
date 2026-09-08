@@ -1,11 +1,11 @@
 use crate::cache;
 use crate::git::{
-    acceptable_diff_exit, configured_filter_names, effective_head_ref, filter_override_args,
-    git_args, git_execution_error, parse_commits, parse_name_status, parse_numstat,
-    parse_untracked_paths, primary_branch, reject_applicable_filters, resolve_empty_tree,
-    resolve_ref, run_git, run_git_with_stdin, stdin_git_command, validate_file, validate_ref,
-    validate_scope_combination, validate_untracked_combination, ChangedFile, CommitInfo,
-    CommitPage, MAX_OUTPUT,
+    acceptable_diff_exit, configured_filter_names, effective_head_ref, ensure_work_tree,
+    filter_override_args, git_args, git_execution_error, parse_commits, parse_name_status,
+    parse_numstat, parse_untracked_paths, primary_branch, reject_applicable_filters,
+    resolve_empty_tree, resolve_ref, run_git, run_git_with_stdin, stdin_git_command,
+    validate_file, validate_ref, validate_scope_combination, validate_untracked_combination,
+    ChangedFile, CommitInfo, CommitPage, MAX_OUTPUT,
 };
 use crate::retrospection;
 use crate::{canonical_path, CommandError};
@@ -37,6 +37,14 @@ pub struct ReviewIndex {
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct FilePatch {
+    pub(crate) binary: bool,
+    pub(crate) text: String,
+}
+
+// Same shape as FilePatch: the renderable content of the reviewed file on the
+// patch's new side, for context expansion and the full-file view.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct FileContent {
     pub(crate) binary: bool,
     pub(crate) text: String,
 }
@@ -110,15 +118,30 @@ where
     open_untracked_file(root, file)
 }
 
-fn open_untracked_file(root: &Path, file: &str) -> Result<Vec<u8>, CommandError> {
+enum BoundedRead {
+    File(Vec<u8>),
+    Missing,
+}
+
+// Reads a file under `root` through cap-std so a relative path cannot escape
+// the root, refuses anything that is not a regular file, and bounds the read
+// at MAX_OUTPUT like every other review output.
+fn open_bounded_file(root: &Path, file: &str) -> Result<BoundedRead, CommandError> {
     let root = Dir::open_ambient_dir(root, ambient_authority()).map_err(|_| {
         CommandError::new("invalid_path", "The selected folder could not be opened.")
     })?;
     let mut options = OpenOptions::new();
     options.read(true).nonblock(true);
-    let mut opened = root
-        .open_with(file, &options)
-        .map_err(|_| CommandError::new("invalid_path", "The selected file could not be opened."))?;
+    let mut opened = match root.open_with(file, &options) {
+        Ok(opened) => opened,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BoundedRead::Missing),
+        Err(_) => {
+            return Err(CommandError::new(
+                "invalid_path",
+                "The selected file could not be opened.",
+            ))
+        }
+    };
     if !opened
         .metadata()
         .map_err(|_| CommandError::new("invalid_path", "The selected file could not be read."))?
@@ -141,7 +164,17 @@ fn open_untracked_file(root: &Path, file: &str) -> Result<Vec<u8>, CommandError>
             "Git output was too large.",
         ));
     }
-    Ok(output)
+    Ok(BoundedRead::File(output))
+}
+
+fn open_untracked_file(root: &Path, file: &str) -> Result<Vec<u8>, CommandError> {
+    match open_bounded_file(root, file)? {
+        BoundedRead::File(output) => Ok(output),
+        BoundedRead::Missing => Err(CommandError::new(
+            "invalid_path",
+            "The selected file could not be opened.",
+        )),
+    }
 }
 
 pub(crate) async fn refs_inventory(
@@ -768,6 +801,125 @@ pub(crate) async fn review_patch(
         CommandError::new("git_output_malformed", "Git returned invalid patch text.")
     })?;
     Ok(FilePatch {
+        binary: false,
+        text,
+    })
+}
+
+// Git's binary heuristic: a NUL in the leading bytes marks binary content.
+fn content_is_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8000).any(|&byte| byte == 0)
+}
+
+// The blob at `<rev>:<file>`, or empty when the file does not exist at that
+// revision (a file deleted on this side has no content to show). Resolving
+// through ls-tree keeps absence a plain empty result instead of a parsed
+// error diagnostic, and the blob SHA means cat-file never sees a combined
+// `rev:path` name.
+async fn read_committed_file(
+    root: &Path,
+    rev: &str,
+    file: &str,
+) -> Result<Vec<u8>, CommandError> {
+    let (exit_code, stdout, stderr) = run_git(root, &["ls-tree", "-z", rev, "--", file]).await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    let entry = stdout.split(|&byte| byte == 0).next().unwrap_or(&[]);
+    let meta = match entry.iter().position(|&byte| byte == b'\t') {
+        Some(position) => &entry[..position],
+        None => &[],
+    };
+    let fields = std::str::from_utf8(meta)
+        .map_err(|_| CommandError::new("git_output_malformed", "Git returned invalid tree data."))?
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let sha = match fields.as_slice() {
+        [_, "blob", sha] => *sha,
+        _ => return Ok(Vec::new()),
+    };
+    let (exit_code, stdout, stderr) = run_git(root, &["cat-file", "blob", sha]).await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    Ok(stdout)
+}
+
+// The merge base of two revs, or None when they share no history. Three-dot
+// committed ranges diff from this point, and with no merge base Git diffs
+// against the empty tree.
+async fn merge_base_or_none(
+    root: &Path,
+    left: &str,
+    right: &str,
+) -> Result<Option<String>, CommandError> {
+    let (exit_code, stdout, _) = run_git(root, &["merge-base", left, right]).await?;
+    if exit_code != 0 {
+        return Ok(None);
+    }
+    let sha = std::str::from_utf8(&stdout)
+        .map_err(|_| CommandError::new("git_output_malformed", "Git returned invalid ref data."))?
+        .trim()
+        .to_string();
+    Ok(if sha.is_empty() { None } else { Some(sha) })
+}
+
+// The file content the displayed patch's new side points at: the checked-out
+// worktree file for working-changes scopes, otherwise the blob at the target
+// (or, reversed, at the base, resolved through the merge base for three-dot
+// committed ranges). Empty content means "no file on this side", not an
+// error.
+pub(crate) async fn review_file_content(
+    path: String,
+    base: String,
+    head_ref: Option<String>,
+    committed_only: bool,
+    reversed: bool,
+    file: String,
+    untracked: bool,
+) -> Result<FileContent, CommandError> {
+    validate_ref(&base, "base")?;
+    let head_ref = effective_head_ref(head_ref);
+    validate_ref(&head_ref, "head_ref")?;
+    validate_scope_combination(&base, &head_ref, committed_only)?;
+    validate_file(&file)?;
+    validate_untracked_combination(untracked, committed_only, reversed)?;
+    let path = canonical_path(&path)?;
+    let bytes = if untracked {
+        capture_untracked_file(&path, &file).await?
+    } else if reversed {
+        if base == "empty-tree" {
+            Vec::new()
+        } else if committed_only {
+            match merge_base_or_none(&path, &base, &head_ref).await? {
+                Some(merge_base) => read_committed_file(&path, &merge_base, &file).await?,
+                None => Vec::new(),
+            }
+        } else {
+            read_committed_file(&path, &base, &file).await?
+        }
+    } else if !committed_only {
+        // The only review read that touches the filesystem without Git doing
+        // the walking: pin the root to a real worktree first so a
+        // renderer-supplied directory cannot read arbitrary files.
+        ensure_work_tree(&path).await?;
+        match open_bounded_file(&path, &file)? {
+            BoundedRead::File(bytes) => bytes,
+            BoundedRead::Missing => Vec::new(),
+        }
+    } else {
+        read_committed_file(&path, &head_ref, &file).await?
+    };
+    if content_is_binary(&bytes) {
+        return Ok(FileContent {
+            binary: true,
+            text: String::new(),
+        });
+    }
+    let text = String::from_utf8(bytes).map_err(|_| {
+        CommandError::new("git_output_malformed", "Git returned invalid file text.")
+    })?;
+    Ok(FileContent {
         binary: false,
         text,
     })
@@ -2001,6 +2153,215 @@ mod tests {
         assert_eq!(symbolic.code, "unresolvable_ref");
 
         std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn review_file_content_follows_the_patch_new_side() {
+        let repo = test_repo("file-content-sides");
+        let base_sha = test_rev_parse(&repo, "HEAD");
+        std::fs::write(repo.join("tracked.txt"), "committed change\n").unwrap();
+        test_git(&repo, &["add", "tracked.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "advance"]);
+        let head_sha = test_rev_parse(&repo, "HEAD");
+
+        // Committed scope reads the blob at the head endpoint.
+        let committed = review_file_content(
+            repo.to_str().unwrap().into(),
+            base_sha.clone(),
+            Some(head_sha.clone()),
+            true,
+            false,
+            "tracked.txt".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(committed.text, "committed change\n");
+
+        // Reversed commits read the blob at the base endpoint.
+        let reversed = review_file_content(
+            repo.to_str().unwrap().into(),
+            base_sha.clone(),
+            Some(head_sha.clone()),
+            true,
+            true,
+            "tracked.txt".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reversed.text, "original\n");
+
+        // Working-changes scope reads the checked-out file, uncommitted
+        // edits included; a file deleted on this side reads as empty
+        // content, not an error.
+        std::fs::write(repo.join("tracked.txt"), "working edit\n").unwrap();
+        let working = review_file_content(
+            repo.to_str().unwrap().into(),
+            base_sha.clone(),
+            None,
+            false,
+            false,
+            "tracked.txt".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(working.text, "working edit\n");
+        std::fs::remove_file(repo.join("tracked.txt")).unwrap();
+        let deleted = review_file_content(
+            repo.to_str().unwrap().into(),
+            base_sha.clone(),
+            None,
+            false,
+            false,
+            "tracked.txt".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(deleted.text.is_empty());
+        assert!(!deleted.binary);
+
+        // Untracked files read through the same verified capture as patches.
+        std::fs::write(repo.join("fresh.txt"), "untracked\n").unwrap();
+        let untracked = review_file_content(
+            repo.to_str().unwrap().into(),
+            base_sha.clone(),
+            None,
+            false,
+            false,
+            "fresh.txt".into(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(untracked.text, "untracked\n");
+
+        // Binary content keeps the binary flag instead of lossy text.
+        std::fs::write(repo.join("blob.bin"), [b'a', 0, b'b']).unwrap();
+        let binary = review_file_content(
+            repo.to_str().unwrap().into(),
+            base_sha.clone(),
+            None,
+            false,
+            false,
+            "blob.bin".into(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(binary.binary);
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn review_file_content_bounds_and_refuses_like_patches() {
+        let repo = test_repo("file-content-bounds");
+        let base_sha = test_rev_parse(&repo, "HEAD");
+
+        // A file beyond the output bound is refused, not truncated.
+        std::fs::write(repo.join("huge.txt"), vec![b'x'; MAX_OUTPUT + 1]).unwrap();
+        let oversized = review_file_content(
+            repo.to_str().unwrap().into(),
+            base_sha.clone(),
+            None,
+            false,
+            false,
+            "huge.txt".into(),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(oversized.code, "git_output_too_large");
+
+        // A path outside the worktree or with traversal is refused.
+        let escape = review_file_content(
+            repo.to_str().unwrap().into(),
+            base_sha.clone(),
+            None,
+            false,
+            false,
+            "../outside.txt".into(),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(escape.code, "invalid_path");
+
+        // A file absent at the resolved revision reads as empty content.
+        let absent = review_file_content(
+            repo.to_str().unwrap().into(),
+            base_sha.clone(),
+            Some(base_sha.clone()),
+            true,
+            false,
+            "missing.txt".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(absent.text.is_empty());
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn review_file_content_resolves_the_merge_base_for_reversed_commits() {
+        let repo = test_repo("file-content-merge-base");
+        // Feature forks the initial commit; the base branch then advances
+        // past the fork, so the displayed reversed patch's new side is the
+        // merge base, not the base branch tip.
+        test_git(&repo, &["checkout", "--quiet", "-b", "feature"]);
+        std::fs::write(repo.join("tracked.txt"), "feature change\n").unwrap();
+        test_git(&repo, &["add", "tracked.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "feature"]);
+        let feature_sha = test_rev_parse(&repo, "HEAD");
+        test_git(&repo, &["checkout", "--quiet", "-"]);
+        std::fs::write(repo.join("tracked.txt"), "base advance\n").unwrap();
+        test_git(&repo, &["add", "tracked.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "advance"]);
+        let base_tip = test_rev_parse(&repo, "HEAD");
+
+        let reversed = review_file_content(
+            repo.to_str().unwrap().into(),
+            base_tip,
+            Some(feature_sha),
+            true,
+            true,
+            "tracked.txt".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reversed.text, "original\n");
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn review_file_content_refuses_directories_outside_repositories() {
+        // The working-changes branch reads the filesystem directly, so a
+        // renderer-supplied plain folder must be refused like any other
+        // non-repository path.
+        let plain = test_path("file-content-not-repo");
+        std::fs::create_dir(&plain).unwrap();
+        std::fs::write(plain.join("secret.txt"), "nope\n").unwrap();
+        let refused = review_file_content(
+            plain.to_str().unwrap().into(),
+            "HEAD".into(),
+            None,
+            false,
+            false,
+            "secret.txt".into(),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code, "not_git_repository");
+
+        std::fs::remove_dir_all(plain).unwrap();
     }
 
     #[tokio::test]

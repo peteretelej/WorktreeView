@@ -4,8 +4,8 @@ use crate::git::{
 };
 use crate::overview::{branch_inventory, BranchInventory};
 use crate::review::{
-    commit_detail, commit_page, refs_inventory, review_changes, review_patch, CommitDetail,
-    FilePatch, RefInventory, ReviewIndex,
+    commit_detail, commit_page, refs_inventory, review_changes, review_file_content, review_patch,
+    CommitDetail, FileContent, FilePatch, RefInventory, ReviewIndex,
 };
 use crate::retrospection::{list_surfaces_in_pool, set_surface_pinned_in_pool, SurfaceListing};
 use crate::reviews::{
@@ -266,6 +266,30 @@ pub(crate) async fn read_review_patch(
     untracked: bool,
 ) -> Result<FilePatch, CommandError> {
     review_patch(
+        path,
+        base,
+        head_ref,
+        committed_only,
+        reversed,
+        file,
+        untracked,
+    )
+    .await
+}
+
+// The reviewed file's content on the patch's new side, for context expansion
+// and the full-file view; same review identity arguments as the patch read.
+#[tauri::command]
+pub(crate) async fn read_review_file(
+    path: String,
+    base: String,
+    head_ref: Option<String>,
+    committed_only: bool,
+    reversed: bool,
+    file: String,
+    untracked: bool,
+) -> Result<FileContent, CommandError> {
+    review_file_content(
         path,
         base,
         head_ref,

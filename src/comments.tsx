@@ -186,9 +186,8 @@ function MiniComposer({ placeholder, submitLabel, busy, initialBody = "", footer
     <MarkdownComposer value={body} onChange={setBody} placeholder={placeholder} autoFocus onSubmit={() => { if (body.trim() !== "") onSubmit(body); }} onCancel={onCancel} />
     <div className="comment-composer-actions">
       {footerExtra}
-      <span className={footerExtra ? "composer-hint composer-hint-inline" : "composer-hint"}><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
       <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
-      <button className="primary-button" type="button" disabled={busy || body.trim() === ""} onClick={() => onSubmit(body)}>{submitLabel}</button>
+      <button className="primary-button" type="button" title="Submit (Ctrl+Enter)" aria-keyshortcuts="Control+Enter Meta+Enter" disabled={busy || body.trim() === ""} onClick={() => onSubmit(body)}>{submitLabel}<kbd aria-hidden="true">↵</kbd></button>
     </div>
   </div>;
 }
@@ -203,12 +202,11 @@ export function DraftComposer({ placeholder, submitLabel, initialBody = "", onSu
   return <div className="comment-composer">
     <MarkdownComposer value={body} onChange={setBody} placeholder={placeholder} autoFocus onSubmit={() => { if (body.trim() !== "") onSubmit({ body, severity: severity === "" ? null : severity }); }} onCancel={onCancel} />
     <div className="comment-composer-actions">
-      <div className="severity-picker" role="radiogroup" aria-label="Comment severity">
-        {severityOptions().map((option) => <button key={option || "none"} type="button" role="radio" aria-checked={severity === option} className={severity === option ? "active" : ""} onClick={() => setSeverity(option)}>{option === "" ? "None" : option}</button>)}
-      </div>
-      <span className="composer-hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
+      <select className={`severity-select ${severity === "" ? "" : "set"}`} aria-label="Comment priority" title="Priority" value={severity} onChange={(event) => setSeverity(event.currentTarget.value as CommentSeverity | "")}>
+        {severityOptions().map((option) => <option key={option || "none"} value={option}>{option === "" ? "Priority" : option}</option>)}
+      </select>
       <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
-      <button className="primary-button" type="button" disabled={body.trim() === ""} onClick={() => onSubmit({ body, severity: severity === "" ? null : severity })}>{submitLabel}</button>
+      <button className="primary-button" type="button" title="Submit (Ctrl+Enter)" aria-keyshortcuts="Control+Enter Meta+Enter" disabled={body.trim() === ""} onClick={() => onSubmit({ body, severity: severity === "" ? null : severity })}>{submitLabel}<kbd aria-hidden="true">↵</kbd></button>
     </div>
   </div>;
 }
@@ -266,7 +264,7 @@ export function CommentStream({ comments, reversed = false, strip }: { comments:
       </div>
       {comments.composer?.kind === "review" && <div className="comment-composer-panel">
         <p className="eyebrow">New review comment</p>
-        <DraftComposer placeholder="Comment on this review" submitLabel="Comment" onSubmit={({ body, severity }) => { void comments.create({ body, severity, file_path: null, side: null, start_line: null, end_line: null, lines: [] }).then(comments.closeComposer); }} onCancel={comments.closeComposer} />
+        <DraftComposer placeholder="Summary, question, or finding…" submitLabel="Comment" onSubmit={({ body, severity }) => { void comments.create({ body, severity, file_path: null, side: null, start_line: null, end_line: null, lines: [] }).then(comments.closeComposer); }} onCancel={comments.closeComposer} />
       </div>}
       {comments.visibleThreads.length === 0
         ? <div className="comment-empty">No comments{comments.author === "all" ? " yet" : ` from ${comments.author} authors`}. Click a diff line to comment; shift-click or drag the line numbers for a range.</div>

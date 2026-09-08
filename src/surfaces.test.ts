@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { filterGoneSurfaces, pinnedSurfaces, recentWorktrees, reviewFileWorktree, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces.ts";
+import { filterGoneSurfaces, pinnedSurfaces, recentWorktrees, reviewFileRoot, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces.ts";
 import type { ChangedFile, GoneSurface, ReviewTarget } from "./navigation.ts";
 
 function goneSurface(overrides: Partial<GoneSurface> & { identity_key: string }): GoneSurface {
@@ -118,17 +118,13 @@ test("recent worktrees cap at the newest commits, skip pinned, and sink unknown 
   );
 });
 
-test("open-on-disk eligibility keeps live worktree files and drops checkouts without one", () => {
-  assert.equal(reviewFileWorktree(worktreeTarget, changedFile("M"), false), "/wt/demo");
-  assert.equal(reviewFileWorktree(worktreeTarget, changedFile("R100"), false), "/wt/demo");
-  assert.equal(reviewFileWorktree(worktreeTarget, changedFile("A"), false), "/wt/demo");
-  assert.equal(reviewFileWorktree(worktreeTarget, changedFile("D"), false), null);
-  assert.equal(reviewFileWorktree(refTarget, changedFile("M"), false), null);
-  assert.equal(reviewFileWorktree(commitTarget, changedFile("M"), false), null);
-  assert.equal(reviewFileWorktree(worktreeTarget, null, false), null);
-});
-
-test("reversed worktree diffs swap which side of the diff is on disk", () => {
-  assert.equal(reviewFileWorktree(worktreeTarget, changedFile("D"), true), "/wt/demo");
-  assert.equal(reviewFileWorktree(worktreeTarget, changedFile("A"), true), null);
+test("open-on-disk root prefers the owning checkout and falls back to the repo", () => {
+  const worktrees = [worktreeTarget.worktree, { path: "/wt/other", branch: "refs/heads/other", head: "sha" }];
+  assert.equal(reviewFileRoot(worktreeTarget, changedFile("M"), worktrees, "/repo"), "/wt/demo");
+  assert.equal(reviewFileRoot(worktreeTarget, changedFile("D"), worktrees, "/repo"), "/wt/demo");
+  assert.equal(reviewFileRoot(refTarget, changedFile("M"), worktrees, "/repo"), "/repo");
+  const checkedOutRef: ReviewTarget = { kind: "ref", name: "refs/heads/demo" };
+  assert.equal(reviewFileRoot(checkedOutRef, changedFile("M"), worktrees, "/repo"), "/wt/demo");
+  assert.equal(reviewFileRoot(commitTarget, changedFile("M"), worktrees, "/repo"), "/repo");
+  assert.equal(reviewFileRoot(worktreeTarget, null, worktrees, "/repo"), null);
 });

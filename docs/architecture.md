@@ -12,7 +12,8 @@ normalized domain data through narrow, typed Tauri commands.
   `remove_repo`, `get_branch_inventory`, `fetch_project`,
   `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
   `list_refs`, `list_commits`, `describe_commit`, `list_review_changes`,
-  `list_surfaces`, `read_review_patch`, `open_review_file`, `create_comment`,
+  `list_surfaces`, `read_review_patch`, `read_review_file`, `open_review_file`,
+  `create_comment`,
   `list_comments`, `list_submissions`, `reply_comment`, `set_comment_resolved`,
   `edit_comment`, `match_comment_anchors`.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
@@ -35,7 +36,9 @@ normalized domain data through narrow, typed Tauri commands.
   local worktree branches without an upstream. Remote-tracking branches
   ride the same pass and skip the fallback probe.
 - `review.rs`: assembles review data (changed files, patches, commits,
-  refs) from Git results.
+  refs) from Git results, plus the new-side file content that context
+  expansion and the full-file view render (worktree read or blob at a rev,
+  bounded and binary-sniffed like patches).
 - `reviews.rs`: owns the comment substrate: review identity
   resolve-or-create, comment storage and threads, write-time anchor hash
   (FNV-1a over marker-free line content) and snippet capture, and the

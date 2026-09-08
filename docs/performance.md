@@ -29,6 +29,12 @@ later optimization target.
   renders from the cache with no Git spawn; the cache resets when the
   review's base, target, scope, or direction changes, matching the index's
   snapshot freshness.
+- Context expansion and the full-file view fetch the file's content once
+  per file through a bounded read (the same 4 MiB ceiling) and keep a
+  smaller in-memory cache than patches. Expansion splices fetched gap
+  lines into the existing hunk model, so both views flow through the same
+  page-bounded rendering: a fully expanded hunk or a large file pages at
+  the same fixed line budget, and the DOM never holds more than one page.
 - Diff highlighting never delays first paint: lines render as plain text
   immediately, and token spans swap in for the visible hunk page once the
   worker responds. Tokenization runs in a Web Worker, so grammar CPU can

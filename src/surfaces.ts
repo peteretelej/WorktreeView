@@ -115,12 +115,18 @@ export function recentWorktrees(worktrees: Worktree[], dateByBranch: Map<string,
     .map((entry) => entry.worktree);
 }
 
-// Open/reveal actions only make sense when the diff's on-disk side actually
-// exists in a live worktree: ref and commit targets have no checkout, and a
-// reversed worktree diff swaps added and deleted, so a status that reads as
-// added there means the file is gone from disk.
-export function reviewFileWorktree(target: ReviewTarget, file: ChangedFile | null, reversed: boolean): string | null {
-  if (file === null || target.kind !== "worktree") return null;
-  if (file.status.startsWith(reversed ? "A" : "D")) return null;
-  return target.worktree.path;
+// Open/reveal only needs a plausible checkout root; the backend re-validates
+// the joined path at click time and refuses a missing file, so existence is
+// never probed at render. Prefer the checkout that owns the reviewed
+// content: the reviewed worktree itself, or the worktree with a ref target's
+// branch checked out. Everything else (commits, remote refs, gone surfaces)
+// falls back to the repository's main worktree folder.
+export function reviewFileRoot(target: ReviewTarget, file: ChangedFile | null, worktrees: Worktree[] | undefined, repoPath: string): string | null {
+  if (file === null) return null;
+  if (target.kind === "worktree") return target.worktree.path;
+  if (target.kind === "ref") {
+    const owning = worktrees?.find((worktree) => worktree.branch === target.name);
+    if (owning) return owning.path;
+  }
+  return repoPath;
 }

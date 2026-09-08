@@ -1433,6 +1433,16 @@ button:disabled {
 .hunk-list { min-width: max-content; padding: 12px; font: 13px/1.5 var(--font-mono); }
 .hunk { margin-bottom: 12px; border: 1px solid var(--border); background: var(--code-surface); }
 .hunk-header { padding: 4px 10px; color: var(--muted); background: var(--surface-2); font-size: 11px; }
+.diff-gap { display: flex; justify-content: center; margin-bottom: 12px; border: 1px solid var(--border); border-top: 0; background: var(--surface-2); }
+.diff-gap:first-child { margin-top: 12px; border-top: 1px solid var(--border); }
+.expand-gap { display: inline-flex; gap: 5px; align-items: center; padding: 3px 12px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; }
+.expand-gap:hover:not(:disabled), .expand-gap:focus-visible { color: var(--foreground); }
+.expand-gap:disabled { cursor: default; }
+.patch-view-toggle { display: flex; height: 22px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.patch-view-toggle button { padding: 0 8px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
+.patch-view-toggle button.active { background: var(--primary-soft); color: var(--foreground); }
+.file-view.hunk-list .diff-line { grid-template-columns: 42px max-content; }
+.file-view.hunk-list.wrap-lines .diff-line { grid-template-columns: 42px minmax(0, 1fr); white-space: pre-wrap; overflow-wrap: anywhere; }
 .diff-line { display: grid; grid-template-columns: 42px 42px max-content; min-height: 20px; padding-right: 12px; white-space: pre; -webkit-tab-size: 4; tab-size: 4; }
 .diff-line code { color: var(--foreground); }
 .line-number { padding-right: 9px; color: var(--line-number); text-align: right; user-select: none; }

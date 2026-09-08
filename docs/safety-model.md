@@ -8,9 +8,9 @@ repository cannot mutate it or execute code it defines.
 - No staging, committing, checkout, pushing, or worktree management from
   any review path, present or planned.
 - Reviews are computed from read-only Git plumbing: diff, rev-parse,
-  for-each-ref, log, ls-files, worktree list. The per-worktree change-count
-  probe runs status with --no-optional-locks so it can never refresh or lock
-  the index.
+  for-each-ref, log, ls-files, ls-tree, cat-file, merge-base, worktree
+  list. The per-worktree change-count probe runs status with
+  --no-optional-locks so it can never refresh or lock the index.
 - The one Git write sits outside review computation: the refresh action
   runs `git fetch --all --prune`, which updates remote-tracking refs only.
   It is always user-initiated, never runs as a side effect of opening or
@@ -31,6 +31,19 @@ repository cannot mutate it or execute code it defines.
   so classification never depends on the user's Git language. All other
   invocations keep the user's locale for human-readable errors.
 
+## Reading file content
+
+- Context expansion and the full-file view fetch the reviewed file's
+  content on the displayed diff's new side. Committed and reversed sides
+  read through `ls-tree` plus `cat-file blob`, with the blob SHA taken from
+  ls-tree's output so no renderer-assembled `rev:path` name reaches Git;
+  working-changes reads go through the same cap-std path as untracked
+  captures: relative paths only, the root pinned to a verified worktree,
+  regular files only.
+- Every content read shares the patch read's bounds: 4 MiB ceiling per
+  stream, a 10 second deadline, kill-on-drop, and a binary check that
+  refuses NUL-bearing content instead of rendering it.
+
 ## Opening reviewed files
 
 - The patch pane can hand a worktree file to the OS default application or
@@ -40,8 +53,14 @@ repository cannot mutate it or execute code it defines.
   worktree root, canonicalizes the result, and refuses anything that
   resolves outside that root, so renderer content cannot steer the OS
   opener to arbitrary locations.
-- Surfaces without a checkout (refs, commits, gone worktrees) and deleted
-  files never offer the action.
+- The action is offered whenever the review can name a plausible checkout
+  root: the reviewed worktree, a branch target's owning worktree, or the
+  repository's main worktree folder. The root is always an app-known
+  worktree path, never renderer-supplied. Whether the file still exists on
+  disk is only decided at click time, when the canonicalize step refuses a
+  missing file with a visible error; no render-time filesystem probing
+  runs, and the opened file may differ from the reviewed content when the
+  checkout is not at the reviewed commit.
 
 ## Network
 
