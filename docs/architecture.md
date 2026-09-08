@@ -9,7 +9,8 @@ normalized domain data through narrow, typed Tauri commands.
 
 - `commands.rs`: thin typed IPC adapters. The full command surface:
   `open_repo`, `list_repos`, `list_worktrees`, `list_worktree_status`,
-  `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
+  `remove_repo`, `get_branch_inventory`, `set_repo_pinned`,
+  `set_surface_pinned`, `get_settings`, `set_settings`,
   `list_refs`, `list_commits`, `list_review_changes`, `list_surfaces`,
   `read_review_patch`.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
@@ -22,7 +23,13 @@ normalized domain data through narrow, typed Tauri commands.
   neutralizes them so review data never executes repository-defined
   filters.
 - `git/parse.rs`: parses Git porcelain output (name-status, numstat,
-  commits, worktrees, untracked paths) into typed domain structs.
+  commits, branch records, worktrees, untracked paths) into typed domain
+  structs.
+- `overview.rs`: assembles the project page's branch inventory from one
+  `for-each-ref refs/heads` pass (per-branch head, last-commit identity,
+  upstream and its ahead/behind track), the remote branch count, the origin
+  URL, and a bounded ahead/behind fallback against the default branch for
+  worktree branches without an upstream.
 - `review.rs`: assembles review data (changed files, patches, commits,
   refs) from Git results.
 - `cache.rs`: SQLite-backed history cache for commit pages and ancestry
@@ -74,8 +81,9 @@ opens, `pin` for surfaces created by pinning). The repo-scoped tables
 `REFERENCES repos(path) ON DELETE CASCADE`, so deleting a repo's row prunes
 its cached pages and surface rows automatically; the shared `commits` and
 `ancestry_marks` content is keyed by SHA and is never cascaded. Pruning is a
-store-level property: the app has no repo-removal UI, and the cascade
-activates for whichever flow deletes the row.
+store-level property: the remove-project flow (`remove_repo`) deletes the
+registry row and the cascade prunes that repo's cache and retrospection
+rows; nothing on disk is touched.
 
 Opening a worktree's or branch's history (or its review) records the
 surface's identity and resolved head in `retrospected_surfaces`; recording

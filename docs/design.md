@@ -4,11 +4,22 @@
   inline with a gone badge; every other disappeared surface collects in a
   searchable per-repo Archived section so months of deleted branches stay
   findable without cluttering the live sidebar.
-- Opening a project lands on its overview, not a bare history surface: the
-  repository's worktrees with checked-out branch, HEAD, and uncommitted
-  change count (main worktree first), with one-click access to reviews and
-  the working-changes view. Commit history remains a permanent sidebar
-  fixture.
+- Opening a project lands on its overview, not a bare history surface. The
+  header answers "what is this project": copyable chips for the project path,
+  origin remote (or local-only), and default branch, above a stats strip
+  (worktree count, total uncommitted changes, branches ahead of their base,
+  branch counts). The worktree table (main worktree first) shows each
+  worktree's branch, path, last commit (subject, author, age), and status
+  chips: the changed chip opens the working-changes view, the ahead/behind
+  chip opens the committed changes against the branch's upstream or the
+  default branch, and clicking a row opens the default review. Branches
+  without upstreams show ahead/behind against the default branch, computed
+  locally; upstream tracking reflects the last fetch because the app never
+  fetches. Commit history remains a permanent sidebar fixture.
+- The project actions menu (pinned to the overview header) offers pin, copy
+  path, and remove. Remove deletes the project from the app's registry only:
+  the repository, worktrees, and history on disk are never touched, and the
+  removal is confirmed before it runs.
 - A worktree review offers three presets: Working changes pins the base to
   the checked-out branch tip so only uncommitted content shows, All changes
   reviews everything against the base with uncommitted content included, and
