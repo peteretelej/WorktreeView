@@ -31,6 +31,18 @@ repository cannot mutate it or execute code it defines.
   so classification never depends on the user's Git language. All other
   invocations keep the user's locale for human-readable errors.
 
+## Opening reviewed files
+
+- The patch pane can hand a worktree file to the OS default application or
+  reveal it in the file manager. The action is user-initiated, never part of
+  review computation, and spawns no Git and makes no network requests.
+- The webview supplies only a diff-relative path; the command joins the
+  worktree root, canonicalizes the result, and refuses anything that
+  resolves outside that root, so renderer content cannot steer the OS
+  opener to arbitrary locations.
+- Surfaces without a checkout (refs, commits, gone worktrees) and deleted
+  files never offer the action.
+
 ## Network
 
 - Review computations make no network requests; inspection commands spawn

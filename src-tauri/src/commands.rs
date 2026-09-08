@@ -17,7 +17,7 @@ use crate::store::{
     get_settings_in_pool, load_repos, open_repo_path, remove_repo_in_pool, set_repo_pinned_in_pool,
     set_settings_in_pool, Repo, Settings,
 };
-use crate::{canonical_path, AppState, CommandError};
+use crate::{canonical_path, plain_path, AppState, CommandError};
 use serde::Serialize;
 use std::path::Path;
 
@@ -275,6 +275,48 @@ pub(crate) async fn read_review_patch(
         untracked,
     )
     .await
+}
+
+// Handing a reviewed file to the OS shell is user-initiated and must stay
+// inside the reviewed worktree: the renderer supplies only a diff-relative
+// path, the join is canonicalized, and anything resolving outside the root
+// (absolute paths, `..`, symlinks out) is refused before the opener runs.
+#[tauri::command]
+pub(crate) fn open_review_file(
+    worktree_path: String,
+    path: String,
+    reveal: bool,
+) -> Result<(), CommandError> {
+    if path.trim().is_empty() {
+        return Err(CommandError::new("invalid_path", "Select a non-empty file."));
+    }
+    let root = Path::new(&worktree_path);
+    if !root.is_dir() {
+        return Err(CommandError::new(
+            "invalid_path",
+            "The worktree folder does not exist.",
+        ));
+    }
+    let root = plain_path(&root.canonicalize().map_err(|_| {
+        CommandError::new("invalid_path", "The worktree folder could not be resolved.")
+    })?);
+    let resolved = plain_path(&root.join(&path).canonicalize().map_err(|_| {
+        CommandError::new("invalid_path", "The file is no longer in the worktree.")
+    })?);
+    if !resolved.starts_with(&root) {
+        return Err(CommandError::new(
+            "invalid_path",
+            "The file is outside the worktree.",
+        ));
+    }
+    let opened = if reveal {
+        tauri_plugin_opener::reveal_item_in_dir(&resolved)
+    } else {
+        tauri_plugin_opener::open_path(&resolved, None::<&str>)
+    };
+    opened.map_err(|error| {
+        CommandError::new("open_failed", format!("The file could not be opened: {error}"))
+    })
 }
 
 // Review identity keys on resolved SHAs: the frontend derives base_sha and

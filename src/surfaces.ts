@@ -1,4 +1,4 @@
-import type { GoneSurface, SurfacePinRef, Worktree } from "./navigation";
+import type { ChangedFile, GoneSurface, ReviewTarget, SurfacePinRef, Worktree } from "./navigation";
 
 // One sidebar child row the pin/archive logic operates on. Live rows come
 // from the worktree and branch inventory, gone rows from retrospection.
@@ -113,4 +113,14 @@ export function recentWorktrees(worktrees: Worktree[], dateByBranch: Map<string,
     .sort((left, right) => right.date - left.date || left.index - right.index)
     .slice(0, limit)
     .map((entry) => entry.worktree);
+}
+
+// Open/reveal actions only make sense when the diff's on-disk side actually
+// exists in a live worktree: ref and commit targets have no checkout, and a
+// reversed worktree diff swaps added and deleted, so a status that reads as
+// added there means the file is gone from disk.
+export function reviewFileWorktree(target: ReviewTarget, file: ChangedFile | null, reversed: boolean): string | null {
+  if (file === null || target.kind !== "worktree") return null;
+  if (file.status.startsWith(reversed ? "A" : "D")) return null;
+  return target.worktree.path;
 }

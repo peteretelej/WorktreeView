@@ -1,11 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { filterGoneSurfaces, pinnedSurfaces, recentWorktrees, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces.ts";
-import type { GoneSurface } from "./navigation.ts";
+import { filterGoneSurfaces, pinnedSurfaces, recentWorktrees, reviewFileWorktree, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces.ts";
+import type { ChangedFile, GoneSurface, ReviewTarget } from "./navigation.ts";
 
 function goneSurface(overrides: Partial<GoneSurface> & { identity_key: string }): GoneSurface {
   return { kind: "branch", label: "", detail: "", head_sha: "sha", last_seen_at: 1, pinned_at: null, ...overrides };
 }
+
+function changedFile(status: string): ChangedFile {
+  return { path: "src/app.ts", status, untracked: false };
+}
+
+const worktreeTarget: ReviewTarget = { kind: "worktree", worktree: { path: "/wt/demo", branch: "refs/heads/demo", head: "sha" } };
+const refTarget: ReviewTarget = { kind: "ref", name: "refs/remotes/origin/demo" };
+const commitTarget: ReviewTarget = { kind: "commit", sha: "abc123", parents: [], defaultBaseAncestor: false };
 
 function row(overrides: Partial<SurfaceRow> & { kind: "worktree" | "branch"; identityKey: string }): SurfaceRow {
   return { label: overrides.identityKey, startRef: null, worktreePath: null, pinnedAt: null, gone: false, ...overrides };
@@ -108,4 +116,19 @@ test("recent worktrees cap at the newest commits, skip pinned, and sink unknown 
     recentWorktrees(worktrees, new Map(), new Set(), 2).map((worktree) => worktree.path),
     ["/wt/old", "/wt/pinned"],
   );
+});
+
+test("open-on-disk eligibility keeps live worktree files and drops checkouts without one", () => {
+  assert.equal(reviewFileWorktree(worktreeTarget, changedFile("M"), false), "/wt/demo");
+  assert.equal(reviewFileWorktree(worktreeTarget, changedFile("R100"), false), "/wt/demo");
+  assert.equal(reviewFileWorktree(worktreeTarget, changedFile("A"), false), "/wt/demo");
+  assert.equal(reviewFileWorktree(worktreeTarget, changedFile("D"), false), null);
+  assert.equal(reviewFileWorktree(refTarget, changedFile("M"), false), null);
+  assert.equal(reviewFileWorktree(commitTarget, changedFile("M"), false), null);
+  assert.equal(reviewFileWorktree(worktreeTarget, null, false), null);
+});
+
+test("reversed worktree diffs swap which side of the diff is on disk", () => {
+  assert.equal(reviewFileWorktree(worktreeTarget, changedFile("D"), true), "/wt/demo");
+  assert.equal(reviewFileWorktree(worktreeTarget, changedFile("A"), true), null);
 });
