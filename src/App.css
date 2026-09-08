@@ -1634,8 +1634,14 @@ button:disabled {
 .composer-preview-empty { margin: 0; color: var(--muted); font-size: 11px; }
 .comment-composer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .comment-composer-actions .primary-button, .comment-composer-actions .secondary-button, .comment-composer-actions .danger-button { display: inline-flex; align-items: center; gap: 5px; flex: none; width: auto; margin-top: 0; height: 26px; padding: 0 10px; }
-/* Extras (delete) lead the row; Cancel and submit close it on the right. */
+/* Extras (delete) lead the row; Cancel and submit close it on the right.
+   Submit is a quiet accent chip (its content is just the shortcut), and
+   delete is a ghost danger so its label keeps the danger color. */
 .comment-composer-actions .secondary-button { margin-left: auto; }
+.comment-composer-actions .primary-button { border-color: color-mix(in oklch, var(--primary) 45%, transparent); background: var(--primary-soft); color: var(--primary); }
+.comment-composer-actions .primary-button:not(:disabled):hover { background: color-mix(in oklch, var(--primary) 16%, var(--surface)); color: var(--primary); }
+.comment-composer-actions .danger-button { border-color: color-mix(in oklch, var(--danger) 40%, transparent); background: transparent; color: var(--danger); font-weight: 500; }
+.comment-composer-actions .danger-button:hover { background: var(--danger-soft); filter: none; }
 .severity-select { height: 26px; max-width: 120px; padding: 0 2px 0 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--muted); font: 10px var(--font-sans); }
 .severity-select:hover, .severity-select.set { color: var(--foreground); }
 .comment-composer-actions .primary-button kbd { padding: 0 4px; border-color: color-mix(in oklch, currentColor 40%, transparent); background: transparent; color: inherit; opacity: 0.75; }
