@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, Trash2 } from "lucide-react";
 import type { DiffLine } from "./diff.ts";
 import type { ReviewIdentity } from "./navigation.ts";
 import { copyText } from "./clipboard.ts";
@@ -49,6 +49,7 @@ export type CommentsApi = {
   reply(parentId: number, body: string): Promise<void>;
   setResolved(commentId: number, resolved: boolean): Promise<void>;
   edit(commentId: number, body: string): Promise<void>;
+  remove(commentId: number): Promise<void>;
 };
 
 export function useReviewComments(identity: ReviewIdentity | null, index: ReviewIndexSummary | null, file: { path: string; lines: DiffLine[] } | null, reversed: boolean): CommentsApi {
@@ -129,6 +130,10 @@ export function useReviewComments(identity: ReviewIdentity | null, index: Review
       await invoke("edit_comment", { commentId, body });
       if (key) await refresh(key);
     },
+    async remove(commentId: number) {
+      await invoke("delete_comment", { commentId });
+      if (key) await refresh(key);
+    },
   };
 }
 
@@ -175,12 +180,13 @@ function CommentCard({ comment, status, reversed = false, actions }: { comment: 
   </article>;
 }
 
-function MiniComposer({ placeholder, submitLabel, busy, onSubmit, onCancel }: { placeholder: string; submitLabel: string; busy: boolean; onSubmit: (body: string) => void; onCancel: () => void }) {
-  const [body, setBody] = useState("");
+function MiniComposer({ placeholder, submitLabel, busy, initialBody = "", footerExtra, onSubmit, onCancel }: { placeholder: string; submitLabel: string; busy: boolean; initialBody?: string; footerExtra?: ReactNode; onSubmit: (body: string) => void; onCancel: () => void }) {
+  const [body, setBody] = useState(initialBody);
   return <div className="comment-composer">
     <MarkdownComposer value={body} onChange={setBody} placeholder={placeholder} autoFocus onSubmit={() => { if (body.trim() !== "") onSubmit(body); }} onCancel={onCancel} />
     <div className="comment-composer-actions">
-      <span className="composer-hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
+      {footerExtra}
+      <span className={footerExtra ? "composer-hint composer-hint-inline" : "composer-hint"}><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
       <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
       <button className="primary-button" type="button" disabled={busy || body.trim() === ""} onClick={() => onSubmit(body)}>{submitLabel}</button>
     </div>
@@ -216,7 +222,15 @@ export function CommentThreadView({ thread, status, comments, reversed = false }
   const root = thread.comment;
   const resolved = root.resolved_at !== null;
   const editControls = (comment: ReviewComment) => editing === comment.id
-    ? <MiniComposer placeholder="Edit comment" submitLabel="Save" busy={false} onSubmit={(body) => { setEditing(null); void comments.edit(comment.id, body); }} onCancel={() => setEditing(null)} />
+    ? <MiniComposer
+      placeholder="Edit comment"
+      submitLabel="Save"
+      busy={false}
+      initialBody={comment.body}
+      footerExtra={<button className="danger-button" type="button" onClick={() => { setEditing(null); void comments.remove(comment.id); }}><Trash2 size={12} /> Delete</button>}
+      onSubmit={(body) => { setEditing(null); void comments.edit(comment.id, body); }}
+      onCancel={() => setEditing(null)}
+    />
     : <div className="comment-actions">
       <button type="button" onClick={() => setEditing(comment.id)}>Edit</button>
     </div>;

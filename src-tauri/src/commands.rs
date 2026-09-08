@@ -9,7 +9,7 @@ use crate::review::{
 };
 use crate::retrospection::{list_surfaces_in_pool, set_surface_pinned_in_pool, SurfaceListing};
 use crate::reviews::{
-    create_comment_in_pool, edit_comment_in_pool, list_comments_in_pool,
+    create_comment_in_pool, delete_comment_in_pool, edit_comment_in_pool, list_comments_in_pool,
     list_submissions_in_pool, match_comment_anchors_in_pool, reply_comment_in_pool,
     set_comment_resolved_in_pool, AnchorStatus, Comment, CommentDraft, PatchLine, Submission,
 };
@@ -389,6 +389,14 @@ pub(crate) async fn edit_comment(
     state: tauri::State<'_, AppState>,
 ) -> Result<Comment, CommandError> {
     edit_comment_in_pool(&state.pool, comment_id, &body).await
+}
+
+#[tauri::command]
+pub(crate) async fn delete_comment(
+    comment_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    delete_comment_in_pool(&state.pool, comment_id).await
 }
 
 #[tauri::command]

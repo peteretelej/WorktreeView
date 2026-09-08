@@ -64,7 +64,10 @@
   and review-level comments do not drift.
 - Threads are a root comment plus flat replies; resolve/reopen lives on the
   root. Authors are the local human user (`you`; no account system in v0)
-  or agents, and the merged comment stream filters by author. Comments are
+  or agents, and the merged comment stream filters by author. Editing a
+  comment rewrites its body in place; the delete action inside the edit
+  composer permanently removes the comment, and deleting a root takes its
+  replies. Comments are
   created by selecting a line or range in the diff, with review-level and
   file-level entry points always available.
 - Anchoring stays a reading-first gesture: clicking code only selects, and

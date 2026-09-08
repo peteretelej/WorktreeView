@@ -523,6 +523,19 @@ pub(crate) async fn edit_comment_in_pool(
     load_comment(pool, comment_id).await?.ok_or_else(comment_not_found)
 }
 
+// Deletion is permanent and cascades: removing a root takes its replies.
+pub(crate) async fn delete_comment_in_pool(
+    pool: &SqlitePool,
+    comment_id: i64,
+) -> Result<(), CommandError> {
+    load_comment(pool, comment_id).await?.ok_or_else(comment_not_found)?;
+    sqlx::query("DELETE FROM comments WHERE id = ?")
+        .bind(comment_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 struct LineAnchor {
     comment_id: i64,
     side: String,
@@ -983,6 +996,23 @@ mod tests {
         assert_eq!(nested.unwrap_err().code, "invalid_comment");
         let resolve_reply = set_comment_resolved_in_pool(&pool, reply.id, true).await;
         assert_eq!(resolve_reply.unwrap_err().code, "invalid_comment");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_root_takes_its_replies_and_unknown_ids_are_rejected() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let root = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("root"))
+            .await
+            .unwrap();
+        let reply = reply_comment_in_pool(&pool, root.id, "reply", None).await.unwrap();
+        delete_comment_in_pool(&pool, root.id).await.unwrap();
+        let listed = list_comments_in_pool(&pool, "/demo", "base", "/demo", "worktree")
+            .await
+            .unwrap();
+        assert!(listed.iter().all(|comment| comment.id != root.id && comment.id != reply.id));
+        let missing = delete_comment_in_pool(&pool, root.id).await;
+        assert_eq!(missing.unwrap_err().code, "invalid_comment");
     }
 
     #[tokio::test]
