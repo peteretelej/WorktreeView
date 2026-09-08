@@ -9,9 +9,9 @@ mod store;
 mod testutil;
 
 use commands::{
-    get_branch_inventory, get_settings, list_commits, list_refs, list_repos, list_review_changes,
-    list_surfaces, list_worktree_status, list_worktrees, open_repo, read_review_patch, remove_repo,
-    set_repo_pinned, set_settings, set_surface_pinned,
+    fetch_project, get_branch_inventory, get_settings, list_commits, list_refs, list_repos,
+    list_review_changes, list_surfaces, list_worktree_status, list_worktrees, open_repo,
+    read_review_patch, remove_repo, set_repo_pinned, set_settings, set_surface_pinned,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -192,6 +192,7 @@ pub fn run() {
             list_worktree_status,
             remove_repo,
             get_branch_inventory,
+            fetch_project,
             set_repo_pinned,
             set_surface_pinned,
             list_refs,

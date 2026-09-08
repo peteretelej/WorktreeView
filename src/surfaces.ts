@@ -27,12 +27,27 @@ export function surfacePinIndex(pins: SurfacePinRef[]): Map<string, number> {
 }
 
 function shortRef(ref: string): string {
-  return ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
+  return ref.startsWith("refs/heads/")
+    ? ref.slice("refs/heads/".length)
+    : ref.startsWith("refs/remotes/")
+      ? ref.slice("refs/remotes/".length)
+      : ref;
 }
 
-// Build the repo's child rows: live worktrees, live branches, then recorded
-// gone surfaces (label falls back to the identity for rows recorded while
-// detached). Live worktree pins match through separator-normalized keys.
+// A gone worktree reads as its worktree folder name; the recorded branch
+// label (often "main") would read as the repository's main branch.
+export function goneSurfaceLabel(surface: GoneSurface): string {
+  if (surface.kind === "worktree") {
+    const tail = surface.identity_key.split(/[\\/]/).filter(Boolean).pop();
+    if (tail) return tail;
+  }
+  return shortRef(surface.label || surface.identity_key);
+}
+
+// Build the repo's child rows: live worktrees, live branches (local and
+// remote; the refs/remotes/ prefix is stripped so "origin/main" shows), then
+// recorded gone surfaces. Live worktree pins match through
+// separator-normalized keys.
 export function surfaceRows(worktrees: Worktree[], branches: string[], gone: GoneSurface[], pins: SurfacePinRef[]): SurfaceRow[] {
   const index = surfacePinIndex(pins);
   const rows: SurfaceRow[] = [];
@@ -62,7 +77,7 @@ export function surfaceRows(worktrees: Worktree[], branches: string[], gone: Gon
     rows.push({
       kind: surface.kind,
       identityKey: surface.identity_key,
-      label: surface.label || shortRef(surface.identity_key),
+      label: goneSurfaceLabel(surface),
       startRef: surface.head_sha,
       worktreePath: null,
       pinnedAt: surface.pinned_at,
@@ -72,20 +87,12 @@ export function surfaceRows(worktrees: Worktree[], branches: string[], gone: Gon
   return rows;
 }
 
-// Pinned surfaces sort first among a repo's children by pinned_at desc;
-// unpinned gone surfaces partition into the Archived section instead of
-// rendering inline.
-export function splitPinned(rows: SurfaceRow[]): { pinned: SurfaceRow[]; live: SurfaceRow[]; archived: SurfaceRow[] } {
-  const pinned: SurfaceRow[] = [];
-  const live: SurfaceRow[] = [];
-  const archived: SurfaceRow[] = [];
-  for (const row of rows) {
-    if (row.pinnedAt !== null) pinned.push(row);
-    else if (row.gone) archived.push(row);
-    else live.push(row);
-  }
+// Pinned surfaces sort by pinned_at desc; the sidebar renders only these
+// plus the capped active worktrees, so unpinned rows stay unpreserved here.
+export function pinnedSurfaces(rows: SurfaceRow[]): SurfaceRow[] {
+  const pinned = rows.filter((row) => row.pinnedAt !== null);
   pinned.sort((left, right) => (right.pinnedAt ?? 0) - (left.pinnedAt ?? 0));
-  return { pinned, live, archived };
+  return pinned;
 }
 
 // Archived search: case-insensitive substring match on label and detail.
@@ -93,4 +100,17 @@ export function filterGoneSurfaces(surfaces: GoneSurface[], query: string): Gone
   const needle = query.trim().toLowerCase();
   if (!needle) return surfaces;
   return surfaces.filter((surface) => surface.label.toLowerCase().includes(needle) || surface.detail.toLowerCase().includes(needle));
+}
+
+// Sidebar children are capped: pinned surfaces stay explicit and everything
+// else shows the most recently committed worktrees. Worktrees on branches
+// with unknown dates (detached HEAD, inventory not loaded yet) keep their
+// list order behind dated ones.
+export function recentWorktrees(worktrees: Worktree[], dateByBranch: Map<string, number>, pinnedKeys: ReadonlySet<string>, limit: number): Worktree[] {
+  return worktrees
+    .filter((worktree) => !pinnedKeys.has(worktreeKey(worktree.path)))
+    .map((worktree, index) => ({ worktree, index, date: dateByBranch.get(worktree.branch) ?? 0 }))
+    .sort((left, right) => right.date - left.date || left.index - right.index)
+    .slice(0, limit)
+    .map((entry) => entry.worktree);
 }

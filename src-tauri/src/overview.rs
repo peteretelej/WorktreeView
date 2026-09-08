@@ -1,6 +1,6 @@
 use crate::git::{
     git_args, git_execution_error, parse_branch_records, parse_worktrees, primary_branch,
-    run_git, BranchSummary,
+    run_git, BranchRecord, BranchSummary,
 };
 use crate::{canonical_path, CommandError};
 use serde::Serialize;
@@ -12,13 +12,15 @@ pub struct BranchInventory {
     pub origin_url: Option<String>,
     pub remote_branch_count: u32,
     pub branches: Vec<BranchSummary>,
+    pub remote_branches: Vec<BranchSummary>,
 }
 
-// One bounded pass over refs/heads gives the project page almost everything:
-// per-branch HEAD, last-commit identity, upstream and its ahead/behind track.
-// Branches checked out in worktrees without an upstream get one extra
-// rev-list --count against the default branch, so agent-created branches
-// still show their divergence from main. The optional fallback probe and
+// One bounded pass over refs/heads and refs/remotes gives the project page
+// almost everything: per-branch HEAD, last-commit identity, upstream and its
+// ahead/behind track. Local branches checked out in worktrees without an
+// upstream get one extra rev-list --count against the default branch, so
+// agent-created branches still show their divergence from main; remote
+// branches never trigger the fallback probe. The optional fallback probe and
 // origin URL degrade to empty values on failure without sinking the
 // inventory; structural Git failures still error.
 // for-each-ref does not reliably expand %xNN hex escapes (that is a git log
@@ -31,26 +33,36 @@ const BRANCH_FORMAT: &str = "--format=%(refname)\u{1f}%(objectname)\u{1f}%(commi
 pub(crate) async fn branch_inventory(path: String) -> Result<BranchInventory, CommandError> {
     let path = canonical_path(&path)?;
     let (exit_code, stdout, stderr) =
-        run_git(&path, &["for-each-ref", "refs/heads", BRANCH_FORMAT]).await?;
+        run_git(&path, &["for-each-ref", "refs/heads", "refs/remotes", BRANCH_FORMAT]).await?;
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
     }
     let records = parse_branch_records(&stdout)?;
+    // The symbolic refs/remotes/<remote>/HEAD is a pointer, not a branch.
+    let local: Vec<&BranchRecord> = records
+        .iter()
+        .filter(|record| record.ref_name.starts_with("refs/heads/"))
+        .collect();
+    let remote: Vec<&BranchRecord> = records
+        .iter()
+        .filter(|record| {
+            record.ref_name.starts_with("refs/remotes/") && !record.ref_name.ends_with("/HEAD")
+        })
+        .collect();
 
-    let remote_branch_count = remote_branch_count(&path).await?;
     let origin_url = origin_url(&path).await;
 
-    let heads: Vec<String> = records
+    let heads: Vec<String> = local
         .iter()
         .map(|record| record.ref_name.clone())
         .collect();
     let default_branch = primary_branch(&heads).map(str::to_string);
 
-    // The fallback is bounded by the worktree count: only branches actually
-    // checked out somewhere get an extra probe.
+    // The fallback is bounded by the worktree count: only local branches
+    // actually checked out somewhere get an extra probe.
     let worktree_branches = worktree_branches(&path).await;
-    let mut branches = Vec::with_capacity(records.len());
-    for record in &records {
+    let mut branches = Vec::with_capacity(local.len());
+    for record in &local {
         let counts = match record.upstream.as_deref() {
             Some(_) => parse_track(&record.track),
             None => {
@@ -71,23 +83,35 @@ pub(crate) async fn branch_inventory(path: String) -> Result<BranchInventory, Co
             Some((ahead, behind)) => (Some(ahead), Some(behind)),
             None => (None, None),
         };
-        branches.push(BranchSummary {
-            ref_name: record.ref_name.clone(),
-            head: record.head.clone(),
-            author: record.author.clone(),
-            subject: record.subject.clone(),
-            commit_date: record.commit_date,
-            upstream: record.upstream.clone(),
-            ahead,
-            behind,
-        });
+        branches.push(branch_summary(record, ahead, behind));
     }
+    // Remote-tracking branches carry no meaningful upstream track of their
+    // own; their sync columns stay unknown.
+    let remote_branches: Vec<BranchSummary> = remote
+        .iter()
+        .map(|record| branch_summary(record, None, None))
+        .collect();
+
     Ok(BranchInventory {
         default_branch,
         origin_url,
-        remote_branch_count,
+        remote_branch_count: remote_branches.len() as u32,
         branches,
+        remote_branches,
     })
+}
+
+fn branch_summary(record: &BranchRecord, ahead: Option<u32>, behind: Option<u32>) -> BranchSummary {
+    BranchSummary {
+        ref_name: record.ref_name.clone(),
+        head: record.head.clone(),
+        author: record.author.clone(),
+        subject: record.subject.clone(),
+        commit_date: record.commit_date,
+        upstream: record.upstream.clone(),
+        ahead,
+        behind,
+    }
 }
 
 // `%(upstream:track)` shapes: "" when in sync, "[ahead N]", "[behind N]",
@@ -142,28 +166,6 @@ async fn ahead_behind_vs(
         (Some(behind), Some(ahead)) => Some((ahead, behind)),
         _ => None,
     })
-}
-
-// Counts remote-tracking branches, excluding the symbolic refs/remotes/*/HEAD.
-async fn remote_branch_count(path: &Path) -> Result<u32, CommandError> {
-    let (exit_code, stdout, stderr) = run_git(
-        path,
-        &["for-each-ref", "refs/remotes", "--format=%(refname)"],
-    )
-    .await?;
-    if exit_code != 0 {
-        return Err(git_execution_error(&stderr));
-    }
-    let text = std::str::from_utf8(&stdout)
-        .map_err(|_| CommandError::new("git_output_malformed", "Git returned invalid ref data."))?;
-    Ok(text
-        .lines()
-        .filter(|reference| {
-            reference.starts_with("refs/remotes/")
-                && !reference.ends_with("/HEAD")
-                && reference.len() > "refs/remotes/".len()
-        })
-        .count() as u32)
 }
 
 async fn origin_url(path: &Path) -> Option<String> {
@@ -264,6 +266,14 @@ mod tests {
             Some(repo.to_str().unwrap())
         );
         assert_eq!(inventory.remote_branch_count, 1);
+        let remote_master = inventory
+            .remote_branches
+            .iter()
+            .find(|branch| branch.ref_name == "refs/remotes/origin/master")
+            .unwrap();
+        assert_eq!(remote_master.subject, "main moves");
+        assert_eq!(remote_master.upstream, None);
+        assert_eq!((remote_master.ahead, remote_master.behind), (None, None));
 
         let master = inventory
             .branches

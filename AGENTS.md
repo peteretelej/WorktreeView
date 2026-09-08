@@ -25,12 +25,14 @@ receives normalized domain data through narrow Tauri commands.
 
 ## Safety
 
-- Never stage, commit, checkout, fetch, push, or manage worktrees in review
-  flows.
+- Never stage, commit, checkout, push, or manage worktrees in review flows.
+  The refresh action's explicit `git fetch` (remote-tracking refs only) is
+  the one permitted Git write; it never runs as part of review computation.
 - Spawn Git with explicit argument arrays, never shell interpolation.
 - Do not run repository hooks, external diff drivers, text converters, or
   repository-defined code while inspecting repositories.
-- The local review path makes no network requests.
+- Review paths make no network requests; the refresh action's explicit
+  fetch is the only network operation.
 - Do not implement remote/SSH behavior until its execution, trust, latency,
   freshness, reconnection, and persistence model is settled.
 

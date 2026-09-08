@@ -235,6 +235,15 @@ code,
   color: var(--foreground);
 }
 
+/* The fetch-backed refresh buttons spin while fetch and re-reads run. */
+.icon-button.spinning svg {
+  animation: icon-spin 0.9s linear infinite;
+}
+
+@keyframes icon-spin {
+  to { transform: rotate(360deg); }
+}
+
 .footer-button {
   width: 26px;
   height: 26px;
@@ -371,7 +380,9 @@ kbd {
 .sidebar-worktree-row, .sidebar-branch-row { display: flex; width: calc(100% - 4px); min-height: 28px; align-items: center; gap: 6px; margin-left: 4px; padding: 4px 6px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); cursor: pointer; font: 10px var(--font-mono); text-align: left; }
 .sidebar-worktree-row:hover, .sidebar-branch-row:hover { background: var(--surface-2); color: var(--foreground); }
 .sidebar-worktree-row span, .sidebar-branch-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sidebar-children .page-controls { min-height: 30px; padding: 3px; }
+/* Ref-like names truncate from the left so the suffix ("origin/design",
+   "review-canvas") stays readable when the sidebar is narrow. */
+.sidebar-branch-row span { direction: rtl; text-align: left; }
 
 .project-row:hover,
 .project-row.active {
@@ -702,6 +713,101 @@ h2 {
   white-space: nowrap;
 }
 
+.overview-filter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 20px 10px;
+}
+
+.overview-tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.overview-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.overview-tab:hover {
+  background: var(--surface-2);
+  color: var(--foreground);
+}
+
+.overview-tab.active {
+  background: var(--surface-2);
+  color: var(--foreground);
+  box-shadow: inset 0 -2px var(--primary);
+}
+
+.tab-count {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.overview-tab.active .tab-count {
+  color: var(--foreground);
+}
+
+.overview-filter-input {
+  display: flex;
+  width: 220px;
+  height: 28px;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--background);
+  color: var(--muted);
+}
+
+.overview-filter-input input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 11px;
+  outline: none;
+}
+
+.overview-filter-input input::placeholder {
+  color: var(--muted);
+}
+
+.filter-empty {
+  padding: 18px 16px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* Overview branch and archived rows reuse the worktree row grid inside a
+   project-row-wrap so the hover-revealed surface pin carries over. */
+.project-row-wrap .worktree-row {
+  position: relative;
+  padding-right: 40px;
+}
+
+.project-row-wrap .worktree-row .pin-button {
+  top: 50%;
+  right: 9px;
+}
+
 .table-header,
 .worktree-row {
   display: grid;
@@ -946,6 +1052,14 @@ h2 {
 
   .stats-strip {
     flex-wrap: wrap;
+  }
+
+  .overview-filter {
+    flex-wrap: wrap;
+  }
+
+  .overview-filter-input {
+    width: 100%;
   }
 }
 
@@ -1248,6 +1362,10 @@ button:disabled {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
   }
+
+  .icon-button.spinning svg {
+    animation: none;
+  }
 }
 
 .review-view { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; }
@@ -1335,20 +1453,14 @@ button:disabled {
 .patch-skeleton i { height: 22px; margin-bottom: 9px; }
 
 .project-row-wrap .sidebar-worktree-row,
-.project-row-wrap .sidebar-branch-row,
-.project-row-wrap .archived-row { padding-right: 26px; }
-.gone-badge, .main-badge, .detached-badge, .stale-badge { flex: none; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 8px; text-transform: uppercase; }
+.project-row-wrap .sidebar-branch-row { padding-right: 26px; }
+.sidebar-link-row { display: flex; width: calc(100% - 4px); min-height: 28px; align-items: center; gap: 6px; margin-left: 4px; padding: 4px 6px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); cursor: pointer; font: 10px var(--font-mono); text-align: left; }
+.sidebar-link-row:hover { background: var(--surface-2); color: var(--primary); }
+.sidebar-link-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gone-badge, .main-badge, .detached-badge, .stale-badge, .in-worktree-badge { flex: none; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 8px; text-transform: uppercase; }
 .main-badge { color: var(--primary); border-color: var(--primary); }
 .detached-badge { color: var(--info); }
 .stale-badge { color: var(--warn); border-color: var(--warn); }
-.archived-section { margin: 0 0 5px 21px; border-left: 1px solid var(--border); }
-.archived-heading { display: flex; height: 28px; align-items: center; gap: 6px; padding: 0 6px 0 4px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
-.archived-heading span { flex: none; }
-.archived-heading input { min-width: 0; flex: 1; height: 22px; padding: 0 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--foreground); font-size: 10px; letter-spacing: normal; text-transform: none; }
-.archived-row { display: flex; width: calc(100% - 4px); min-height: 30px; flex-direction: column; justify-content: center; gap: 1px; margin-left: 4px; padding: 3px 6px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); cursor: pointer; font: 10px var(--font-mono); text-align: left; }
-.archived-row:hover { background: var(--surface-2); color: var(--foreground); }
-.archived-row span, .archived-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.archived-section .page-controls { min-height: 30px; padding: 3px; }
 .commits-bar { display: flex; min-height: 0; flex: 1; flex-direction: column; border-top: 1px solid var(--border); }
 .commits-bar-heading { display: flex; height: 30px; flex: none; align-items: center; justify-content: space-between; padding: 0 6px 0 10px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
 .commits-bar-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -39,6 +39,10 @@ function git(args, cwd) {
   return result.stdout.trim();
 }
 
+function inventoryRow(name) {
+  return $(`//div[contains(@class, "worktree-row")][.//strong[normalize-space()="${name}"]]`);
+}
+
 function createRepository(directory, branch = "main") {
   mkdirSync(directory, { recursive: true });
   git(["init", "-q", "-b", branch], directory);
@@ -144,12 +148,17 @@ describe("bundled desktop lifecycle", () => {
 
     select(fixture);
     const branch = git(["branch", "--show-current"], fixture) || "detached";
-    const head = git(["rev-parse", "HEAD"], fixture);
+    const subject = git(["log", "-1", "--format=%s"], fixture);
     await openSelectedRepository(fixture);
     await $(".worktree-row").waitForDisplayed();
     await expect($(`.worktree-row[title="${fixture}"]`)).toBeDisplayed();
-    await expect($(`strong=${branch}`)).toBeDisplayed();
-    await expect($(`code=${head.slice(0, 7)}`)).toBeDisplayed();
+    await expect($(`.worktree-row[title="${fixture}"] .branch-title strong`)).toHaveText(branch);
+    // The branch inventory pass runs cold alongside the rest of hydration;
+    // give the head-commit cell time to fill in. The text is read from the
+    // DOM: the driver reports empty text for plain spans.
+    await browser.waitUntil(async () => await browser.execute((rowTitle, expected) => {
+      return document.querySelector(`.worktree-row[title="${rowTitle}"] .row-commit-subject`)?.textContent ?? "";
+    }, fixture, subject) === subject, { timeout: 45_000, timeoutMsg: "worktree head commit did not render" });
 
     const sidebarRepository = path.join(fixtureRoot, "sidebar-repository");
     createRepository(sidebarRepository);
@@ -158,8 +167,14 @@ describe("bundled desktop lifecycle", () => {
     await openSelectedRepository(sidebarRepository);
     await $(`nav.project-list button[title="${sidebarRepository}"]`).click();
     await expect($(`.sidebar-children button.sidebar-worktree-row`)).toBeDisplayed();
-    await expect($(`.sidebar-children button.sidebar-branch-row`)).toBeDisplayed();
-    await $(`.sidebar-children button.sidebar-branch-row`).click();
+    // Unpinned branches stay off the sidebar; the overview's Branches tab
+    // lists them.
+    await $(`//button[contains(@class, "overview-tab")][contains(normalize-space(.), "Branches")]`).click();
+    const sidebarBranchRow = await inventoryRow("e2e-sidebar-branch");
+    await sidebarBranchRow.waitForDisplayed();
+    // Click the branch title: the row's center column carries the status
+    // chips, which open their own views.
+    await sidebarBranchRow.$(".branch-title").click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await expect($('span[aria-label="Review scope"]')).toHaveText("Committed only");
     await $(`button=Overview`).click();
@@ -273,9 +288,9 @@ describe("bundled desktop lifecycle", () => {
     createRepository(switchRepository);
     select(repository);
     await openSelectedRepository(repository);
-    const featureRow = await $('//button[contains(@class, "worktree-row")][.//strong[normalize-space()="feature"]]');
+    const featureRow = await inventoryRow("feature");
     await expect(featureRow).toBeDisplayed();
-    await featureRow.click();
+    await featureRow.$(".branch-title").click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await expect($(".review-counts")).toHaveText("4 files, +1202 -0");
     const initialFiles = await browser.execute(() => Array.from(document.querySelectorAll(".file-row span"), (file) => file.textContent ?? ""));

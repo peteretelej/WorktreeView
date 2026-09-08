@@ -217,12 +217,12 @@ pub(crate) fn parse_commits(output: &[u8]) -> Result<Vec<CommitInfo>, CommandErr
     Ok(commits)
 }
 
-// `for-each-ref` records over refs/heads: a fixed five-field prefix (refname,
-// sha, committer date, author, subject) followed by upstream and track, all
-// joined by \x1f, each record terminated by \x1e. Crafted commits can carry
-// the separator bytes inside author or subject, so records with extra fields
-// reassemble the subject from the record end; structurally truncated records
-// are skipped rather than denying the whole inventory.
+// `for-each-ref` records over refs/heads and refs/remotes: a fixed five-field
+// prefix (refname, sha, committer date, author, subject) followed by upstream
+// and track, all joined by \x1f, each record terminated by \x1e. Crafted
+// commits can carry the separator bytes inside author or subject, so records
+// with extra fields reassemble the subject from the record end; structurally
+// truncated records are skipped rather than denying the whole inventory.
 pub(crate) fn parse_branch_records(output: &[u8]) -> Result<Vec<BranchRecord>, CommandError> {
     let malformed = || {
         CommandError::new(
@@ -243,7 +243,7 @@ pub(crate) fn parse_branch_records(output: &[u8]) -> Result<Vec<BranchRecord>, C
         if fields.len() < 7 {
             continue;
         }
-        if !fields[0].starts_with("refs/heads/") {
+        if !fields[0].starts_with("refs/heads/") && !fields[0].starts_with("refs/remotes/") {
             return Err(malformed());
         }
         let commit_date = fields[2]

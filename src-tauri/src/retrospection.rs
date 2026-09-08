@@ -99,13 +99,15 @@ pub(crate) async fn list_surfaces_in_pool(
     }
     let (exit_code, stdout, stderr) = run_git(
         &repo,
-        &["for-each-ref", "refs/heads", "--format=%(refname)"],
+        &["for-each-ref", "refs/heads", "refs/remotes", "--format=%(refname)"],
     )
     .await?;
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
     }
-    let live_heads: HashSet<String> = std::str::from_utf8(&stdout)
+    // Branch pins can point at remote-tracking refs, so a ref counts as live
+    // when either side of the inventory still carries it.
+    let live_branch_refs: HashSet<String> = std::str::from_utf8(&stdout)
         .map_err(|_| CommandError::new("git_output_malformed", "Git returned invalid ref data."))?
         .lines()
         .map(str::to_string)
@@ -133,7 +135,7 @@ pub(crate) async fn list_surfaces_in_pool(
         }
         let live = match kind.as_str() {
             "worktree" => live_worktrees.contains(&identity_key),
-            "branch" => live_heads.contains(&identity_key),
+            "branch" => live_branch_refs.contains(&identity_key),
             _ => false,
         };
         if !live {
@@ -292,6 +294,7 @@ async fn resolve_surface_identity(
             }
             let label = identity_key
                 .strip_prefix("refs/heads/")
+                .or_else(|| identity_key.strip_prefix("refs/remotes/"))
                 .unwrap_or(identity_key);
             Ok((
                 label.to_string(),
@@ -857,6 +860,49 @@ mod tests {
         assert_eq!(unpin_error.code, "persistence");
 
         std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pinned_remote_branch_stays_live_while_the_tracking_ref_exists() {
+        let origin = test_repo("pin-remote-origin");
+        test_git(&origin, &["branch", "-M", "main"]);
+        let repo = test_repo("pin-remote-repo");
+        test_git(&repo, &["branch", "-M", "main"]);
+        test_git(
+            &repo,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        test_git(
+            &repo,
+            &[
+                "update-ref",
+                "refs/remotes/origin/main",
+                &crate::testutil::test_rev_parse(&repo, "main"),
+            ],
+        );
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
+
+        set_surface_pinned_in_pool(&pool, &repo_path, "branch", "refs/remotes/origin/main", true)
+            .await
+            .unwrap();
+
+        let listing = list_surfaces_in_pool(&pool, &repo_path).await.unwrap();
+        assert!(listing.gone.is_empty());
+        assert_eq!(listing.pinned.len(), 1);
+        assert_eq!(listing.pinned[0].kind, "branch");
+        assert_eq!(listing.pinned[0].identity_key, "refs/remotes/origin/main");
+
+        // Once the tracking ref is pruned the pin reads as gone, labelled by
+        // its short remote name.
+        test_git(&repo, &["update-ref", "-d", "refs/remotes/origin/main"]);
+        let listing = list_surfaces_in_pool(&pool, &repo_path).await.unwrap();
+        assert_eq!(listing.gone.len(), 1);
+        assert_eq!(listing.gone[0].label, "origin/main");
+
+        let _ = std::fs::remove_dir_all(&origin);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[tokio::test]

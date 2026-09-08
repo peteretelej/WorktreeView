@@ -56,6 +56,14 @@ async function openSelectedRepository(expectedPath) {
   }, { timeoutMsg: `repository did not finish opening: ${expectedPath}` });
 }
 
+async function openInventoryTab(label) {
+  await $(`//button[contains(@class, "overview-tab")][contains(normalize-space(.), "${label}")]`).click();
+}
+
+function inventoryRow(name) {
+  return $(`//div[contains(@class, "worktree-row")][.//strong[normalize-space()="${name}"]]`);
+}
+
 describe("bundled desktop surface pins and archived surfaces", () => {
   it("persists pins across restarts, badges gone pins, and archives the rest", async () => {
     const repository = path.join(fixtureRoot, "archive-repository");
@@ -66,13 +74,17 @@ describe("bundled desktop surface pins and archived surfaces", () => {
     select(repository);
     await openSelectedRepository(repository);
     await expandRepository(repository);
-    await expect($('//button[contains(@class, "sidebar-branch-row")][.//span[normalize-space()="e2e-pin"]]')).toBeDisplayed();
-    await expect($('//button[contains(@class, "sidebar-branch-row")][.//span[normalize-space()="e2e-archive"]]')).toBeDisplayed();
+    // Unpinned branches stay off the sidebar; the overview's Branches tab
+    // is their surface.
+    await openInventoryTab("Branches");
+    await browser.waitUntil(async () => await inventoryRow("e2e-pin").isExisting());
+    await expect(inventoryRow("e2e-archive")).toBeExisting();
 
     // Pinning a branch writes only to the app's own database; the pin
     // affordance is hover-revealed, so assert existence over display.
     await $('button[aria-label="Pin branch e2e-pin"]').click();
     await expect($('button[aria-label="Unpin branch e2e-pin"]')).toBeExisting();
+    await expect($('//button[contains(@class, "sidebar-branch-row")][.//span[normalize-space()="e2e-pin"]]')).toBeDisplayed();
 
     // The pin survives an application restart.
     const firstSession = browser.sessionId;
@@ -81,17 +93,24 @@ describe("bundled desktop surface pins and archived surfaces", () => {
     await $(".worktree-row").waitForDisplayed();
     await expandRepository(repository);
     await expect($('button[aria-label="Unpin branch e2e-pin"]')).toBeExisting();
+    await expect($('//button[contains(@class, "sidebar-branch-row")][.//span[normalize-space()="e2e-pin"]]')).toBeDisplayed();
 
-    // Unpinning clears the pin.
+    // Unpinning clears the pin; the sidebar row goes away and the Branches
+    // tab is where the branch's pin affordance lives again.
     await $('button[aria-label="Unpin branch e2e-pin"]').click();
+    await openInventoryTab("Branches");
     await expect($('button[aria-label="Pin branch e2e-pin"]')).toBeExisting();
+    assert.equal(await $('//button[contains(@class, "sidebar-branch-row")][.//span[normalize-space()="e2e-pin"]]').isExisting(), false);
 
-    // Record the archive candidate by opening its review, then delete the
-    // branches in the writable fixture copy: the unpinned recorded branch
-    // archives, the pinned branch stays inline with a gone badge.
-    await $('//button[contains(@class, "sidebar-branch-row")][.//span[normalize-space()="e2e-archive"]]').click();
+    // Record the archive candidates by opening their reviews, then delete
+    // the branches in the writable fixture copy: the unpinned recorded
+    // branches archive onto the overview's Archived tab, the pinned branch
+    // stays inline with a gone badge.
+    const archiveRow = await inventoryRow("e2e-archive");
+    await archiveRow.$(".branch-title").click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await $(`button=Overview`).click();
+    await openInventoryTab("Branches");
     await $('button[aria-label="Pin branch e2e-gone"]').click();
     await expect($('button[aria-label="Unpin branch e2e-gone"]')).toBeExisting();
     git(["branch", "-D", "e2e-pin", "e2e-archive", "e2e-gone"], repository);
@@ -101,19 +120,20 @@ describe("bundled desktop surface pins and archived surfaces", () => {
 
     const goneRow = await $('//button[contains(@class, "sidebar-branch-row")][.//span[normalize-space()="e2e-gone"]][.//span[normalize-space()="gone"]]');
     await expect(goneRow).toBeDisplayed();
-    await expect($(".archived-section")).toBeDisplayed();
-    await expect($('//button[contains(@class, "archived-row")][.//span[normalize-space()="e2e-archive"]]')).toBeDisplayed();
 
-    // The archived search filters by label, and pinned gone surfaces are not
-    // archived.
-    const search = await $('input[aria-label^="Search archived surfaces"]');
+    await openInventoryTab("Archived");
+    await expect(inventoryRow("e2e-archive")).toBeDisplayed();
+
+    // The archived filter scopes the tab's rows, and pinned gone surfaces
+    // are not archived.
+    const search = await $('input[aria-label="Filter archived"]');
     await search.setValue("no-such-branch");
-    await expect($("div=No archived surfaces match")).toBeDisplayed();
-    assert.equal(await $('//button[contains(@class, "archived-row")][.//span[normalize-space()="e2e-archive"]]').isExisting(), false);
+    await expect($('//div[contains(@class, "filter-empty")][contains(., "No archived surfaces match")]')).toBeDisplayed();
+    assert.equal(await inventoryRow("e2e-archive").isExisting(), false);
     await search.setValue("e2e-archive");
-    await expect($('//button[contains(@class, "archived-row")][.//span[normalize-space()="e2e-archive"]]')).toBeDisplayed();
+    await expect(inventoryRow("e2e-archive")).toBeDisplayed();
     await search.setValue("e2e-gone");
-    await expect($("div=No archived surfaces match")).toBeDisplayed();
+    await expect($('//div[contains(@class, "filter-empty")][contains(., "No archived surfaces match")]')).toBeDisplayed();
     await expect(goneRow).toBeDisplayed();
   });
 });

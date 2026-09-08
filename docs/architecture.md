@@ -9,12 +9,13 @@ normalized domain data through narrow, typed Tauri commands.
 
 - `commands.rs`: thin typed IPC adapters. The full command surface:
   `open_repo`, `list_repos`, `list_worktrees`, `list_worktree_status`,
-  `remove_repo`, `get_branch_inventory`, `set_repo_pinned`,
-  `set_surface_pinned`, `get_settings`, `set_settings`,
+  `remove_repo`, `get_branch_inventory`, `fetch_project`,
+  `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
   `list_refs`, `list_commits`, `list_review_changes`, `list_surfaces`,
   `read_review_patch`.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
-  (4 MiB per stream), a 10 second deadline, and kill-on-drop cancellation.
+  (4 MiB per stream), a deadline (10 seconds for local probes, 60 for the
+  fetch the refresh action runs), and kill-on-drop cancellation.
   Repository-scoped runs share one hardened builder; no-index diffs get
   their own isolated stdin command.
 - `git/validate.rs`: path, ref, scope, and flag-combination validation, plus
@@ -26,10 +27,11 @@ normalized domain data through narrow, typed Tauri commands.
   commits, branch records, worktrees, untracked paths) into typed domain
   structs.
 - `overview.rs`: assembles the project page's branch inventory from one
-  `for-each-ref refs/heads` pass (per-branch head, last-commit identity,
-  upstream and its ahead/behind track), the remote branch count, the origin
+  `for-each-ref refs/heads refs/remotes` pass (per-branch head,
+  last-commit identity, upstream and its ahead/behind track), the origin
   URL, and a bounded ahead/behind fallback against the default branch for
-  worktree branches without an upstream.
+  local worktree branches without an upstream. Remote-tracking branches
+  ride the same pass and skip the fallback probe.
 - `review.rs`: assembles review data (changed files, patches, commits,
   refs) from Git results.
 - `cache.rs`: SQLite-backed history cache for commit pages and ancestry
@@ -103,5 +105,6 @@ binary does not know fails startup with a message instead, untouched.
 Migrations are append-only
 (CONTRIBUTING.md), so divergence is not expected on normal upgrades; desktop
 e2e containers rebuild their database on every run. Review flows remain
-read-only and write nothing back to Git; see
-[safety-model.md](safety-model.md).
+read-only; the refresh action's fetch is the one Git write, and it touches
+remote-tracking refs only (see
+[safety-model.md](safety-model.md)).

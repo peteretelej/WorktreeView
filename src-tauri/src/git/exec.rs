@@ -15,6 +15,9 @@ use tokio::time::{timeout, Duration};
 
 pub(crate) const MAX_OUTPUT: usize = 4 * 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
+// Fetch crosses the network; slow remotes must not trip the local probe
+// budget, and the child stays kill_on_drop so cancellation still works.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 // Test-only spawn counter: one increment per spawned git child, the
 // assertion mechanism for cache tests. While a counting window is open,
@@ -136,7 +139,15 @@ fn dir_git_command(
             "-c",
             "diff.autoRefreshIndex=false",
         ])
-        .env("GIT_NO_LAZY_FETCH", "1");
+        .env("GIT_NO_LAZY_FETCH", "1")
+        // Git honors these over -C discovery, so an ambient variable from
+        // the launcher environment could redirect a spawn to another
+        // repository.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_COMMON_DIR");
     for (name, value) in env {
         command.env(name, value);
     }
@@ -161,7 +172,34 @@ pub(crate) async fn run_git_with_env(
     args: &[&str],
     env: &[(&str, &str)],
 ) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
-    let mut child = dir_git_command(path, args, env)?
+    let command = dir_git_command(path, args, env)?;
+    run_bounded(command, GIT_TIMEOUT).await
+}
+
+pub(crate) async fn run_git(path: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
+    run_git_with_env(path, args, &[]).await
+}
+
+// The app's one deliberate network operation: fetch updates only
+// remote-tracking refs and never feeds a review computation directly, so it
+// drops the ambient GIT_NO_LAZY_FETCH guard that read-only passes carry.
+// Repository-configured transports and credential helpers stay in play, as
+// documented in the safety model.
+pub(crate) async fn fetch_remotes(path: &Path) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
+    let mut command = dir_git_command(
+        path,
+        &["fetch", "--all", "--prune", "--quiet"],
+        &[],
+    )?;
+    command.env_remove("GIT_NO_LAZY_FETCH");
+    run_bounded(command, FETCH_TIMEOUT).await
+}
+
+async fn run_bounded(
+    mut command: Command,
+    budget: Duration,
+) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
+    let mut child = command
         .spawn()
         .map_err(|_| CommandError::new("git_execution", "Git could not be started."))?;
     #[cfg(test)]
@@ -176,7 +214,7 @@ pub(crate) async fn run_git_with_env(
         .ok_or_else(|| CommandError::new("git_execution", "Git stderr was unavailable."))?;
     let stdout_task = tokio::spawn(read_bounded(stdout));
     let stderr_task = tokio::spawn(read_bounded(stderr));
-    let result = timeout(GIT_TIMEOUT, async {
+    let result = timeout(budget, async {
         let status = child
             .wait()
             .await
@@ -200,14 +238,10 @@ pub(crate) async fn run_git_with_env(
             reap_after_kill(&mut child).await;
             Err(CommandError::new(
                 "git_timeout",
-                "Git did not respond within 10 seconds.",
+                "Git did not respond within its time budget.",
             ))
         }
     }
-}
-
-pub(crate) async fn run_git(path: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), CommandError> {
-    run_git_with_env(path, args, &[]).await
 }
 
 pub(crate) fn stdin_git_command(args: &[&str]) -> Command {

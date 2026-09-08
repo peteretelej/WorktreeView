@@ -4,6 +4,7 @@ import {
   ftruncateSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readSync,
   rmSync,
   statSync,
@@ -14,12 +15,39 @@ import net from "node:net";
 
 const backendLog = "/artifacts/backend.log";
 const driverPid = "/tmp/worktreeview-tauri-driver.pid";
+const sessionLock = "/tmp/worktreeview-e2e-session.lock";
 let driver = null;
 let driverPgid = null;
 let backendFd = null;
 let backendMonitor = null;
 let backendOverflow = false;
 let stopPromise = null;
+let holdsSessionLock = false;
+
+// Spec files run in parallel workers that would otherwise race on the shared
+// driver port and app store, so each session holds the lock for its whole
+// lifetime while the others wait.
+async function acquireSessionLock() {
+  const deadline = Date.now() + 300_000;
+  for (;;) {
+    try {
+      const fd = openSync(sessionLock, "wx", 0o600);
+      writeSync(fd, `${process.pid}\n`);
+      closeSync(fd);
+      holdsSessionLock = true;
+      return;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) throw new Error("another spec worker holds the session lock");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+}
+
+function releaseSessionLock() {
+  if (holdsSessionLock) rmSync(sessionLock, { force: true });
+  holdsSessionLock = false;
+}
 
 function signalDriver(pgid, signal) {
   if (!pgid) return;
@@ -134,7 +162,23 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 process.once("exit", () => {
   signalDriver(driverPgid, "SIGKILL");
   if (backendFd !== null) closeSync(backendFd);
+  releaseSessionLock();
 });
+
+// Killing the driver can strand its spawned application, whose window then
+// photobombs later workers' failure screenshots.
+function killStrandedApplications() {
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      if (readFileSync(`/proc/${entry}/comm`, "utf8").trim() === "worktreeview") {
+        process.kill(Number(entry), "SIGKILL");
+      }
+    } catch {
+      // Processes can exit while being inspected.
+    }
+  }
+}
 
 export const config = {
   runner: "local",
@@ -163,6 +207,7 @@ export const config = {
     mkdirSync("/tmp/worktreeview-e2e-git-home", { recursive: true });
   },
   async beforeSession() {
+    await acquireSessionLock();
     // Every spec file starts from an empty app store: a preceding worker's
     // saved repositories would otherwise leak into fresh-start assertions.
     rmSync("/tmp/worktreeview-e2e-data", { recursive: true, force: true });
@@ -193,5 +238,7 @@ export const config = {
   },
   async afterSession() {
     await stopDriver();
+    killStrandedApplications();
+    releaseSessionLock();
   },
 };

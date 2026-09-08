@@ -1,5 +1,6 @@
 use crate::git::{
-    git_execution_error, parse_status_count, parse_worktrees, run_git, CommitPage, Worktree,
+    fetch_remotes, git_execution_error, parse_status_count, parse_worktrees, run_git, CommitPage,
+    Worktree,
 };
 use crate::overview::{branch_inventory, BranchInventory};
 use crate::review::{
@@ -140,6 +141,29 @@ pub(crate) async fn get_branch_inventory(
     branch_inventory(path).await
 }
 
+// The refresh action's explicit network step: fetch updates only
+// remote-tracking refs (and prunes the deleted ones). It never runs as part
+// of a review computation; the read-only probes always see whatever state
+// the last fetch left behind.
+#[tauri::command]
+pub(crate) async fn fetch_project(path: String) -> Result<(), CommandError> {
+    let path = canonical_path(&path)?;
+    let (exit_code, stdout, stderr) = run_git(&path, &["remote"]).await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    // Without a configured remote there is nothing to fetch and no reason to
+    // spawn the network command at all.
+    if stdout.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(());
+    }
+    let (exit_code, _, stderr) = fetch_remotes(&path).await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn set_surface_pinned(
     path: String,
@@ -250,9 +274,59 @@ pub(crate) async fn read_review_patch(
 
 #[cfg(test)]
 mod tests {
-    use super::worktree_change_count;
+    use super::{fetch_project, worktree_change_count};
+    use crate::overview::branch_inventory;
     use crate::testutil::{test_git, test_path, test_repo};
     use std::process::Command as StdCommand;
+
+    #[tokio::test]
+    async fn fetch_project_updates_remote_tracking_refs() {
+        let origin = test_repo("fetch-origin");
+        test_git(&origin, &["branch", "-M", "main"]);
+        let clone = test_path("fetch-clone");
+        std::fs::create_dir(&clone).unwrap();
+        test_git(&clone, &["init", "--quiet", "-b", "main"]);
+        test_git(
+            &clone,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+
+        // A repository with no fetched refs yet picks up the remote's
+        // branches on the first refresh.
+        fetch_project(clone.to_str().unwrap().into()).await.unwrap();
+        let inventory = branch_inventory(clone.to_str().unwrap().into())
+            .await
+            .unwrap();
+        assert_eq!(inventory.remote_branch_count, 1);
+        assert_eq!(
+            inventory.remote_branches[0].ref_name,
+            "refs/remotes/origin/main"
+        );
+
+        // New remote branches and commits appear on the next refresh.
+        test_git(&origin, &["checkout", "--quiet", "-b", "side"]);
+        std::fs::write(origin.join("tracked.txt"), "changed\n").unwrap();
+        test_git(&origin, &["commit", "--quiet", "-am", "advance"]);
+        fetch_project(clone.to_str().unwrap().into()).await.unwrap();
+        let inventory = branch_inventory(clone.to_str().unwrap().into())
+            .await
+            .unwrap();
+        assert_eq!(inventory.remote_branch_count, 2);
+        let side = inventory
+            .remote_branches
+            .iter()
+            .find(|branch| branch.ref_name == "refs/remotes/origin/side")
+            .unwrap();
+        assert_eq!(side.subject, "advance");
+
+        // A repository without remotes fetches nothing and still succeeds.
+        let bare = test_repo("fetch-no-remote");
+        fetch_project(bare.to_str().unwrap().into()).await.unwrap();
+
+        let _ = std::fs::remove_dir_all(&origin);
+        let _ = std::fs::remove_dir_all(&clone);
+        let _ = std::fs::remove_dir_all(&bare);
+    }
 
     #[tokio::test]
     async fn change_count_covers_tracked_and_untracked_content() {

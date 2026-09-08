@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { filterGoneSurfaces, splitPinned, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces.ts";
+import { filterGoneSurfaces, pinnedSurfaces, recentWorktrees, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces.ts";
 import type { GoneSurface } from "./navigation.ts";
 
 function goneSurface(overrides: Partial<GoneSurface> & { identity_key: string }): GoneSurface {
@@ -30,7 +30,7 @@ test("archived search filters gone surfaces by label and detail", () => {
   assert.deepEqual(filterGoneSurfaces(surfaces, "nomatch"), []);
 });
 
-test("pin splitting puts pinned surfaces first by pinned_at and partitions archived", () => {
+test("pinned surfaces sort by pinned_at and unpinned rows stay out", () => {
   const rows = [
     row({ kind: "branch", identityKey: "refs/heads/plain" }),
     row({ kind: "branch", identityKey: "refs/heads/gone-unpinned", gone: true, startRef: "sha" }),
@@ -38,18 +38,9 @@ test("pin splitting puts pinned surfaces first by pinned_at and partitions archi
     row({ kind: "worktree", identityKey: "/tmp/a", label: "a", pinnedAt: 9 }),
     row({ kind: "branch", identityKey: "refs/heads/gone-pinned", gone: true, startRef: "sha", pinnedAt: 1 }),
   ];
-  const { pinned, live, archived } = splitPinned(rows);
   assert.deepEqual(
-    pinned.map((surface) => surface.label),
+    pinnedSurfaces(rows).map((surface) => surface.label),
     ["a", "b", "refs/heads/gone-pinned"],
-  );
-  assert.deepEqual(
-    live.map((surface) => surface.identityKey),
-    ["refs/heads/plain"],
-  );
-  assert.deepEqual(
-    archived.map((surface) => surface.identityKey),
-    ["refs/heads/gone-unpinned"],
   );
 });
 
@@ -74,12 +65,47 @@ test("surface rows carry pin state from the pin index and gone rows keep their o
   const goneRow = byIdentity.get("/tmp/gone-wt");
   assert.equal(goneRow?.pinnedAt, 3);
   assert.equal(goneRow?.gone, true);
-  // A gone row recorded while detached has no label and falls back to its
-  // identity key for display.
-  assert.equal(goneRow?.label, "/tmp/gone-wt");
+  // A gone worktree reads as its worktree folder name even when the
+  // recorded label is the branch name.
+  assert.equal(goneRow?.label, "gone-wt");
+});
+
+test("remote branch rows read as origin/name and gone labels stay short", () => {
+  const rows = surfaceRows([], ["refs/remotes/origin/feature"], [], []);
+  assert.equal(rows[0].label, "origin/feature");
+  const goneRemote = surfaceRows([], [], [
+    goneSurface({ identity_key: "refs/remotes/origin/old", label: "refs/remotes/origin/old" }),
+  ], [])[0];
+  assert.equal(goneRemote.label, "origin/old");
 });
 
 test("worktree keys normalize separators for pin comparison", () => {
   assert.equal(worktreeKey("C:\\repos\\demo"), worktreeKey("C:/repos/demo"));
   assert.equal(worktreeKey("/tmp/repo"), "/tmp/repo");
+});
+
+test("recent worktrees cap at the newest commits, skip pinned, and sink unknown dates", () => {
+  const worktrees = [
+    { path: "/wt/old", branch: "refs/heads/old", head: "a" },
+    { path: "/wt/pinned", branch: "refs/heads/pinned", head: "b" },
+    { path: "/wt/new", branch: "refs/heads/new", head: "c" },
+    { path: "/wt/detached", branch: "detached-head", head: "d" },
+    { path: "/wt/mid", branch: "refs/heads/mid", head: "e" },
+  ];
+  const dates = new Map([
+    ["refs/heads/old", 100],
+    ["refs/heads/pinned", 200],
+    ["refs/heads/new", 900],
+    ["refs/heads/mid", 500],
+  ]);
+  const recent = recentWorktrees(worktrees, dates, new Set([worktreeKey("/wt/pinned")]), 3);
+  assert.deepEqual(
+    recent.map((worktree) => worktree.path),
+    ["/wt/new", "/wt/mid", "/wt/old"],
+  );
+  // An empty inventory (not loaded yet) keeps list order under the cap.
+  assert.deepEqual(
+    recentWorktrees(worktrees, new Map(), new Set(), 2).map((worktree) => worktree.path),
+    ["/wt/old", "/wt/pinned"],
+  );
 });

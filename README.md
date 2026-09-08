@@ -11,16 +11,18 @@ against the right base, without checking anything out.
 
 ## Features
 
-- Repository tree with pinned and recent repos, worktrees, and branches
-- Project overview with live per-worktree change counts and one-click
+- Repository tree with pinned and recent repos plus each project's latest
+  worktrees
+- Project overview with live per-worktree change counts, searchable
+  worktree, branch, remote, and archived inventories, and one-click
   working-changes reviews
 - Worktree reviews against the merge-base, including uncommitted and
   untracked work by default, with a committed-only toggle
 - Review any branch, tag, or individual commit without checkout
 - Paged commit history with one-click commit reviews
 - Appearance and diff display settings with dark and light themes
-- Read-only and local-first: review flows never modify Git state and make
-  no network requests
+- Read-only reviews: they never modify Git state; the refresh action's
+  explicit fetch is the only network request
 
 ## Install
 
