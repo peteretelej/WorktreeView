@@ -87,8 +87,13 @@ longer present; nothing about the live inventory is cached. A gone surface's
 history reopens from the cache, or re-derives from Git while the objects
 exist; when Git can no longer resolve a recorded head, `commit_page`
 degrades to `content_unavailable` instead of evicting anything.
-Developers upgrading from an older build must delete the app's
-`worktreeview.sqlite3` once (the migration set was consolidated); desktop
+Migration handling is non-destructive: when the embedded migration set
+diverges from a store (as after the 0.0.1 consolidation), startup moves the
+store files to `worktreeview.sqlite3.bak`, overwriting any previous backup,
+and rebuilds the store; a store recording a migration version the running
+binary does not know fails startup with a message instead, untouched.
+Migrations are append-only
+(CONTRIBUTING.md), so divergence is not expected on normal upgrades; desktop
 e2e containers rebuild their database on every run. Review flows remain
 read-only and write nothing back to Git; see
 [safety-model.md](safety-model.md).

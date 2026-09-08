@@ -60,6 +60,19 @@ Port 1420 is fixed. On Linux, `npm run dev:lab` frees a stale server and
 starts the frontend in one step. Inspect the local environment with
 `npm run tauri info`.
 
+### Store migrations
+
+Schema migrations in `src-tauri/migrations` are append-only: never edit or
+delete a migration that has shipped; only add new numbered files. New
+migration files must also be added to `e2e/Dockerfile`, which copies each
+migration by name; a missing entry silently leaves the e2e image on the old
+schema. sqlx
+records a checksum per applied migration, so an edited file makes every
+existing store diverge on next launch, costing the user their saved repos,
+pins, and settings: the store is set aside as `worktreeview.sqlite3.bak` and
+rebuilt. Dev and installed builds share one data directory, so dev stores
+are user stores.
+
 ## Checks and builds
 
 ```sh

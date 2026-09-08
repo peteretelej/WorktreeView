@@ -16,6 +16,7 @@ use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::path::{Path, PathBuf};
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 
 struct AppState {
     pool: SqlitePool,
@@ -109,28 +110,31 @@ async fn connect_store_pool(
         Ok(()) => return Ok(pool),
         Err(error) => error,
     };
-    // A store whose recorded migrations diverge from the embedded set (the
-    // pre-squash 0.0.1 schema) cannot migrate forward. It only holds saved
-    // repos, pins, and settings, so it is recreated rather than blocking
-    // startup on every launch.
-    if !matches!(
-        error,
-        sqlx::migrate::MigrateError::VersionMissing(_)
-            | sqlx::migrate::MigrateError::VersionMismatch(_)
-    ) {
+    pool.close().await;
+    // A store recorded by a newer binary contains schema this build cannot
+    // read; rebuilding over it would destroy that data, so startup fails and
+    // leaves every file as it is.
+    if matches!(error, sqlx::migrate::MigrateError::VersionMissing(_)) {
+        return Err(format!(
+            "Repository storage {} was written by a newer version of \
+             WorktreeView; update the app, or remove the file to start fresh",
+            db_path.display()
+        ));
+    }
+    // A checksum mismatch means the embedded migration set diverged from the
+    // one that wrote the store, e.g. after a migration squash. The store only
+    // holds saved repos, pins, and settings plus regenerable caches, so it is
+    // set aside under one fixed backup name and rebuilt rather than blocking
+    // startup.
+    if !matches!(error, sqlx::migrate::MigrateError::VersionMismatch(_)) {
         return Err(format!("Could not migrate repository storage: {error}"));
     }
-    pool.close().await;
-    for suffix in ["", "-wal", "-shm"] {
-        let file = PathBuf::from(format!("{}{suffix}", db_path.display()));
-        if let Err(error) = std::fs::remove_file(&file) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!(
-                    "Could not reset incompatible repository storage: {error}"
-                ));
-            }
-        }
-    }
+    set_aside_store(db_path).map_err(|error| {
+        format!(
+            "Could not set aside incompatible repository storage at {}: {error}",
+            db_path.display()
+        )
+    })?;
     let pool = sqlx::SqlitePool::connect_with(options.clone())
         .await
         .map_err(|error| format!("Could not connect to repository storage: {error}"))?;
@@ -141,28 +145,43 @@ async fn connect_store_pool(
     Ok(pool)
 }
 
+// At most one backup set exists at a time; a later reset overwrites the
+// previous backup instead of accumulating files. Sidecars rename first so
+// an interrupted set-aside never leaves a stale WAL beside a fresh store.
+fn set_aside_store(db_path: &Path) -> std::io::Result<()> {
+    for suffix in ["-wal", "-shm", ""] {
+        let source = PathBuf::from(format!("{}{suffix}", db_path.display()));
+        let backup = PathBuf::from(format!("{}{suffix}.bak", db_path.display()));
+        if let Err(error) = std::fs::remove_file(&backup) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error);
+            }
+        }
+        if let Err(error) = std::fs::rename(&source, &backup) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let data_dir = app.path().app_data_dir().map_err(|error| {
-                format!("Could not resolve application data directory: {error}")
+            initialize(app).map_err(|error| {
+                // Setup errors surface only as a stderr panic, which a
+                // Windows release build has no console to show; without
+                // this dialog an aborting startup looks like a silent
+                // crash.
+                app.dialog()
+                    .message(error.clone())
+                    .title("WorktreeView")
+                    .blocking_show();
+                error
             })?;
-            std::fs::create_dir_all(&data_dir)
-                .map_err(|error| format!("Could not create application data directory: {error}"))?;
-            let db_path = data_dir.join("worktreeview.sqlite3");
-            let options = SqliteConnectOptions::new()
-                .filename(&db_path)
-                .create_if_missing(true);
-            let pool = tauri::async_runtime::block_on(async {
-                let pool = connect_store_pool(&db_path, &options).await?;
-                store::normalize_stored_paths(&pool).await.map_err(|error| {
-                    format!("Could not normalize stored repository paths: {error}")
-                })?;
-                Ok::<_, String>(pool)
-            })?;
-            app.manage(AppState { pool });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -182,6 +201,27 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn initialize(app: &tauri::App) -> Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|error| {
+        format!("Could not resolve application data directory: {error}")
+    })?;
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|error| format!("Could not create application data directory: {error}"))?;
+    let db_path = data_dir.join("worktreeview.sqlite3");
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true);
+    let pool = tauri::async_runtime::block_on(async {
+        let pool = connect_store_pool(&db_path, &options).await?;
+        store::normalize_stored_paths(&pool).await.map_err(|error| {
+            format!("Could not normalize stored repository paths: {error}")
+        })?;
+        Ok::<_, String>(pool)
+    })?;
+    app.manage(AppState { pool });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -209,18 +249,10 @@ mod tests {
         assert_eq!(plain_path(Path::new(&deep)), PathBuf::from(&deep));
     }
 
-    #[tokio::test]
-    async fn incompatible_store_schema_is_recreated() {
-        let dir = crate::testutil::test_path("store-reset");
-        std::fs::create_dir_all(&dir).unwrap();
-        let db_path = dir.join("worktreeview.sqlite3");
-        let options = SqliteConnectOptions::new()
-            .filename(&db_path)
-            .create_if_missing(true);
-
-        // A store from the pre-squash migration set: version 1 recorded
-        // under a description and checksum the embedded baseline cannot
-        // match, with tables the current schema does not define.
+    // A store from the pre-squash migration set: version 1 recorded
+    // under a description and checksum the embedded baseline cannot
+    // match, with tables the current schema does not define.
+    async fn seed_presquash_store(options: &SqliteConnectOptions) {
         let old = sqlx::SqlitePool::connect_with(options.clone()).await.unwrap();
         sqlx::query("CREATE TABLE repos (id INTEGER PRIMARY KEY)")
             .execute(&old)
@@ -244,6 +276,17 @@ mod tests {
         .await
         .unwrap();
         old.close().await;
+    }
+
+    #[tokio::test]
+    async fn mismatched_store_is_backed_up_and_rebuilt() {
+        let dir = crate::testutil::test_path("store-reset");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("worktreeview.sqlite3");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+        seed_presquash_store(&options).await;
 
         let pool = connect_store_pool(&db_path, &options).await.unwrap();
         let versions: Vec<(i64,)> =
@@ -257,6 +300,101 @@ mod tests {
             .await
             .unwrap();
         pool.close().await;
+
+        let backup = SqliteConnectOptions::new()
+            .filename(dir.join("worktreeview.sqlite3.bak"));
+        let preserved: Vec<(i64,)> =
+            sqlx::query_as("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&sqlx::SqlitePool::connect_with(backup).await.unwrap())
+                .await
+                .unwrap();
+        assert_eq!(preserved, vec![(1,)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn repeated_mismatch_overwrites_the_backup() {
+        let dir = crate::testutil::test_path("store-reset-overwrite");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("worktreeview.sqlite3");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+        seed_presquash_store(&options).await;
+
+        connect_store_pool(&db_path, &options)
+            .await
+            .unwrap()
+            .close()
+            .await;
+
+        // Corrupt the live store's recorded checksum to force a second
+        // mismatch through the same path.
+        let live = sqlx::SqlitePool::connect_with(options.clone()).await.unwrap();
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = X'7f' WHERE version = 1")
+            .execute(&live)
+            .await
+            .unwrap();
+        live.close().await;
+
+        let pool = connect_store_pool(&db_path, &options).await.unwrap();
+        pool.close().await;
+
+        let backups: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_string())
+            .filter(|name| name.contains(".bak"))
+            .collect();
+        assert_eq!(backups, vec!["worktreeview.sqlite3.bak"]);
+        let backup = SqliteConnectOptions::new()
+            .filename(dir.join("worktreeview.sqlite3.bak"));
+        let preserved: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM _sqlx_migrations")
+                .fetch_one(&sqlx::SqlitePool::connect_with(backup).await.unwrap())
+                .await
+                .unwrap();
+        assert_eq!(preserved.0, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn store_from_newer_version_refuses_untouched() {
+        let dir = crate::testutil::test_path("store-reset-refusal");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("worktreeview.sqlite3");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+        let future = sqlx::SqlitePool::connect_with(options.clone()).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, \
+             description TEXT NOT NULL, installed_on TIMESTAMP NOT NULL \
+             DEFAULT CURRENT_TIMESTAMP, success BOOLEAN NOT NULL, \
+             checksum BLOB NOT NULL, execution_time BIGINT NOT NULL)",
+        )
+        .execute(&future)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+             (version, description, success, checksum, execution_time) \
+             VALUES (99, 'from-the-future', 1, X'00', 0)",
+        )
+        .execute(&future)
+        .await
+        .unwrap();
+        future.close().await;
+
+        let error = connect_store_pool(&db_path, &options).await.unwrap_err();
+        assert!(error.contains("newer version"), "{error}");
+        assert!(!dir.join("worktreeview.sqlite3.bak").exists());
+
+        let untouched: Vec<(i64,)> =
+            sqlx::query_as("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&sqlx::SqlitePool::connect_with(options).await.unwrap())
+                .await
+                .unwrap();
+        assert_eq!(untouched, vec![(99,)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
