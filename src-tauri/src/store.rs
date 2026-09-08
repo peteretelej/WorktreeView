@@ -404,6 +404,7 @@ mod tests {
             diff_layout: DiffLayout::Split,
             whitespace_visible: true,
             line_wrap: true,
+            syntax_visible: true,
             zoom: 1.25,
         };
         let persisted = set_settings_in_pool(&pool, &settings).await.unwrap();
