@@ -44,7 +44,12 @@ repository cannot mutate it or execute code it defines.
   endpoint inside the app process: it binds 127.0.0.1 only,
   authenticates with a per-boot bearer token published to a discovery
   file in the app data directory, and serves one write-only method
-  (`post_review`). See [agent-submissions.md](agent-submissions.md).
+  (`post_review`). The endpoint serves axum HTTP semantics over a raw
+  tokio connection loop; request heads are parsed with httparse, hyper's
+  own parser, under bounded head, header, and body caps. hyper's h1
+  connection layer is bypassed because it does not deliver responses on
+  the current Windows host (upstream-report candidate). See
+  [agent-submissions.md](agent-submissions.md).
 - The local threat model is unchanged: any process running as the user
   can already read the app's store, so the token guards against stale
   clients and accidents, not against user-level processes.

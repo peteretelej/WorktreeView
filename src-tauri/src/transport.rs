@@ -112,7 +112,6 @@ pub(crate) async fn handle(State(state): State<TransportState>, request: Request
             );
         }
     };
-    eprintln!("HANDLE: body {} bytes parsed framing", bytes.len());
     let RpcRequest { jsonrpc, id, method, params } = match serde_json::from_slice(&bytes) {
         Ok(request) => request,
         Err(_) => {

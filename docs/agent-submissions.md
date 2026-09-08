@@ -89,7 +89,11 @@ separates agent authors.
 
 Agents deliver submissions over JSON-RPC 2.0 to an HTTP endpoint served
 inside the WorktreeView process. The listener binds `127.0.0.1` on an
-ephemeral port; nothing is reachable from outside the machine.
+ephemeral port; nothing is reachable from outside the machine. The
+endpoint serves axum HTTP semantics over a raw tokio connection loop;
+request heads are parsed with httparse, hyper's own parser, because
+hyper's h1 connection layer does not deliver responses on the current
+Windows host (upstream-report candidate).
 
 ### Discovery
 
