@@ -73,6 +73,13 @@ pins, and settings: the store is set aside as `worktreeview.sqlite3.bak` and
 rebuilt. Dev and installed builds share one data directory, so dev stores
 are user stores.
 
+Exception, recorded 2026-09-08: the review-comments feature consolidated
+the first three migrations into a single `0001` baseline before any release
+carried the three-file set forward; a pre-consolidation store diverges on
+first launch and goes through the set-aside-and-rebuild path above, with
+its data preserved in the backup. Future migrations must be append-only
+again.
+
 ## Checks and builds
 
 ```sh

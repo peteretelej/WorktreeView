@@ -42,32 +42,19 @@ function select(directory) {
   renameSync(replacement, selector);
 }
 
-const INBOX_TERMINAL_STATES = ["No repositories", "No worktrees", "Worktrees unavailable", "Repositories could not be loaded"];
-
-async function showWorktreeList() {
-  await browser.waitUntil(async () => {
-    if (await $("main .back-button").isExisting()
-      && !await $('section[aria-label="Code review"]').isExisting()) return true;
-    for (const heading of INBOX_TERMINAL_STATES) {
-      if (await $(`strong=${heading}`).isExisting()) return true;
-    }
-    return false;
-  }, { timeoutMsg: "repository surface did not settle" });
-  if (await $("main .back-button").isExisting()) {
-    await $("main .back-button").click();
-    await $(".inbox-pane").waitForDisplayed();
-  }
-}
-
 async function openSelectedRepository(expectedPath) {
   await $('button[aria-label="Open repository"]').click();
   if (!expectedPath) return;
   await browser.waitUntil(async () => {
     const active = await $('nav.project-list button[aria-current="true"]');
     if (!await active.isExisting()) return false;
-    return await active.getAttribute("title") === expectedPath;
+    return await active.getAttribute("title") === expectedPath
+      && await $(".inbox-pane").getAttribute("aria-busy") === "false";
   }, { timeoutMsg: `repository did not finish opening: ${expectedPath}` });
-  await showWorktreeList();
+}
+
+function inventoryRow(name) {
+  return $(`//div[contains(@class, "worktree-row")][.//strong[normalize-space()="${name}"]]`);
 }
 
 // Text reads go through in-page scriptContent: this stack's Get Element
@@ -239,7 +226,7 @@ describe("desktop agent submissions", () => {
     // The submission and its finding comments survive an app restart.
     await browser.reloadSession();
     await openSelectedRepository(repository);
-    await $('//button[contains(@class, "worktree-row")][.//strong[normalize-space()="feature"]]').click();
+    await (await inventoryRow("feature")).$(".branch-title").click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await $('section[aria-label="Agent reviews"]').waitForDisplayed();
     await waitText(".submission-agent", "e2e-agent", "agent name after restart");

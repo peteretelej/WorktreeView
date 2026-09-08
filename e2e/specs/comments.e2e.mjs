@@ -40,32 +40,19 @@ function select(directory) {
   renameSync(replacement, selector);
 }
 
-const INBOX_TERMINAL_STATES = ["No repositories", "No worktrees", "Worktrees unavailable", "Repositories could not be loaded"];
-
-async function showWorktreeList() {
-  await browser.waitUntil(async () => {
-    if (await $("main .back-button").isExisting()
-      && !await $('section[aria-label="Code review"]').isExisting()) return true;
-    for (const heading of INBOX_TERMINAL_STATES) {
-      if (await $(`strong=${heading}`).isExisting()) return true;
-    }
-    return false;
-  }, { timeoutMsg: "repository surface did not settle" });
-  if (await $("main .back-button").isExisting()) {
-    await $("main .back-button").click();
-    await $(".inbox-pane").waitForDisplayed();
-  }
-}
-
 async function openSelectedRepository(expectedPath) {
   await $('button[aria-label="Open repository"]').click();
   if (!expectedPath) return;
   await browser.waitUntil(async () => {
     const active = await $('nav.project-list button[aria-current="true"]');
     if (!await active.isExisting()) return false;
-    return await active.getAttribute("title") === expectedPath;
+    return await active.getAttribute("title") === expectedPath
+      && await $(".inbox-pane").getAttribute("aria-busy") === "false";
   }, { timeoutMsg: `repository did not finish opening: ${expectedPath}` });
-  await showWorktreeList();
+}
+
+function inventoryRow(name) {
+  return $(`//div[contains(@class, "worktree-row")][.//strong[normalize-space()="${name}"]]`);
 }
 
 describe("desktop comments", () => {
@@ -82,9 +69,9 @@ describe("desktop comments", () => {
     select(repository);
 
     await openSelectedRepository(repository);
-    const featureRow = await $('//button[contains(@class, "worktree-row")][.//strong[normalize-space()="feature"]]');
+    const featureRow = await inventoryRow("feature");
     await expect(featureRow).toBeDisplayed();
-    await featureRow.click();
+    await featureRow.$(".branch-title").click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     const fileRow = await $('//button[contains(@class, "file-row")][.//span[normalize-space()="reviewed.txt"]]');
     await fileRow.click();
@@ -113,8 +100,8 @@ describe("desktop comments", () => {
     // review identity, and a fresh session re-loads it.
     await browser.reloadSession();
     await openSelectedRepository(repository);
-    const featureRowAfterRestart = await $('//button[contains(@class, "worktree-row")][.//strong[normalize-space()="feature"]]');
-    await featureRowAfterRestart.click();
+    const featureRowAfterRestart = await inventoryRow("feature");
+    await featureRowAfterRestart.$(".branch-title").click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await $('//button[contains(@class, "file-row")][.//span[normalize-space()="reviewed.txt"]]').click();
     await expect($('code[title="reviewed.txt"]')).toBeDisplayed();
