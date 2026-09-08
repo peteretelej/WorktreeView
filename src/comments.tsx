@@ -187,7 +187,7 @@ function MiniComposer({ placeholder, submitLabel, busy, initialBody = "", footer
     <div className="comment-composer-actions">
       {footerExtra}
       <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
-      <button className="primary-button" type="button" title="Submit (Ctrl+Enter)" aria-keyshortcuts="Control+Enter Meta+Enter" disabled={busy || body.trim() === ""} onClick={() => onSubmit(body)}>{submitLabel}<kbd aria-hidden="true">↵</kbd></button>
+      <button className="primary-button" type="button" title={`${submitLabel} (Ctrl+Enter)`} aria-label={submitLabel} aria-keyshortcuts="Control+Enter Meta+Enter" disabled={busy || body.trim() === ""} onClick={() => onSubmit(body)}><kbd>Ctrl</kbd><kbd>↵</kbd></button>
     </div>
   </div>;
 }
@@ -206,7 +206,7 @@ export function DraftComposer({ placeholder, submitLabel, initialBody = "", onSu
         {severityOptions().map((option) => <option key={option || "none"} value={option}>{option === "" ? "Priority" : option}</option>)}
       </select>
       <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
-      <button className="primary-button" type="button" title="Submit (Ctrl+Enter)" aria-keyshortcuts="Control+Enter Meta+Enter" disabled={body.trim() === ""} onClick={() => onSubmit({ body, severity: severity === "" ? null : severity })}>{submitLabel}<kbd aria-hidden="true">↵</kbd></button>
+      <button className="primary-button" type="button" title={`${submitLabel} (Ctrl+Enter)`} aria-label={submitLabel} aria-keyshortcuts="Control+Enter Meta+Enter" disabled={body.trim() === ""} onClick={() => onSubmit({ body, severity: severity === "" ? null : severity })}><kbd>Ctrl</kbd><kbd>↵</kbd></button>
     </div>
   </div>;
 }

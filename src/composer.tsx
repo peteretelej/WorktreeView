@@ -83,10 +83,7 @@ export function MarkdownComposer({ value, onChange, placeholder, onSubmit, onCan
         {tool("Bulleted list", "", <List size={13} />, () => apply(toggleLinePrefix(state(), "- ")))}
         {tool("Numbered list", "", <ListOrdered size={13} />, () => apply(toggleLinePrefix(state(), (index) => `${index + 1}. `)))}
       </div>
-      <div className="composer-tabs" role="group" aria-label="Editor mode">
-        <button type="button" className={tab === "write" ? "active" : ""} aria-pressed={tab === "write"} onClick={() => { setTab("write"); requestAnimationFrame(() => ref.current?.focus()); }}><PenLine size={12} /> Write</button>
-        <button type="button" className={tab === "preview" ? "active" : ""} aria-pressed={tab === "preview"} onClick={() => setTab("preview")}><Eye size={12} /> Preview</button>
-      </div>
+      <button type="button" className={`composer-tab${tab === "preview" ? " active" : ""}`} aria-pressed={tab === "preview"} title={tab === "write" ? "Preview the rendered markdown" : "Back to editing"} onClick={() => { const next = tab === "write" ? "preview" : "write"; setTab(next); if (next === "write") requestAnimationFrame(() => ref.current?.focus()); }}>{tab === "write" ? <Eye size={12} /> : <PenLine size={12} />}{tab === "write" ? "Preview" : "Edit"}</button>
     </div>
     {tab === "write"
       ? <textarea ref={ref} aria-label={placeholder} placeholder={placeholder} value={value} autoFocus={autoFocus} onKeyDown={onKeyDown} onChange={(event) => onChange(event.currentTarget.value)} />
