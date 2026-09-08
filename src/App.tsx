@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, Fragment, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, Fragment, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -8,6 +8,7 @@ import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from ".
 import { SettingsPage, applyTheme, defaultSettings, getSettings, persistSettings, type DiffLayout, type Settings } from "./settings";
 import { DEFAULT_ZOOM, snapZoom, stepZoom, zoomShortcut } from "./zoom";
 import { pairHunkLines, type DiffLine } from "./diff";
+import { hunkSideSources, languageForPath, splitWhitespace, tokenizeHunk, type HighlightToken, type TokenLine } from "./highlight";
 import { filterGoneSurfaces, splitPinned, surfaceRows, type SurfaceRow } from "./surfaces";
 import "./App.css";
 
@@ -21,7 +22,7 @@ type HistoryEntry = { repoPath: string; startPointLabel: string; worktreePath?: 
 type HistoryState = HistoryEntry & { commits: CommitInfo[]; hasMore: boolean; loading: boolean; error: string };
 type WorktreeStatus = { path: string; changes: number | null };
 type ParsedHunk = { header: string; lines: DiffLine[] };
-type RenderedHunk = { header: string; lines: DiffLine[] };
+type RenderedHunk = { header: string; lines: DiffLine[]; hunkIndex: number };
 type DiffPreferences = { layout: DiffLayout; whitespaceVisible: boolean; lineWrap: boolean };
 
 const WORKTREE_PAGE_SIZE = 100;
@@ -138,17 +139,17 @@ function paginateHunks(hunks: ParsedHunk[]) {
     page = [];
     lineCount = 0;
   };
-  for (const hunk of hunks) {
+  for (const [hunkIndex, hunk] of hunks.entries()) {
     const lines = hunk.lines;
     if (lines.length === 0) {
       if (page.length === HUNKS_PAGE_SIZE) finishPage();
-      page.push({ header: hunk.header, lines: [] });
+      page.push({ header: hunk.header, lines: [], hunkIndex });
       continue;
     }
     for (let offset = 0; offset < lines.length;) {
       if (page.length === HUNKS_PAGE_SIZE || lineCount === PATCH_LINE_PAGE_SIZE) finishPage();
       const count = Math.min(lines.length - offset, PATCH_LINE_PAGE_SIZE - lineCount);
-       page.push({ header: hunk.header, lines: lines.slice(offset, offset + count) });
+       page.push({ header: hunk.header, lines: lines.slice(offset, offset + count), hunkIndex });
       offset += count;
       lineCount += count;
     }
@@ -159,20 +160,53 @@ function paginateHunks(hunks: ParsedHunk[]) {
 
 // Renders diff line text with visible whitespace marks when enabled; when
 // disabled it returns the raw text so rendering stays byte-identical.
-function diffLineContent(text: string, whitespaceVisible: boolean): React.ReactNode {
+// Highlighted lines render the diff marker plus token spans instead.
+function diffLineContent(text: string, whitespaceVisible: boolean, tokens?: TokenLine): React.ReactNode {
+  if (tokens && tokens.length > 0) return [text.slice(0, 1), ...tokenLineNodes(tokens, whitespaceVisible)];
   if (!whitespaceVisible) return text || " ";
-  const pattern = /\t| +$/g;
+  const { parts } = splitWhitespace(text, true, 0);
+  if (parts.length === 0) return " ";
+  if (parts.length === 1 && parts[0].text !== undefined) return parts[0].text;
+  return parts.map((part, index) => part.glyph !== undefined
+    ? <span key={index} className="whitespace-glyph">{part.glyph}</span>
+    : part.text);
+}
+
+function tokenLineNodes(tokens: TokenLine, whitespaceVisible: boolean): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
-  let last = 0;
-  let key = 0;
-  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
-    if (match.index > last) nodes.push(text.slice(last, match.index));
-    nodes.push(<span key={key++} className="whitespace-glyph">{match[0].startsWith("\t") ? "→" : "·".repeat(match[0].length)}</span>);
-    last = pattern.lastIndex;
-  }
-  if (last === 0) return text || " ";
-  if (last < text.length) nodes.push(text.slice(last));
+  let column = 1;
+  tokens.forEach((token, index) => {
+    if (!token.content) return;
+    const key = `tk${index}`;
+    const className = tokenClassName(token);
+    const style = tokenStyle(token);
+    const atLineEnd = index === tokens.length - 1;
+    if (!whitespaceVisible) {
+      nodes.push(<span key={key} className={className} style={style}>{token.content}</span>);
+      return;
+    }
+    const { parts, endColumn } = splitWhitespace(token.content, atLineEnd, column);
+    column = endColumn;
+    parts.forEach((part, partIndex) => {
+      const partKey = `${key}-${partIndex}`;
+      if (part.glyph !== undefined) nodes.push(<span key={partKey} className="whitespace-glyph">{part.glyph}</span>);
+      else nodes.push(<span key={partKey} className={className} style={style}>{part.text}</span>);
+    });
+  });
   return nodes;
+}
+
+function tokenClassName(token: HighlightToken) {
+  let className = "shiki-token";
+  if (token.italic) className += " italic";
+  if (token.bold) className += " bold";
+  if (token.underline) className += " underline";
+  return className;
+}
+
+function tokenStyle(token: HighlightToken): React.CSSProperties | undefined {
+  if (!token.light && !token.dark) return undefined;
+  return { "--shiki-light": token.light ?? token.dark, "--shiki-dark": token.dark ?? token.light } as React.CSSProperties;
 }
 
 function sameReview(left: ReviewIdentity | null, right: ReviewIdentity) {
@@ -639,18 +673,53 @@ function FileIndexPane({ base, index, loading, selectedFile, filePage, onFilePag
 }
 
 function PatchPane({ selectedFile, patch, patchError, patchLoading, hunkPage, diffPrefs, onHunkPage }: { selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; hunkPage: number; diffPrefs: DiffPreferences; onHunkPage: (page: number) => void }) {
-  const hunks = patch && !patch.binary ? parseHunks(patch.text) : [];
+  // The parse is memoized so DiffLine objects keep their identity across
+  // preference-driven re-renders; the token map is keyed by that identity.
+  const hunks = useMemo(() => patch && !patch.binary ? parseHunks(patch.text) : [], [patch]);
   const patchPages = paginateHunks(hunks);
   const patchPage = Math.min(hunkPage, Math.max(0, patchPages.length - 1));
   const visibleHunks = patchPages[patchPage] ?? [];
   const split = diffPrefs.layout === "split";
   const whitespace = diffPrefs.whitespaceVisible;
-  return <section className="patch-pane" aria-label="File patch">{selectedFile && <div className="patch-heading"><code title={selectedFile.path}>{selectedFile.path}</code><span>{selectedFile.status}</span></div>}{patchLoading ? <div className="patch-skeleton" aria-label="Loading patch"><i /><i /><i /><i /></div> : patchError ? <Empty icon={<FileDiff size={24} />} title="Patch not rendered" detail={patchError} /> : !selectedFile ? <Empty icon={<FileDiff size={24} />} title="Select a changed file" detail="The patch is rendered one file at a time." /> : patch?.binary ? <Empty icon={<FileDiff size={24} />} title="Binary file changed" detail={selectedFile.path} /> : patch?.text === "" ? <Empty icon={<CircleDot size={24} />} title="No changes in this file" detail="The selected file has no renderable patch." /> : patchPages.length === 0 ? <pre className="patch-metadata"><code>{patch?.text}</code></pre> : <><div className={`hunk-list ${split ? "split-layout" : ""} ${diffPrefs.lineWrap ? "wrap-lines" : ""}`}>{visibleHunks.map((hunk, hunkIndex) => <div className="hunk" key={`${hunk.header}-${hunkIndex}`}><div className="hunk-header">{hunk.header}</div>{split ? <div className="split-rows">{pairHunkLines(hunk.lines).map((row, rowIndex) => <Fragment key={`${row.old?.oldLine}-${row.new?.newLine}-${rowIndex}`}>{row.old ? <DiffHalf gutter={row.old.oldLine} text={row.old.text} whitespace={whitespace} /> : <div className="diff-line half" />}{row.new ? <DiffHalf gutter={row.new.newLine} text={row.new.text} whitespace={whitespace} /> : <div className="diff-line half" />}</Fragment>)}</div> : hunk.lines.map((line, lineIndex) => <div className={`diff-line ${line.text.startsWith("+") ? "addition" : line.text.startsWith("-") ? "deletion" : ""}`} key={`${line.oldLine}-${line.newLine}-${lineIndex}`}><span className="line-number">{line.oldLine ?? ""}</span><span className="line-number">{line.newLine ?? ""}</span><code>{diffLineContent(line.text, whitespace)}</code></div>)}</div>)}</div>{patchPages.length > 1 && <Pager label="Patch pages" page={patchPage} pages={patchPages.length} total={patchPages.length} size={1} pageLabel onPage={onHunkPage} />}</>}</section>;
+  // Highlighting is progressive: lines paint as plain text immediately, and
+  // token spans swap in once their whole hunk has been tokenized in the
+  // worker (one hunk spans page slices coherently). Tokenization runs off
+  // the UI thread, so it can never block rendering or input. A null map
+  // (unsupported language, failed tokenization) costs nothing.
+  const lang = patch && !patch.binary && selectedFile ? languageForPath(selectedFile.path) : null;
+  const [tokenMap, setTokenMap] = useState<Map<DiffLine, TokenLine> | null>(null);
+  useEffect(() => {
+    if (!lang) {
+      setTokenMap(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const map = new Map<DiffLine, TokenLine>();
+      const tokenized = new Set<number>();
+      for (const slice of visibleHunks) {
+        if (tokenized.has(slice.hunkIndex)) continue;
+        tokenized.add(slice.hunkIndex);
+        const hunk = hunks[slice.hunkIndex];
+        const tokens = await tokenizeHunk(hunk.lines, lang, () => cancelled);
+        if (cancelled) return;
+        if (!tokens) continue;
+        const sources = hunkSideSources(hunk.lines);
+        sources.old.forEach((line, index) => map.set(line, tokens.old[index] ?? []));
+        sources.new.forEach((line, index) => map.set(line, tokens.new[index] ?? []));
+      }
+      if (!cancelled) setTokenMap(map);
+    })();
+    return () => { cancelled = true; };
+  }, [patch, patchPage, lang]);
+  const tokensOf = (line: DiffLine) => tokenMap?.get(line);
+  return <section className="patch-pane" aria-label="File patch">{selectedFile && <div className="patch-heading"><code title={selectedFile.path}>{selectedFile.path}</code><span>{selectedFile.status}</span></div>}{patchLoading ? <div className="patch-skeleton" aria-label="Loading patch"><i /><i /><i /><i /></div> : patchError ? <Empty icon={<FileDiff size={24} />} title="Patch not rendered" detail={patchError} /> : !selectedFile ? <Empty icon={<FileDiff size={24} />} title="Select a changed file" detail="The patch is rendered one file at a time." /> : patch?.binary ? <Empty icon={<FileDiff size={24} />} title="Binary file changed" detail={selectedFile.path} /> : patch?.text === "" ? <Empty icon={<CircleDot size={24} />} title="No changes in this file" detail="The selected file has no renderable patch." /> : patchPages.length === 0 ? <pre className="patch-metadata"><code>{patch?.text}</code></pre> : <><div className={`hunk-list ${split ? "split-layout" : ""} ${diffPrefs.lineWrap ? "wrap-lines" : ""}`}>{visibleHunks.map((hunk, hunkIndex) => <div className="hunk" key={`${hunk.header}-${hunkIndex}`}><div className="hunk-header">{hunk.header}</div>{split ? <div className="split-rows">{pairHunkLines(hunk.lines).map((row, rowIndex) => <Fragment key={`${row.old?.oldLine}-${row.new?.newLine}-${rowIndex}`}>{row.old ? <DiffHalf gutter={row.old.oldLine} text={row.old.text} whitespace={whitespace} tokens={tokensOf(row.old)} /> : <div className="diff-line half" />}{row.new ? <DiffHalf gutter={row.new.newLine} text={row.new.text} whitespace={whitespace} tokens={tokensOf(row.new)} /> : <div className="diff-line half" />}</Fragment>)}</div> : hunk.lines.map((line, lineIndex) => <div className={`diff-line ${line.text.startsWith("+") ? "addition" : line.text.startsWith("-") ? "deletion" : ""}`} key={`${line.oldLine}-${line.newLine}-${lineIndex}`}><span className="line-number">{line.oldLine ?? ""}</span><span className="line-number">{line.newLine ?? ""}</span><code>{diffLineContent(line.text, whitespace, tokensOf(line))}</code></div>)}</div>)}</div>{patchPages.length > 1 && <Pager label="Patch pages" page={patchPage} pages={patchPages.length} total={patchPages.length} size={1} pageLabel onPage={onHunkPage} />}</>}</section>;
 }
 
-function DiffHalf({ gutter, text, whitespace }: { gutter: number | null; text: string; whitespace: boolean }) {
-  return <div className={`diff-line half ${text.startsWith("+") ? "addition" : text.startsWith("-") ? "deletion" : ""}`}><span className="line-number">{gutter ?? ""}</span><code>{diffLineContent(text, whitespace)}</code></div>;
+function DiffHalf({ gutter, text, whitespace, tokens }: { gutter: number | null; text: string; whitespace: boolean; tokens?: TokenLine }) {
+  return <div className={`diff-line half ${text.startsWith("+") ? "addition" : text.startsWith("-") ? "deletion" : ""}`}><span className="line-number">{gutter ?? ""}</span><code>{diffLineContent(text, whitespace, tokens)}</code></div>;
 }
+
 
 function HistoryView({ history, historyRefs, index, loading, selectedCommit, selectedFile, patch, patchError, patchLoading, filePage, hunkPage, diffPrefs, onBack, onBasePick, onFilePage, onHunkPage, onFile }: { history: HistoryState; historyRefs: RefInventory; index: ReviewIndex | null; loading: boolean; selectedCommit: CommitInfo | null; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; filePage: number; hunkPage: number; diffPrefs: DiffPreferences; onBack: () => void; onBasePick: (base: string) => void; onFilePage: (page: number) => void; onHunkPage: (page: number) => void; onFile: (file: ChangedFile) => void }) {
   const selected = selectedCommit;

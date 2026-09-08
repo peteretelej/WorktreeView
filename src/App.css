@@ -35,8 +35,8 @@
   --shadow-dropdown: 0 8px 24px oklch(0 0 0 / 0.16);
   --code-surface: oklch(0.95 0.006 264);
   --line-number: oklch(0.55 0.02 264);
-  --diff-addition-background: oklch(0.72 0.17 152 / 0.25);
-  --diff-deletion-background: oklch(0.7 0.18 22 / 0.25);
+  --diff-addition-background: oklch(0.72 0.17 152 / 0.34);
+  --diff-deletion-background: oklch(0.7 0.18 22 / 0.34);
   --diff-addition-foreground: oklch(0.45 0.13 152);
   --diff-deletion-foreground: oklch(0.48 0.16 22);
   --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
@@ -69,8 +69,8 @@
   --shadow-dropdown: 0 8px 24px oklch(0 0 0 / .4);
   --code-surface: oklch(0.15 0.015 264);
   --line-number: oklch(0.52 0.018 264);
-  --diff-addition-background: oklch(0.34 0.07 152 / .18);
-  --diff-deletion-background: oklch(0.34 0.08 22 / .18);
+  --diff-addition-background: oklch(0.34 0.07 152 / .3);
+  --diff-deletion-background: oklch(0.34 0.08 22 / .3);
   --diff-addition-foreground: oklch(0.82 0.09 152);
   --diff-deletion-foreground: oklch(0.8 0.09 22);
 }
@@ -1019,7 +1019,7 @@ button:disabled {
 .hunk-list { min-width: max-content; padding: 12px; font: 13px/1.5 var(--font-mono); }
 .hunk { margin-bottom: 12px; border: 1px solid var(--border); background: var(--code-surface); }
 .hunk-header { padding: 4px 10px; color: var(--muted); background: var(--surface-2); font-size: 11px; }
-.diff-line { display: grid; grid-template-columns: 42px 42px max-content; min-height: 20px; padding-right: 12px; white-space: pre; }
+.diff-line { display: grid; grid-template-columns: 42px 42px max-content; min-height: 20px; padding-right: 12px; white-space: pre; -webkit-tab-size: 4; tab-size: 4; }
 .diff-line code { color: var(--foreground); }
 .line-number { padding-right: 9px; color: var(--line-number); text-align: right; user-select: none; }
 .patch-metadata { margin: 12px; padding: 10px 12px; overflow: auto; border: 1px solid var(--border); background: var(--code-surface); color: var(--muted); font: 12px/1.5 var(--font-mono); white-space: pre; }
@@ -1027,6 +1027,17 @@ button:disabled {
 .diff-line.deletion { background: var(--diff-deletion-background); }
 .diff-line.addition code { color: var(--diff-addition-foreground); }
 .diff-line.deletion code { color: var(--diff-deletion-foreground); }
+.diff-line code .shiki-token { color: var(--shiki-light); }
+[data-theme="dark"] .diff-line code .shiki-token { color: var(--shiki-dark); }
+/* Changed lines own the diff hue: token colors lean toward the line's
+   addition/deletion color so syntax never outshouts the change signal. */
+.diff-line.addition code .shiki-token { color: color-mix(in oklch, var(--shiki-light) 70%, var(--diff-addition-foreground)); }
+.diff-line.deletion code .shiki-token { color: color-mix(in oklch, var(--shiki-light) 70%, var(--diff-deletion-foreground)); }
+[data-theme="dark"] .diff-line.addition code .shiki-token { color: color-mix(in oklch, var(--shiki-dark) 70%, var(--diff-addition-foreground)); }
+[data-theme="dark"] .diff-line.deletion code .shiki-token { color: color-mix(in oklch, var(--shiki-dark) 70%, var(--diff-deletion-foreground)); }
+.diff-line code .shiki-token.italic { font-style: italic; }
+.diff-line code .shiki-token.bold { font-weight: 600; }
+.diff-line code .shiki-token.underline { text-decoration: underline; }
 .split-rows { display: grid; grid-template-columns: 42px 1fr 42px 1fr; }
 .diff-line.half { grid-column: span 2; grid-template-columns: 42px 1fr; }
 .diff-line.half + .diff-line.half { border-left: 1px solid var(--border); }

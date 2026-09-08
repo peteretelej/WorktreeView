@@ -50,6 +50,7 @@ locale to C. The full rationale is in the repo `AGENTS.md`.
 
 A flat React + Vite app: `App.tsx` (shell, project overview, and review
 views), `settings.tsx`, `diff.ts` (diff presentation helpers),
+`highlight.ts` (progressive diff token highlighting over Shiki),
 `navigation.ts` (back and forward review history), `reviewPresets.ts`
 (review base and worktree scope preset helpers), and `surfaces.ts` (surface
 pin and archive helpers). Unit tests for the utilities run with

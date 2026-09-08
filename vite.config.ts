@@ -7,6 +7,12 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  // The highlight worker uses dynamic imports (grammars, wasm), which needs
+  // ES module workers rather than the IIFE default.
+  worker: {
+    format: "es" as const,
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

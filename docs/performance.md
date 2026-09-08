@@ -29,6 +29,15 @@ later optimization target.
   renders from the cache with no Git spawn; the cache resets when the
   review's base, target, scope, or direction changes, matching the index's
   snapshot freshness.
+- Diff highlighting never delays first paint: lines render as plain text
+  immediately, and token spans swap in for the visible hunk page once the
+  worker responds. Tokenization runs in a Web Worker, so grammar CPU can
+  never block rendering or input; per-line length and time budgets degrade
+  pathological lines to plain text instead of hanging, superseded requests
+  are discarded on file switch, and the oniguruma engine plus grammars load
+  lazily inside the worker per language. Token results cache per content
+  key in a bounded cache on the main thread, and files without a supported
+  language skip highlighting entirely.
 
 ## Desktop e2e as a floor
 
