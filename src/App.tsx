@@ -125,7 +125,7 @@ async function copyText(text: string): Promise<boolean> {
 
 function CopyButton({ value, label, ghost = false }: { value: string; label: string; ghost?: boolean }) {
   const [copied, setCopied] = useState(false);
-  return <button className={`copy-button ${ghost ? "ghost" : ""} ${copied ? "copied" : ""}`} type="button" aria-label={label} title={copied ? "Copied" : label} onClick={async (event) => { event.stopPropagation(); if (await copyText(value)) { setCopied(true); setTimeout(() => setCopied(false), 1200); } }}>{copied ? <Check size={11} /> : <Copy size={11} />}</button>;
+  return <button className={`copy-button ${ghost ? "ghost" : ""} ${copied ? "copied" : ""}`} type="button" aria-label={label} title={copied ? "Copied" : label} onClick={async (event) => { event.stopPropagation(); if (await copyText(value)) { setCopied(true); setTimeout(() => setCopied(false), 1200); } }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button>;
 }
 function commitTargetOf(commit: CommitInfo): ReviewTarget { return { kind: "commit", sha: commit.sha, parents: commit.parents, defaultBaseAncestor: commit.default_base_ancestor }; }
 // The commits bar follows the active ref: the history surface's start point,
