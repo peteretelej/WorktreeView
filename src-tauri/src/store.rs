@@ -150,6 +150,38 @@ pub(crate) async fn load_repos(pool: &SqlitePool) -> Result<Vec<Repo>, CommandEr
         .map_err(Into::into)
 }
 
+// The MCP face's repo rows: the full stored row (path, name, timestamps,
+// pin), not the UI's Repo shape.
+#[derive(Debug, Serialize)]
+pub struct RepoRow {
+    pub path: String,
+    pub name: String,
+    pub created_at: i64,
+    pub last_opened_at: i64,
+    pub pinned_at: Option<i64>,
+}
+
+pub(crate) async fn list_repo_rows_in_pool(pool: &SqlitePool) -> Result<Vec<RepoRow>, CommandError> {
+    let rows = sqlx::query(
+        "SELECT path, name, created_at, last_opened_at, pinned_at FROM repos \
+         ORDER BY last_opened_at DESC, created_at DESC, path ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(RepoRow {
+                path: row.try_get("path")?,
+                name: row.try_get("name")?,
+                created_at: row.try_get("created_at")?,
+                last_opened_at: row.try_get("last_opened_at")?,
+                pinned_at: row.try_get("pinned_at")?,
+            })
+        })
+        .collect::<Result<_, sqlx::Error>>()
+        .map_err(Into::into)
+}
+
 // Older versions stored Windows verbatim paths (\\?\C:\...) on open; move
 // them to plain paths so the UI shows what the user selected. A plain-path
 // row wins if both forms already exist.

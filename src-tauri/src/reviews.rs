@@ -420,16 +420,16 @@ async fn insert_comment(
         .ok_or_else(comment_not_found)
 }
 
-pub(crate) async fn create_comment_in_pool(
+async fn create_comment_with_anchor(
     pool: &SqlitePool,
     repo_path: &str,
     base_sha: &str,
     target_key: &str,
     target_kind: &str,
     draft: &CommentDraft,
+    anchor: Anchor,
     actor: &Actor,
 ) -> Result<Comment, CommandError> {
-    let anchor = validate_anchor(draft)?;
     let review_id =
         resolve_review_id(pool, repo_path, base_sha, target_key, target_kind).await?;
     let (file_path, side, start_line, end_line) = match &anchor {
@@ -461,6 +461,53 @@ pub(crate) async fn create_comment_in_pool(
         Some(anchor),
     )
     .await
+}
+
+pub(crate) async fn create_comment_in_pool(
+    pool: &SqlitePool,
+    repo_path: &str,
+    base_sha: &str,
+    target_key: &str,
+    target_kind: &str,
+    draft: &CommentDraft,
+    actor: &Actor,
+) -> Result<Comment, CommandError> {
+    let anchor = validate_anchor(draft)?;
+    create_comment_with_anchor(pool, repo_path, base_sha, target_key, target_kind, draft, anchor, actor)
+        .await
+}
+
+// The MCP tool path's create: same validator, same caps, same anchor shapes
+// as the human path, but the tool call carries no line content, so line
+// anchors bind nothing (like ingested findings) and drift matching never
+// applies to them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_unbound_comment_in_pool(
+    pool: &SqlitePool,
+    repo_path: &str,
+    base_sha: &str,
+    target_key: &str,
+    target_kind: &str,
+    body: &str,
+    severity: Option<String>,
+    file_path: Option<String>,
+    side: Option<String>,
+    start_line: Option<u32>,
+    end_line: Option<u32>,
+    actor: &Actor,
+) -> Result<Comment, CommandError> {
+    let draft = CommentDraft {
+        body: body.to_string(),
+        severity,
+        file_path,
+        side,
+        start_line,
+        end_line,
+        lines: Vec::new(),
+    };
+    let anchor = validate_anchor_with(&draft, AnchorLines::Absent)?;
+    create_comment_with_anchor(pool, repo_path, base_sha, target_key, target_kind, &draft, anchor, actor)
+        .await
 }
 
 pub(crate) async fn list_comments_in_pool(

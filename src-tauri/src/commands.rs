@@ -43,9 +43,10 @@ pub(crate) async fn list_repos(
     load_repos(&state.pool).await
 }
 
-#[tauri::command]
-pub(crate) async fn list_worktrees(path: String) -> Result<Vec<Worktree>, CommandError> {
-    let path = canonical_path(&path)?;
+// Path-scoped worktree listing behind the list_worktrees command: the MCP
+// face's list_review_targets reuses the same inventory the UI shows.
+pub(crate) async fn list_worktrees_in_path(path: &str) -> Result<Vec<Worktree>, CommandError> {
+    let path = canonical_path(path)?;
     let (exit_code, stdout, stderr) = run_git(
         &path,
         &[
@@ -61,6 +62,11 @@ pub(crate) async fn list_worktrees(path: String) -> Result<Vec<Worktree>, Comman
         return Err(git_execution_error(&stderr));
     }
     parse_worktrees(&stdout)
+}
+
+#[tauri::command]
+pub(crate) async fn list_worktrees(path: String) -> Result<Vec<Worktree>, CommandError> {
+    list_worktrees_in_path(&path).await
 }
 
 #[derive(Debug, Serialize)]

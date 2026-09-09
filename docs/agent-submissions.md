@@ -1,10 +1,12 @@
 # Agent submissions
 
-Agents deliver review output to WorktreeView as submissions: ordered typed
-sections, static html blocks, and findings that surface as ordinary agent
-comments. This page is the client contract for the submission schema, the
-delivery transport (authentication, discovery file, the `post_review` and
-`refresh_repo` JSON-RPC methods, arrival cue) as of this phase.
+Agents collaborate with WorktreeView over one loopback listener with two
+faces: the stateless MCP face at `/mcp` (discovery, reads, comment
+collaboration, refresh ping) and the raw JSON-RPC face at `/` for
+delivering review submissions. This page is the client contract for both:
+the submission schema, the delivery transport (authentication, discovery
+file, the `post_review` and `refresh_repo` methods, arrival cue), and the
+MCP endpoint with its tool surface.
 
 ## Submission schema
 
@@ -237,3 +239,137 @@ each boot rotates the default token, and another instance may own the
 registration. Agents using a named token paste a fresh one from the
 Settings Agent API section; a revoked token is refused until replaced.
 Connection refusal simply means the app is not running.
+
+## The MCP face at /mcp
+
+The same listener serves a stateless MCP (Model Context Protocol) face at
+`POST /mcp`: the full agent tool surface over the same shared
+implementation the raw face uses. Authentication is the same single
+listener evaluation (same bearer tokens, same discovery file, same
+`401`/`-32001` shape); there is no second auth layer. The face implements
+the stateless subset of the MCP `2026-07-28` revision and is validated
+against real coding agents (Claude Code, Codex CLI, Cursor, Gemini CLI).
+
+### Stateless shape
+
+There is no `initialize` handshake and no session: this revision removed
+both, and every request is independent. Except for `server/discover`,
+every request carries its protocol version in its params `_meta`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/list",
+  "params": {
+    "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
+  }
+}
+```
+
+The face supports `2026-07-28`. A request carrying any other version is
+refused with `-32022`; a request without the field is refused with
+`-32600`. Responses are JSON; the face offers no SSE stream and nothing
+subscribes (`GET /mcp` answers `405`). Batching is not implemented: a
+batch request (a JSON array body) answers with a single `-32600`.
+
+### server/discover
+
+`server/discover` is the version probe; it needs no `_meta` version and
+answers with what the face supports:
+
+```json
+{
+  "jsonrpc": "2.0", "id": 1,
+  "result": {
+    "protocolVersions": ["2026-07-28"],
+    "capabilities": { "tools": {} },
+    "serverInfo": { "name": "worktreeview", "version": "0.1.0" }
+  }
+}
+```
+
+### tools/list
+
+`tools/list` returns the static tool catalog in deterministic order
+(reads, writes, action). Each descriptor carries `name`, `description`,
+`inputSchema` (JSON Schema), and the cache fields `ttlMs` (3600000) and
+`"cacheScope": "private"`: the tool set is static per boot, so a generous
+client-side cache is honest.
+
+### tools/call
+
+`tools/call` takes `{ "name", "arguments" }` and answers a complete
+result whose `content` carries the JSON payload as text:
+
+```json
+{
+  "jsonrpc": "2.0", "id": 2,
+  "result": {
+    "resultType": "complete",
+    "isError": false,
+    "content": [{ "type": "text", "text": "[{\"path\": \"/repos/demo\"}]" }],
+    "_meta": {
+      "io.modelcontextprotocol/serverInfo": { "name": "worktreeview", "version": "0.1.0" }
+    }
+  }
+}
+```
+
+Malformed calls never execute: an unknown tool or arguments that fail the
+tool's schema answer `-32602`, and an unknown protocol method answers
+`-32601`. Once a call executes, every failure is an `isError: true` result
+with the failure message in `content`, never a JSON-RPC error: ownership
+refusals, unknown repositories, and fetch failures are outcomes of the
+call itself. Authentication never appears as a tool result; it stays at
+the transport layer (HTTP 401, `-32001`).
+
+### Tools
+
+| Tool | Params (required bold) | Result payload | Execution failures |
+| --- | --- | --- | --- |
+| `list_repos` | none | array of repo rows: `path`, `name`, `created_at`, `last_opened_at`, `pinned_at` | - |
+| `list_review_targets` | `repo_path` | `worktrees` (`path`, `branch`, `head`), `branches` and `remote_branches` (`ref_name`, `head`, `author`, `subject`, `commit_date`, `upstream`, `ahead`, `behind`) | unknown repo |
+| `list_comments` | `repo_path`, `base_sha`, `target_key`, `target_kind` | array of stored comments with anchor fields as stored | - |
+| `list_submissions` | `repo_path`, `base_sha`, `target_key`, `target_kind` | array of stored submissions with typed `sections` | - |
+| `create_comment` | `repo_path`, `base_sha`, `target_key`, `target_kind`, `body`; optional `severity` (`P0`-`P3`), `file_path`, `side` (`LEFT`/`RIGHT`), `start_line`, `end_line` | the stored comment | unknown repo; shape violations (empty body, bad severity, malformed anchor) |
+| `reply_comment` | `parent_comment_id`, `body` | the stored reply | unknown comment; replying to a reply |
+| `resolve_thread` | `root_comment_id`, `resolved` | the updated root comment | unknown comment; resolving a reply |
+| `edit_own_comment` | `comment_id`, `body` | the updated comment | unknown comment; not your comment |
+| `delete_own_comment` | `comment_id` | `{ "deleted": true }`; a root delete also removes its replies | unknown comment; not your comment |
+| `refresh_repo` | `repo_path` | `{ "ok": true }` | unknown repo; fetch failure |
+
+Reads are find-only: a review identity with no comments yet answers an
+empty array and never creates a review row. Writes accept exactly the
+inputs the human app accepts: the same validators, the same caps, the same
+anchor shapes (no `file` for review-level, `file` only for file-level,
+`file` with `side` and `start_line` for line-level). Tool line anchors
+carry no line content, so nothing is hashed at write time and drift
+matching does not apply to them, exactly like ingested findings.
+`list_comments` reports anchor data as stored; it does not recompute drift
+against live Git (that runs only on the human review path).
+
+### Identity and ownership
+
+Every MCP call is attributed to its bearer token: created comments record
+the token's name and id. An agent edits and deletes only comments authored
+through its own token; human comments and legacy comments with no owning
+token are never agent-mutable. The refusal is an `isError` result carrying
+"Only the agent token that authored a comment can edit or delete it."
+Resolving or reopening a thread is visible and reversible, so any agent
+may resolve any thread. Threads are one root plus flat replies: only a
+root accepts a reply, and only a root can be resolved.
+
+### Conformance notes
+
+- SEP-2243: the `Mcp-Method`/`Mcp-Name` request headers are required on
+  Streamable HTTP POSTs by the spec, but they exist for intermediaries.
+  This face routes from the JSON body and neither requires nor validates
+  them; revisit only if a real client or intermediary is shown to require
+  validation.
+- Connections are served one at a time and each connection is one request
+  with a bounded 30 s stall window: concurrent agent calls queue behind
+  each other. Agents doing parallel work should tolerate the latency.
+- The endpoint binds the address and port configured in the Settings Agent
+  API section (loopback `127.0.0.1:9888` by default); nothing is reachable
+  from outside the machine unless the listen address is changed there.

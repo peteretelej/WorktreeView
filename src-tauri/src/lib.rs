@@ -2,6 +2,7 @@ mod agents;
 mod cache;
 mod commands;
 mod git;
+mod mcp;
 mod overview;
 mod retrospection;
 mod review;

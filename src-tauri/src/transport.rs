@@ -29,12 +29,12 @@ const RESPONSE_BODY_LIMIT: usize = 1024 * 1024;
 // A request head beyond this is refused before parsing continues.
 const REQUEST_HEAD_LIMIT: usize = 64 * 1024;
 
-const PARSE_ERROR: i32 = -32700;
-const INVALID_REQUEST: i32 = -32600;
-const METHOD_NOT_FOUND: i32 = -32601;
-const INVALID_PARAMS: i32 = -32602;
+pub(crate) const PARSE_ERROR: i32 = -32700;
+pub(crate) const INVALID_REQUEST: i32 = -32600;
+pub(crate) const METHOD_NOT_FOUND: i32 = -32601;
+pub(crate) const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
-const UNAUTHORIZED: i32 = -32001;
+pub(crate) const UNAUTHORIZED: i32 = -32001;
 const UNKNOWN_REVIEW_TARGET: i32 = -32002;
 const REQUEST_TOO_LARGE: i32 = -32003;
 
@@ -93,10 +93,13 @@ pub(crate) struct ListenerConfig {
 
 #[derive(Clone)]
 pub(crate) struct TransportState {
-    pool: SqlitePool,
-    arrivals: ArrivalSink,
-    refreshes: RefreshSink,
-    status: McpStatusHandle,
+    // The MCP face shares the pool and the refresh sink; auth has already
+    // resolved the identity by the time it sees the state. All fields are
+    // crate-visible so handler tests in sibling modules can build a state.
+    pub(crate) pool: SqlitePool,
+    pub(crate) arrivals: ArrivalSink,
+    pub(crate) refreshes: RefreshSink,
+    pub(crate) status: McpStatusHandle,
 }
 
 #[derive(Deserialize)]
@@ -122,7 +125,7 @@ struct RpcRequest {
     params: Value,
 }
 
-fn rpc_error(id: &Value, status: StatusCode, code: i32, message: impl Into<String>) -> Response {
+pub(crate) fn rpc_error(id: &Value, status: StatusCode, code: i32, message: impl Into<String>) -> Response {
     (
         status,
         Json(json!({
@@ -268,6 +271,7 @@ pub(crate) async fn handle(State(state): State<TransportState>, request: Request
             );
         }
     };
+    let path = request.uri().path().to_string();
     let bytes = match to_bytes(request.into_body(), TRANSPORT_BODY_GUARD_BYTES).await {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -279,6 +283,11 @@ pub(crate) async fn handle(State(state): State<TransportState>, request: Request
             );
         }
     };
+    // One listener, two faces: the MCP face routes by path after the same
+    // single auth evaluation; the raw face keeps its "/" contract unchanged.
+    if path == "/mcp" {
+        return crate::mcp::serve(&state, identity, &bytes).await;
+    }
     let RpcRequest { jsonrpc, id, method, params } = match serde_json::from_slice(&bytes) {
         Ok(request) => request,
         Err(_) => {
@@ -457,12 +466,19 @@ async fn serve_connection(stream: &mut tokio::net::TcpStream, state: TransportSt
         };
         let path = path.split('?').next().unwrap_or("/").to_string();
         if method != "POST" {
-            let response = plain_error_response(StatusCode::METHOD_NOT_ALLOWED, "POST / is the only endpoint");
+            let response = if path == "/" || path == "/mcp" {
+                plain_error_response(
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "POST / and POST /mcp are the only endpoints",
+                )
+            } else {
+                plain_error_response(StatusCode::NOT_FOUND, "POST / and POST /mcp are the only endpoints")
+            };
             write_response(stream, response).await.map_err(|_| "write failed")?;
             return Ok(());
         }
-        if path != "/" {
-            let response = plain_error_response(StatusCode::NOT_FOUND, "POST / is the only endpoint");
+        if path != "/" && path != "/mcp" {
+            let response = plain_error_response(StatusCode::NOT_FOUND, "POST / and POST /mcp are the only endpoints");
             write_response(stream, response).await.map_err(|_| "write failed")?;
             return Ok(());
         }

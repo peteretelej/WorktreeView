@@ -127,7 +127,7 @@ function McpSection({ settings, onChange }: { settings: Settings; onChange: (nex
         <strong>{revealed.token.name}</strong>
         <span>Shown once; paste it into the agent's config now.</span>
         <code style={{ fontSize: 10, wordBreak: "break-all" }}>{revealed.secret}</code>
-        <code style={{ fontSize: 10 }}>POST {liveAddress}</code>
+        <code style={{ fontSize: 10 }}>MCP: POST {liveAddress}mcp</code>
         <code style={{ fontSize: 10 }}>Authorization: Bearer {revealed.secret}</code>
       </div>
     </div>}
