@@ -247,8 +247,9 @@ The same listener serves a stateless MCP (Model Context Protocol) face at
 implementation the raw face uses. Authentication is the same single
 listener evaluation (same bearer tokens, same discovery file, same
 `401`/`-32001` shape); there is no second auth layer. The face implements
-the stateless subset of the MCP `2026-07-28` revision and is validated
-against real coding agents (Claude Code, Codex CLI, Cursor, Gemini CLI).
+the stateless subset of the MCP `2026-07-28` revision. Its validation is
+structural only (live endpoint checks); validation against real coding
+agents is pending.
 
 ### Stateless shape
 

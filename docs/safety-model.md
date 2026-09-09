@@ -79,8 +79,9 @@ repository cannot mutate it or execute code it defines.
 - The agent endpoint is the app's one inbound network surface, served
   inside the app process: it binds the address and port configured in
   Settings (loopback `127.0.0.1:9888` by default; a bind failure is shown
-  in Settings and never blocks startup) and serves only `post_review` and
-  `refresh_repo` over bearer-token authentication. Tokens are per-agent
+  in Settings and never blocks startup) and serves the raw JSON-RPC
+  methods `post_review` and `refresh_repo` plus the stateless MCP face at
+  `POST /mcp`, all over bearer-token authentication. Tokens are per-agent
   rows; the discovery file in the app data directory carries the current
   boot's default token. Beyond loopback the token is the real
   authentication boundary; locally it still guards accidents. The
