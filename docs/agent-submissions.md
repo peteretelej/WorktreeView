@@ -108,18 +108,21 @@ layer does not deliver responses on the current Windows host
 ### Authentication
 
 Every request carries `Authorization: Bearer <token>`. Tokens are
-per-agent rows minted in the Settings Agent API section: the secret is 32
-random bytes hex-encoded, shown once at creation, and only its SHA-256
-hash is stored. A token's activity is recorded as a last-used timestamp,
-so agent calls are attributable. Revoking a token refuses it immediately;
-the endpoint answers a missing, wrong, or revoked secret identically.
+per-agent rows minted in the Settings Agent API section (see
+[connect-an-agent.md](connect-an-agent.md) for the setup flow): the
+secret is 32 random bytes hex-encoded, shown once at creation, and only
+its SHA-256 hash is stored. A token's activity is recorded as a last-used timestamp,
+so agent calls are attributable. Deleting a token refuses it immediately;
+the endpoint answers a missing, wrong, or deleted secret identically, and
+comments the token authored stay visible as history but can no longer be
+mutated by any agent.
 
 One designated default token is provisioned fresh at every app start
 (exactly like the per-boot secret this token model replaced): its secret
 goes only into the discovery file, so zero-config discovery clients keep
-working across restarts without any secret persisting. The default token
-cannot be revoked for the current boot; it rotates at the next start.
-Named tokens persist across restarts.
+working across restarts without any secret persisting. The built-in default token
+cannot be deleted; it renews at the next start, replacing the previous
+default. Named tokens persist across restarts.
 
 ### Discovery
 
@@ -220,7 +223,7 @@ Error responses carry `{ "code", "message" }`:
 | `-32601` | method other than `post_review` or `refresh_repo` |
 | `-32602` | invalid params or submission-shape violation (store message passes through) |
 | `-32603` | internal error, such as a storage or fetch failure |
-| `-32001` | missing, wrong, or revoked bearer token |
+| `-32001` | missing, wrong, or deleted bearer token |
 | `-32002` | unknown review target: `repo_path` has no open repository |
 | `-32003` | request body exceeds the 3 MiB transport guard |
 
@@ -234,10 +237,10 @@ JSON-RPC-framed outcomes otherwise use 200.
 The schema's ingest caps are authoritative; the transport adds only a
 coarse 3 MiB pre-parse guard, so a schema-legal submission is never
 transport-rejected. A 401 means the presented secret is missing, wrong,
-or revoked. Discovery clients should first re-read the discovery file:
-each boot rotates the default token, and another instance may own the
-registration. Agents using a named token paste a fresh one from the
-Settings Agent API section; a revoked token is refused until replaced.
+or deleted. Discovery clients should first re-read the discovery file:
+each boot renews the default token, and another instance may own the
+registration. Agents using a named token paste a new one from the
+Settings Agent API section; a deleted token stays refused.
 Connection refusal simply means the app is not running.
 
 ## The MCP face at /mcp

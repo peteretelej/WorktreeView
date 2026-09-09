@@ -10,6 +10,7 @@ Durable documentation, one concern per page. Start with
 | [architecture.md](architecture.md) | System layout: Tauri, React, Rust modules, IPC, SQLite |
 | [safety-model.md](safety-model.md) | Read-only guarantees and Git spawn hygiene |
 | [agent-submissions.md](agent-submissions.md) | Client contract for agent review submissions: schema, caps, rendering |
+| [connect-an-agent.md](connect-an-agent.md) | How to connect a coding agent: discovery, tokens, endpoints |
 | [performance.md](performance.md) | Large-repo and large-diff requirements |
 | [release.md](release.md) | Distribution channels and publishing plans |
 

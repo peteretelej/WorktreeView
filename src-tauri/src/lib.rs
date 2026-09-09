@@ -18,7 +18,7 @@ use commands::{
     list_comments, list_commits, list_refs, list_repos, list_review_changes, list_submissions,
     list_surfaces, list_worktree_status, list_worktrees, match_comment_anchors, open_repo,
     open_review_file, read_review_file, read_review_patch, remove_repo, reply_comment,
-    revoke_agent_token, set_comment_resolved, set_repo_pinned, set_settings, set_surface_pinned,
+    delete_agent_token, set_comment_resolved, set_repo_pinned, set_settings, set_surface_pinned,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -271,7 +271,7 @@ pub fn run() {
             set_settings,
             list_agent_tokens,
             create_agent_token,
-            revoke_agent_token,
+            delete_agent_token,
             get_mcp_status,
             create_comment,
             list_comments,

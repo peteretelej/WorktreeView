@@ -1516,6 +1516,8 @@ button:disabled {
 .settings-button:hover, .settings-button:focus-visible { background: var(--surface-2); }
 .settings-button:disabled { opacity: 0.45; cursor: default; }
 .settings-button:disabled:hover { background: var(--background); }
+.settings-button-danger { border-color: var(--danger); color: var(--danger); }
+.settings-button-danger:hover, .settings-button-danger:focus-visible { background: var(--danger-soft); }
 .settings-input-address { width: 170px; }
 .settings-input-port { width: 90px; }
 .settings-input-name { width: 160px; }

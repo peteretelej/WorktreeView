@@ -57,6 +57,7 @@ guides belong in CONTRIBUTING.md.
 | `docs/architecture.md` | System layout: Tauri, React, Rust modules, IPC, SQLite |
 | `docs/safety-model.md` | Read-only guarantees and Git spawn hygiene |
 | `docs/agent-submissions.md` | Client contract for agent review submissions: schema, caps, rendering |
+| `docs/connect-an-agent.md` | How to connect a coding agent: discovery, tokens, endpoints |
 | `docs/performance.md` | Large-repo and large-diff requirements |
 | `docs/release.md` | Distribution channels and publishing plans |
 

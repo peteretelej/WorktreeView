@@ -724,7 +724,7 @@ async fn refresh_repo_tool(state: &TransportState, args: RefreshRepoArgs) -> Too
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::create_agent_token_in_pool;
+    use crate::agents::{create_agent_token_in_pool, delete_agent_token_in_pool};
     use crate::testutil::{seed_repo, test_pool, test_path, test_repo};
     use crate::transport::{
         discovery_path, handle, start, CommentChange, CommentSink, ListenerConfig, ListenerStatus,
@@ -992,7 +992,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        sqlx::query("UPDATE agent_tokens SET revoked_at = 1 WHERE id = ?")
+        sqlx::query("DELETE FROM agent_tokens WHERE id = ?")
             .bind(token_id)
             .execute(&pool)
             .await
@@ -1424,6 +1424,50 @@ mod tests {
     // Failed mutations announce nothing, and the human IPC path (the shared
     // implementations the commands call with Actor::Human) has no sink to
     // announce through: the invoking renderer owns its refetch.
+    // Deleting the authoring token detaches its comments (author_token_id
+    // drops to null), so they stay visible but no agent can mutate them.
+    #[tokio::test]
+    async fn deleting_the_authoring_token_leaves_its_comments_unowned() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let (state, secret) = test_state(pool.clone()).await;
+        let root_id = seed_review_with_comment(&pool, &state, &secret).await;
+        let token_id: i64 = sqlx::query_scalar("SELECT id FROM agent_tokens WHERE name = 'mcp-agent'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        delete_agent_token_in_pool(&pool, token_id).await.unwrap();
+
+        let attached: Option<i64> = sqlx::query_scalar(
+            "SELECT author_token_id FROM comments WHERE id = ?",
+        )
+        .bind(root_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(attached, None);
+
+        let other = create_agent_token_in_pool(&pool, "other-agent").await.unwrap();
+        let attempt = call_tool_raw(
+            &state,
+            &other.secret,
+            "edit_own_comment",
+            json!({ "comment_id": root_id, "body": "hijack" }),
+        )
+        .await;
+        assert_eq!(attempt["result"]["isError"], true);
+        assert_eq!(attempt["result"]["content"][0]["text"], OWNERSHIP_MESSAGE);
+
+        // The deleted secret no longer authenticates at all.
+        let (status, _) = post_mcp(&state, Some(&secret), &mcp_body(
+            json!(9),
+            "tools/list",
+            json!({ "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } }),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
     #[tokio::test]
     async fn failed_tool_mutations_and_human_mutations_stay_silent() {
         let pool = test_pool().await;

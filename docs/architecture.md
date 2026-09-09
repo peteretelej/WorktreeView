@@ -11,7 +11,7 @@ normalized domain data through narrow, typed Tauri commands.
   `open_repo`, `list_repos`, `list_worktrees`, `list_worktree_status`,
   `remove_repo`, `get_branch_inventory`, `fetch_project`,
   `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
-  `list_agent_tokens`, `create_agent_token`, `revoke_agent_token`,
+  `list_agent_tokens`, `create_agent_token`, `delete_agent_token`,
   `get_mcp_status`,
   `list_refs`, `list_commits`, `describe_commit`, `list_review_changes`,
   `list_surfaces`, `read_review_patch`, `read_review_file`, `open_review_file`,
@@ -22,9 +22,9 @@ normalized domain data through narrow, typed Tauri commands.
   their SHA-256 hex hash persisted. Secrets are 32 random bytes hex,
   generated once at creation and never stored or logged; authentication
   hashes the presented secret and matches a non-revoked row, recording a
-  last-used timestamp. Revocation is immediate and refuses the current
+  last-used timestamp. Deletion is immediate and refuses the current
   boot's default token, which the listener's startup path provisions fresh
-  per boot (revoking the previous default in the same transaction) and
+  per boot (deleting the previous default in the same transaction) and
   publishes only through the discovery file.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
   (16 MiB per stream), a deadline (30 seconds for local probes, 300 for the

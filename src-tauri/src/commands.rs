@@ -1,5 +1,5 @@
 use crate::agents::{
-    create_agent_token_in_pool, list_agent_tokens_in_pool, revoke_agent_token_in_pool,
+    create_agent_token_in_pool, list_agent_tokens_in_pool, delete_agent_token_in_pool,
     AgentToken, CreatedAgentToken,
 };
 use crate::git::{
@@ -239,11 +239,11 @@ pub(crate) async fn create_agent_token(
 }
 
 #[tauri::command]
-pub(crate) async fn revoke_agent_token(
+pub(crate) async fn delete_agent_token(
     id: i64,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    revoke_agent_token_in_pool(&state.pool, id).await
+    delete_agent_token_in_pool(&state.pool, id).await
 }
 
 #[tauri::command]

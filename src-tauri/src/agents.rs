@@ -125,10 +125,11 @@ pub(crate) async fn list_agent_tokens_in_pool(
         .map_err(Into::into)
 }
 
-// The current boot's default token is locked: revoking it would strand the
-// discovery file's zero-config clients with no replacement until the next
-// boot rotates it anyway.
-pub(crate) async fn revoke_agent_token_in_pool(pool: &SqlitePool, id: i64) -> Result<(), CommandError> {
+// Deleting a token refuses it immediately: the row is gone, so the secret
+// stops authenticating and the comments it authored stay as history with no
+// owning agent (their author_token_id reference is set to null). There is no
+// un-delete; mint a new token instead.
+pub(crate) async fn delete_agent_token_in_pool(pool: &SqlitePool, id: i64) -> Result<(), CommandError> {
     let row: Option<bool> = sqlx::query_scalar("SELECT is_default FROM agent_tokens WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
@@ -140,11 +141,10 @@ pub(crate) async fn revoke_agent_token_in_pool(pool: &SqlitePool, id: i64) -> Re
         )),
         Some(true) => Err(CommandError::new(
             "default_token_locked",
-            "The default token for this boot cannot be revoked; it rotates at the next app start.",
+            "The built-in default token cannot be deleted; it renews at the next app start.",
         )),
         Some(false) => {
-            sqlx::query("UPDATE agent_tokens SET revoked_at = ? WHERE id = ?")
-                .bind(now_millis())
+            sqlx::query("DELETE FROM agent_tokens WHERE id = ?")
                 .bind(id)
                 .execute(pool)
                 .await?;
@@ -173,22 +173,22 @@ pub(crate) async fn authenticate_token_in_pool(pool: &SqlitePool, secret: &str) 
     Some(AgentIdentity { token_id, name })
 }
 
-// The listener's per-boot provisioning: revokes the previous default and
-// inserts a fresh one in one transaction. The returned secret goes only
-// into the discovery file written by the same startup path.
+// The listener's per-boot provisioning: deletes the previous default (plus
+// any revoked rows left by older builds) and inserts a fresh one in one
+// transaction, so the table never accumulates dead defaults. The returned
+// secret goes only into the discovery file written by the same startup path.
 pub(crate) async fn provision_default_token_in_pool(pool: &SqlitePool) -> Result<String, CommandError> {
     let secret = generate_token()
         .map_err(|error| CommandError::new("persistence", error))?;
     let hash = hash_secret(&secret);
     let now = now_millis();
     let mut tx = pool.begin().await?;
-    sqlx::query(
-        "UPDATE agent_tokens SET is_default = 0, revoked_at = ? \
-         WHERE is_default = 1 AND revoked_at IS NULL",
-    )
-    .bind(now)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("DELETE FROM agent_tokens WHERE revoked_at IS NOT NULL")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM agent_tokens WHERE is_default = 1")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(
         "INSERT INTO agent_tokens (name, secret_hash, is_default, created_at) \
          VALUES (?, ?, 1, ?)",
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn created_tokens_list_without_their_secret_and_revoke() {
+    async fn created_tokens_list_without_their_secret_and_delete() {
         let pool = test_pool().await;
         let created = create_agent_token_in_pool(&pool, "codex").await.unwrap();
         assert!(!created.secret.is_empty());
@@ -228,9 +228,8 @@ mod tests {
         assert_eq!(listed[0].name, "codex");
         assert!(!listed[0].is_default);
         assert_eq!(listed[0].revoked_at, None);
-        assert!(revoke_agent_token_in_pool(&pool, listed[0].id).await.is_ok());
-        let listed = list_agent_tokens_in_pool(&pool).await.unwrap();
-        assert!(listed[0].revoked_at.is_some());
+        assert!(delete_agent_token_in_pool(&pool, listed[0].id).await.is_ok());
+        assert!(list_agent_tokens_in_pool(&pool).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -249,7 +248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticating_bumps_last_used_and_refuses_revoked_or_unknown() {
+    async fn authenticating_bumps_last_used_and_refuses_deleted_or_unknown() {
         let pool = test_pool().await;
         let created = create_agent_token_in_pool(&pool, "agent").await.unwrap();
         let identity = authenticate_token_in_pool(&pool, &created.secret).await.unwrap();
@@ -264,35 +263,52 @@ mod tests {
         assert!(after_use.is_some());
 
         assert!(authenticate_token_in_pool(&pool, "not-a-real-secret").await.is_none());
-        revoke_agent_token_in_pool(&pool, created.token.id).await.unwrap();
+        delete_agent_token_in_pool(&pool, created.token.id).await.unwrap();
         assert!(authenticate_token_in_pool(&pool, &created.secret).await.is_none());
     }
 
     #[tokio::test]
-    async fn provisioning_rotates_the_default_and_locks_it_against_revocation() {
+    async fn provisioning_replaces_the_default_and_locks_it_against_deletion() {
         let pool = test_pool().await;
         let first = provision_default_token_in_pool(&pool).await.unwrap();
         let default_row = list_agent_tokens_in_pool(&pool).await.unwrap().remove(0);
         assert!(default_row.is_default);
         assert_eq!(default_row.name, DEFAULT_TOKEN_NAME);
 
-        // A second boot revokes the previous default and inserts a fresh one.
+        // A second boot deletes the previous default and inserts a fresh
+        // one, so dead defaults never accumulate.
         let second = provision_default_token_in_pool(&pool).await.unwrap();
         assert_ne!(first, second);
         assert!(authenticate_token_in_pool(&pool, &first).await.is_none());
         assert!(authenticate_token_in_pool(&pool, &second).await.is_some());
         let rows = list_agent_tokens_in_pool(&pool).await.unwrap();
-        assert_eq!(rows.iter().filter(|token| token.is_default).count(), 1);
-        assert!(rows.iter().all(|token| !token.is_default || token.revoked_at.is_none()));
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_default);
 
-        // The live default refuses revocation; a named token does not.
-        let current_default = rows.iter().find(|token| token.is_default).unwrap();
+        // The live default refuses deletion; a named token does not.
         assert_eq!(
-            revoke_agent_token_in_pool(&pool, current_default.id).await.unwrap_err().code,
+            delete_agent_token_in_pool(&pool, rows[0].id).await.unwrap_err().code,
             "default_token_locked"
         );
         let named = create_agent_token_in_pool(&pool, "named").await.unwrap();
-        assert!(revoke_agent_token_in_pool(&pool, named.token.id).await.is_ok());
+        assert!(delete_agent_token_in_pool(&pool, named.token.id).await.is_ok());
+    }
+
+    // Revoked rows left behind by older builds are dead credentials; the
+    // first provisioning after an upgrade sweeps them.
+    #[tokio::test]
+    async fn provisioning_sweeps_legacy_revoked_rows() {
+        let pool = test_pool().await;
+        let named = create_agent_token_in_pool(&pool, "legacy").await.unwrap();
+        sqlx::query("UPDATE agent_tokens SET revoked_at = 1 WHERE id = ?")
+            .bind(named.token.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        provision_default_token_in_pool(&pool).await.unwrap();
+        let rows = list_agent_tokens_in_pool(&pool).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_default);
     }
 
     // Named tokens persist across the per-boot default rotations: a fresh
@@ -310,10 +326,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoking_an_unknown_token_reports_it() {
+    async fn deleting_an_unknown_token_reports_it() {
         let pool = test_pool().await;
         assert_eq!(
-            revoke_agent_token_in_pool(&pool, 404).await.unwrap_err().code,
+            delete_agent_token_in_pool(&pool, 404).await.unwrap_err().code,
             "invalid_agent_token"
         );
     }

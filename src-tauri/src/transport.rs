@@ -287,7 +287,7 @@ pub(crate) async fn handle(State(state): State<TransportState>, request: Request
                 &Value::Null,
                 StatusCode::UNAUTHORIZED,
                 UNAUTHORIZED,
-                "Missing, wrong, or revoked bearer token. Discovery clients: re-read the discovery file for the current boot.",
+                "Missing, wrong, or deleted bearer token. Discovery clients: re-read the discovery file for the current boot.",
             );
         }
     };
@@ -784,11 +784,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Auth is the listener's own gate: a missing, wrong, or revoked secret
+    // Auth is the listener's own gate: a missing, wrong, or deleted secret
     // answers the same 401/-32001 shape, a valid one authenticates, and its
     // use is recorded on the token row.
     #[tokio::test]
-    async fn valid_secret_authenticates_and_missing_wrong_or_revoked_are_unauthorized() {
+    async fn valid_secret_authenticates_and_missing_wrong_or_deleted_are_unauthorized() {
         let pool = test_pool().await;
         seed_repo(&pool, "/demo").await;
         let (state, secret) = test_state(pool.clone(), Arc::new(|_| {})).await;
@@ -814,8 +814,8 @@ mod tests {
                 .unwrap();
         assert!(last_used_at.is_some());
 
-        // A revoked secret keeps the same 401 shape.
-        sqlx::query("UPDATE agent_tokens SET revoked_at = 1 WHERE id = ?")
+        // A deleted secret keeps the same 401 shape.
+        sqlx::query("DELETE FROM agent_tokens WHERE id = ?")
             .bind(token_id)
             .execute(&pool)
             .await

@@ -20,7 +20,7 @@ export type McpStatus = { enabled: boolean; running: boolean; address: string; p
 
 export function listAgentTokens() { return invoke<AgentToken[]>("list_agent_tokens"); }
 export function createAgentToken(name: string) { return invoke<CreatedAgentToken>("create_agent_token", { name }); }
-export function revokeAgentToken(id: number) { return invoke<void>("revoke_agent_token", { id }); }
+export function deleteAgentToken(id: number) { return invoke<void>("delete_agent_token", { id }); }
 export function getMcpStatus() { return invoke<McpStatus>("get_mcp_status"); }
 
 const DARK_MEDIA_QUERY = "(prefers-color-scheme: dark)";
@@ -83,7 +83,7 @@ function StatusLine({ status }: { status: McpStatus | null }) {
 // The Agent API page is the control surface for the agent endpoint:
 // enable, address, and port apply at the next app start; the token list
 // mints named tokens (secret revealed once, with a connection snippet
-// while it is visible) and revokes them; the status line surfaces the
+// while it is visible) and deletes them; the status line surfaces the
 // live listener, including a non-fatal bind failure.
 function AgentApiSection({ settings, onChange }: { settings: Settings; onChange: (next: Settings) => void }) {
   const [tokens, setTokens] = useState<AgentToken[]>([]);
@@ -91,6 +91,7 @@ function AgentApiSection({ settings, onChange }: { settings: Settings; onChange:
   const [newName, setNewName] = useState("");
   const [revealed, setRevealed] = useState<CreatedAgentToken | null>(null);
   const [error, setError] = useState("");
+  const [armed, setArmed] = useState<number | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -111,10 +112,10 @@ function AgentApiSection({ settings, onChange }: { settings: Settings; onChange:
     }
   }
 
-  async function revoke(token: AgentToken) {
+  async function remove(token: AgentToken) {
     setError("");
     try {
-      await revokeAgentToken(token.id);
+      await deleteAgentToken(token.id);
       setTokens(await listAgentTokens());
       if (revealed?.token.id === token.id) setRevealed(null);
     } catch (caught) {
@@ -160,10 +161,18 @@ function AgentApiSection({ settings, onChange }: { settings: Settings; onChange:
       {tokens.length > 0 && <div className="settings-token-list">
         {tokens.map((token) => <div className="settings-token" key={token.id}>
           <div className="settings-token-copy">
-            <strong>{token.name}{token.is_default && <span className="settings-badge default">built-in</span>}{token.revoked_at && <span className="settings-badge revoked">revoked</span>}</strong>
+            <strong>{token.name}{token.is_default && <span className="settings-badge default">built-in</span>}</strong>
             <span>{token.is_default ? "Renewed at every app start; discovery clients re-read it automatically." : `Created ${formatDate(token.created_at)}${token.last_used_at ? ` · last used ${formatDate(token.last_used_at)}` : " · never used"}`}</span>
           </div>
-          {!token.revoked_at && !token.is_default && <button className="settings-select settings-button" type="button" onClick={() => void revoke(token)}>Revoke</button>}
+          {!token.is_default && <button className={armed === token.id ? "settings-select settings-button settings-button-danger" : "settings-select settings-button"} type="button" onClick={() => {
+            if (armed === token.id) {
+              setArmed(null);
+              void remove(token);
+            } else {
+              setArmed(token.id);
+              window.setTimeout(() => setArmed((current) => (current === token.id ? null : current)), 4000);
+            }
+          }}>{armed === token.id ? "Confirm delete" : "Delete"}</button>}
         </div>)}
       </div>}
       {error && <div className="settings-inline-error" role="status" aria-live="polite">{error}</div>}
