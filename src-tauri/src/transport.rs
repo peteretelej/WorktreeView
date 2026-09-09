@@ -1,4 +1,6 @@
-use crate::reviews::{ingest_submission_in_pool, SubmissionPayload};
+use crate::agents::{authenticate_token_in_pool, provision_default_token_in_pool, AgentIdentity};
+use crate::commands::refresh_repo;
+use crate::reviews::{ingest_submission_in_pool, Actor, SubmissionPayload};
 use axum::body::to_bytes;
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
@@ -8,7 +10,7 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
@@ -51,11 +53,50 @@ pub(crate) struct SubmissionArrival {
 // testable without a running app; production wires the Tauri emit.
 pub(crate) type ArrivalSink = Arc<dyn Fn(SubmissionArrival) + Send + Sync>;
 
+// Announces a completed refresh (the `project-refreshed` event); injected
+// like ArrivalSink so the refresh path is testable without an app.
+pub(crate) type RefreshSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+// Shared, live view of the listener for the Settings MCP section. The
+// startup path writes it and the get_mcp_status command reads it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct ListenerStatus {
+    pub(crate) enabled: bool,
+    pub(crate) running: bool,
+    pub(crate) address: String,
+    pub(crate) port: u16,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct McpStatusHandle(pub(crate) Arc<Mutex<ListenerStatus>>);
+
+impl McpStatusHandle {
+    pub(crate) fn lock_status(&self) -> std::sync::MutexGuard<'_, ListenerStatus> {
+        self.0.lock().expect("listener status mutex poisoned")
+    }
+
+    fn set(&self, running: bool, error: Option<String>) {
+        let mut status = self.lock_status();
+        status.running = running;
+        status.error = error;
+    }
+}
+
+// What the listener needs to bind: everything comes from Settings.
+#[derive(Debug, Clone)]
+pub(crate) struct ListenerConfig {
+    pub(crate) enabled: bool,
+    pub(crate) address: String,
+    pub(crate) port: u16,
+}
+
 #[derive(Clone)]
 pub(crate) struct TransportState {
     pool: SqlitePool,
-    token: String,
     arrivals: ArrivalSink,
+    refreshes: RefreshSink,
+    status: McpStatusHandle,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +105,12 @@ struct ReviewIdentityParams {
     base_sha: String,
     target_key: String,
     target_kind: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RefreshRepoParams {
+    repo_path: String,
 }
 
 #[derive(Deserialize)]
@@ -87,20 +134,140 @@ fn rpc_error(id: &Value, status: StatusCode, code: i32, message: impl Into<Strin
         .into_response()
 }
 
-pub(crate) async fn handle(State(state): State<TransportState>, request: Request) -> Response {
-    let authorized = request
+// Bearer authentication is evaluated only here, once per request: the
+// presented secret is hashed and matched against the agent_tokens table.
+// Revoked, unknown, and missing secrets all answer identically so callers
+// cannot probe which tokens exist.
+async fn authenticate(state: &TransportState, request: &Request) -> Option<AgentIdentity> {
+    let secret = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == format!("Bearer {}", state.token));
-    if !authorized {
+        .and_then(|value| value.strip_prefix("Bearer "))?;
+    authenticate_token_in_pool(&state.pool, secret).await
+}
+
+async fn handle_post_review(
+    state: TransportState,
+    id: Value,
+    params: Value,
+    identity: AgentIdentity,
+) -> Response {
+    // serde flatten would silently absorb unknown keys, defeating the
+    // payload's strict schema: validate the identity fields alone, strip
+    // them, and let the payload's own deny_unknown_fields hold the line.
+    let identity_fields: ReviewIdentityParams = match serde_json::from_value(params.clone()) {
+        Ok(identity_fields) => identity_fields,
+        Err(error) => {
+            return rpc_error(&id, StatusCode::OK, INVALID_PARAMS, format!("Invalid post_review params: {error}"));
+        }
+    };
+    if identity_fields.target_kind != "worktree" && identity_fields.target_kind != "head" {
         return rpc_error(
-            &Value::Null,
-            StatusCode::UNAUTHORIZED,
-            UNAUTHORIZED,
-            "Missing or wrong bearer token; re-read the discovery file for the current boot.",
+            &id,
+            StatusCode::OK,
+            INVALID_PARAMS,
+            r#"target_kind must be "worktree" or "head"."#,
         );
     }
+    let Value::Object(mut fields) = params else {
+        return rpc_error(&id, StatusCode::OK, INVALID_PARAMS, "post_review params must be an object.");
+    };
+    for key in ["repo_path", "base_sha", "target_key", "target_kind"] {
+        fields.remove(key);
+    }
+    let submission: SubmissionPayload = match serde_json::from_value(Value::Object(fields)) {
+        Ok(submission) => submission,
+        Err(error) => {
+            return rpc_error(&id, StatusCode::OK, INVALID_PARAMS, format!("Invalid submission payload: {error}"));
+        }
+    };
+    match ingest_submission_in_pool(
+        &state.pool,
+        &identity_fields.repo_path,
+        &identity_fields.base_sha,
+        &identity_fields.target_key,
+        &identity_fields.target_kind,
+        &submission,
+        &Actor::Agent(identity),
+    )
+    .await
+    {
+        Ok(submission_id) => {
+            (state.arrivals)(SubmissionArrival {
+                repo_path: identity_fields.repo_path,
+                base_sha: identity_fields.base_sha,
+                target_key: identity_fields.target_key,
+                target_kind: identity_fields.target_kind,
+                submission_id,
+                agent_name: submission.agent_name().to_string(),
+            });
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "submission_id": submission_id }
+                })),
+            )
+                .into_response()
+        }
+        Err(error) if error.code == "invalid_submission" => {
+            rpc_error(&id, StatusCode::OK, INVALID_PARAMS, error.message)
+        }
+        Err(error) if error.code == "unknown_review_target" => {
+            rpc_error(&id, StatusCode::OK, UNKNOWN_REVIEW_TARGET, error.message)
+        }
+        Err(error) => rpc_error(&id, StatusCode::OK, INTERNAL_ERROR, error.message),
+    }
+}
+
+async fn handle_refresh_repo(state: TransportState, id: Value, params: Value) -> Response {
+    let params: RefreshRepoParams = match serde_json::from_value(params) {
+        Ok(params) => params,
+        Err(error) => {
+            return rpc_error(&id, StatusCode::OK, INVALID_PARAMS, format!("Invalid refresh_repo params: {error}"));
+        }
+    };
+    let known: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM repos WHERE path = ?")
+        .bind(&params.repo_path)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0);
+    if known == 0 {
+        return rpc_error(
+            &id,
+            StatusCode::OK,
+            UNKNOWN_REVIEW_TARGET,
+            "No repository with that path is open in WorktreeView.",
+        );
+    }
+    match refresh_repo(Path::new(&params.repo_path), &state.refreshes).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "ok": true }
+            })),
+        )
+            .into_response(),
+        Err(error) => rpc_error(&id, StatusCode::OK, INTERNAL_ERROR, error.message),
+    }
+}
+
+pub(crate) async fn handle(State(state): State<TransportState>, request: Request) -> Response {
+    let identity = match authenticate(&state, &request).await {
+        Some(identity) => identity,
+        None => {
+            return rpc_error(
+                &Value::Null,
+                StatusCode::UNAUTHORIZED,
+                UNAUTHORIZED,
+                "Missing, wrong, or revoked bearer token. Discovery clients: re-read the discovery file for the current boot.",
+            );
+        }
+    };
     let bytes = match to_bytes(request.into_body(), TRANSPORT_BODY_GUARD_BYTES).await {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -126,79 +293,15 @@ pub(crate) async fn handle(State(state): State<TransportState>, request: Request
     if jsonrpc != "2.0" {
         return rpc_error(&id, StatusCode::OK, INVALID_REQUEST, "The request is not JSON-RPC 2.0.");
     }
-    if method != "post_review" {
-        return rpc_error(
+    match method.as_str() {
+        "post_review" => handle_post_review(state, id, params, identity).await,
+        "refresh_repo" => handle_refresh_repo(state, id, params).await,
+        _ => rpc_error(
             &id,
             StatusCode::OK,
             METHOD_NOT_FOUND,
-            "Unknown method; the endpoint accepts only post_review.",
-        );
-    }
-    // serde flatten would silently absorb unknown keys, defeating the
-    // payload's strict schema: validate the identity fields alone, strip
-    // them, and let the payload's own deny_unknown_fields hold the line.
-    let identity: ReviewIdentityParams = match serde_json::from_value(params.clone()) {
-        Ok(identity) => identity,
-        Err(error) => {
-            return rpc_error(&id, StatusCode::OK, INVALID_PARAMS, format!("Invalid post_review params: {error}"));
-        }
-    };
-    if identity.target_kind != "worktree" && identity.target_kind != "head" {
-        return rpc_error(
-            &id,
-            StatusCode::OK,
-            INVALID_PARAMS,
-            r#"target_kind must be "worktree" or "head"."#,
-        );
-    }
-    let Value::Object(mut fields) = params else {
-        return rpc_error(&id, StatusCode::OK, INVALID_PARAMS, "post_review params must be an object.");
-    };
-    for key in ["repo_path", "base_sha", "target_key", "target_kind"] {
-        fields.remove(key);
-    }
-    let submission: SubmissionPayload = match serde_json::from_value(Value::Object(fields)) {
-        Ok(submission) => submission,
-        Err(error) => {
-            return rpc_error(&id, StatusCode::OK, INVALID_PARAMS, format!("Invalid submission payload: {error}"));
-        }
-    };
-    match ingest_submission_in_pool(
-        &state.pool,
-        &identity.repo_path,
-        &identity.base_sha,
-        &identity.target_key,
-        &identity.target_kind,
-        &submission,
-    )
-    .await
-    {
-        Ok(submission_id) => {
-            (state.arrivals)(SubmissionArrival {
-                repo_path: identity.repo_path,
-                base_sha: identity.base_sha,
-                target_key: identity.target_key,
-                target_kind: identity.target_kind,
-                submission_id,
-                agent_name: submission.agent_name().to_string(),
-            });
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": { "submission_id": submission_id }
-                })),
-            )
-                .into_response()
-        }
-        Err(error) if error.code == "invalid_submission" => {
-            rpc_error(&id, StatusCode::OK, INVALID_PARAMS, error.message)
-        }
-        Err(error) if error.code == "unknown_review_target" => {
-            rpc_error(&id, StatusCode::OK, UNKNOWN_REVIEW_TARGET, error.message)
-        }
-        Err(error) => rpc_error(&id, StatusCode::OK, INTERNAL_ERROR, error.message),
+            "Unknown method; the endpoint accepts post_review and refresh_repo.",
+        ),
     }
 }
 
@@ -212,18 +315,11 @@ impl TransportHandle {
     }
 }
 
-const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-
-pub(crate) fn generate_token() -> Result<String, String> {
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| format!("Could not generate the endpoint token: {error}"))?;
-    let mut token = String::with_capacity(64);
-    for byte in bytes {
-        token.push(HEX_DIGITS[usize::from(byte >> 4)] as char);
-        token.push(HEX_DIGITS[usize::from(byte & 0x0f)] as char);
-    }
-    Ok(token)
+// What one listener start leaves behind: the shared status handle (always)
+// and the running endpoint's shutdown handle (only when serving).
+pub(crate) struct McpStart {
+    pub(crate) status: McpStatusHandle,
+    pub(crate) handle: Option<TransportHandle>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -430,18 +526,61 @@ async fn write_response(stream: &mut tokio::net::TcpStream, response: Response) 
     stream.flush().await.map_err(|_| ())
 }
 
-pub(crate) fn start(pool: SqlitePool, data_dir: &Path, arrivals: ArrivalSink) -> Result<TransportHandle, String> {
-    let token = generate_token()?;
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|error| format!("Could not bind the agent endpoint to loopback: {error}"))?;
+// One startup attempt for the agent endpoint, driven by the Settings MCP
+// keys. Nothing except a broken runtime/thread environment fails app
+// startup: a disabled listener serves nothing, and a failed bind is a
+// normal user-visible condition that never writes a discovery file or
+// provisions a default token, so nothing advertises a dead endpoint.
+// On a successful bind the same startup path provisions the per-boot
+// default token and writes the discovery file with its secret.
+pub(crate) async fn start(
+    pool: SqlitePool,
+    data_dir: &Path,
+    arrivals: ArrivalSink,
+    refreshes: RefreshSink,
+    config: ListenerConfig,
+) -> Result<McpStart, String> {
+    let status = McpStatusHandle(Arc::new(Mutex::new(ListenerStatus {
+        enabled: config.enabled,
+        running: false,
+        address: config.address.clone(),
+        port: config.port,
+        error: None,
+    })));
+    let state = TransportState { pool, arrivals, refreshes, status: status.clone() };
+    if !config.enabled {
+        return Ok(McpStart { status, handle: None });
+    }
+    let listener = match std::net::TcpListener::bind((config.address.as_str(), config.port)) {
+        Ok(listener) => listener,
+        Err(error) => {
+            status.set(false, Some(format!("Could not bind the agent endpoint to {address}:{port}: {error}", address = config.address, port = config.port)));
+            return Ok(McpStart { status, handle: None });
+        }
+    };
     let port = listener
         .local_addr()
         .map_err(|error| format!("Could not resolve the agent endpoint port: {error}"))?
         .port();
+    // Provisioning and discovery come after the bind and stay one unit: if
+    // either fails, the bound listener shuts and the error surfaces in the
+    // Settings MCP section without a discovery file advertising it.
+    let default_secret = match provision_default_token_in_pool(&state.pool).await {
+        Ok(secret) => secret,
+        Err(error) => {
+            status.set(
+                false,
+                Some(format!("Could not provision the default agent token: {}", error.message)),
+            );
+            return Ok(McpStart { status, handle: None });
+        }
+    };
     let discovery = discovery_path(data_dir);
-    write_discovery_file(&discovery, port, &token)?;
-    let cleanup_token = token.clone();
-    let state = TransportState { pool, token, arrivals };
+    if let Err(error) = write_discovery_file(&discovery, port, &default_secret) {
+        status.set(false, Some(error));
+        return Ok(McpStart { status, handle: None });
+    }
+    status.set(true, None);
     let shutdown = Arc::new(AtomicBool::new(false));
     let exit = Arc::clone(&shutdown);
     // The listener runs on its own single-thread runtime on a dedicated
@@ -458,7 +597,8 @@ pub(crate) fn start(pool: SqlitePool, data_dir: &Path, arrivals: ArrivalSink) ->
         .spawn(move || {
                 let _ = runtime.block_on(async move {
                     let Ok(listener) = tokio::net::TcpListener::from_std(listener) else {
-                        remove_discovery_if_owned(&discovery, port, &cleanup_token);
+                        remove_discovery_if_owned(&discovery, port, &default_secret);
+                        state.status.set(false, Some("Could not adopt the bound listener socket.".into()));
                         return;
                     };
                     loop {
@@ -471,22 +611,67 @@ pub(crate) fn start(pool: SqlitePool, data_dir: &Path, arrivals: ArrivalSink) ->
                         };
                         serve_connection(&mut stream, state.clone()).await;
                     }
-                    remove_discovery_if_owned(&discovery, port, &cleanup_token);
+                    remove_discovery_if_owned(&discovery, port, &default_secret);
+                    state.status.set(false, None);
                 });
         })
         .map_err(|error| format!("Could not start the agent endpoint thread: {error}"))?;
-    Ok(TransportHandle { shutdown })
+    Ok(McpStart { status, handle: Some(TransportHandle { shutdown }) })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::create_agent_token_in_pool;
     use crate::testutil::{seed_repo, test_pool};
     use axum::body::Body;
     use std::sync::Mutex;
 
-    fn test_state(pool: SqlitePool, arrivals: ArrivalSink) -> TransportState {
-        TransportState { pool, token: "test-token".into(), arrivals }
+    fn noop_refreshes() -> RefreshSink {
+        Arc::new(|_| {})
+    }
+
+    fn dummy_status() -> McpStatusHandle {
+        McpStatusHandle(Arc::new(Mutex::new(ListenerStatus {
+            enabled: true,
+            running: true,
+            address: "127.0.0.1".into(),
+            port: 0,
+            error: None,
+        })))
+    }
+
+    fn test_config(port: u16) -> ListenerConfig {
+        ListenerConfig { enabled: true, address: "127.0.0.1".into(), port }
+    }
+
+    // A handler state authenticated by a real token row: the pool-backed
+    // lookup replaces the old boot-token comparison, so tests hold the
+    // secret of the token they created.
+    async fn test_state(pool: SqlitePool, arrivals: ArrivalSink) -> (TransportState, String) {
+        let secret = create_agent_token_in_pool(&pool, "test-agent").await.unwrap().secret;
+        let state = TransportState {
+            pool,
+            arrivals,
+            refreshes: noop_refreshes(),
+            status: dummy_status(),
+        };
+        (state, secret)
+    }
+
+    fn recording_sink() -> (ArrivalSink, Arc<Mutex<Vec<SubmissionArrival>>>) {
+        let received: Arc<Mutex<Vec<SubmissionArrival>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received);
+        (Arc::new(move |arrival| sink.lock().unwrap().push(arrival)), received)
+    }
+
+    fn recording_refreshes() -> (RefreshSink, Arc<Mutex<Vec<String>>>) {
+        let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received);
+        (
+            Arc::new(move |repo_path: &str| sink.lock().unwrap().push(repo_path.to_string())),
+            received,
+        )
     }
 
     async fn post(state: TransportState, token: Option<&str>, body: &str) -> (StatusCode, Value) {
@@ -520,21 +705,6 @@ mod tests {
                 { "title": "Note", "body": "body", "file": null, "start": null, "end": null, "priority": "P1" }
             ]
         })
-    }
-
-    fn recording_sink() -> (ArrivalSink, Arc<Mutex<Vec<SubmissionArrival>>>) {
-        let received: Arc<Mutex<Vec<SubmissionArrival>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&received);
-        (Arc::new(move |arrival| sink.lock().unwrap().push(arrival)), received)
-    }
-
-    #[test]
-    fn token_is_64_lowercase_hex_and_unique_per_boot() {
-        let first = generate_token().unwrap();
-        let second = generate_token().unwrap();
-        assert_eq!(first.len(), 64);
-        assert!(first.chars().all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase()));
-        assert_ne!(first, second);
     }
 
     #[test]
@@ -572,15 +742,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // Auth is the listener's own gate: a missing, wrong, or revoked secret
+    // answers the same 401/-32001 shape, a valid one authenticates, and its
+    // use is recorded on the token row.
     #[tokio::test]
-    async fn missing_or_wrong_bearer_token_is_unauthorized() {
+    async fn valid_secret_authenticates_and_missing_wrong_or_revoked_are_unauthorized() {
         let pool = test_pool().await;
-        let state = test_state(pool, Arc::new(|_| {}));
+        seed_repo(&pool, "/demo").await;
+        let (state, secret) = test_state(pool.clone(), Arc::new(|_| {})).await;
         let body = rpc_body(json!(1), "post_review", review_params("/demo"));
         let (status, payload) = post(state.clone(), None, &body).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(payload["error"]["code"], UNAUTHORIZED);
-        let (status, payload) = post(state, Some("wrong-token"), &body).await;
+        let (status, payload) = post(state.clone(), Some("wrong-token"), &body).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(payload["error"]["code"], UNAUTHORIZED);
+
+        let (status, _) = post(state, Some(&secret), &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let token_id: i64 = sqlx::query_scalar("SELECT id FROM agent_tokens WHERE name = 'test-agent'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let last_used_at: Option<i64> =
+            sqlx::query_scalar("SELECT last_used_at FROM agent_tokens WHERE id = ?")
+                .bind(token_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(last_used_at.is_some());
+
+        // A revoked secret keeps the same 401 shape.
+        sqlx::query("UPDATE agent_tokens SET revoked_at = 1 WHERE id = ?")
+            .bind(token_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (state, _) = test_state(pool, Arc::new(|_| {})).await;
+        let (status, payload) = post(state, Some(&secret), &body).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(payload["error"]["code"], UNAUTHORIZED);
     }
@@ -588,8 +787,8 @@ mod tests {
     #[tokio::test]
     async fn malformed_json_is_a_parse_error() {
         let pool = test_pool().await;
-        let state = test_state(pool, Arc::new(|_| {}));
-        let (status, payload) = post(state, Some("test-token"), "{not json").await;
+        let (state, secret) = test_state(pool, Arc::new(|_| {})).await;
+        let (status, payload) = post(state, Some(&secret), "{not json").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(payload["error"]["code"], PARSE_ERROR);
     }
@@ -597,10 +796,10 @@ mod tests {
     #[tokio::test]
     async fn wrong_jsonrpc_version_is_an_invalid_request() {
         let pool = test_pool().await;
-        let state = test_state(pool, Arc::new(|_| {}));
+        let (state, secret) = test_state(pool, Arc::new(|_| {})).await;
         let body = json!({ "jsonrpc": "1.0", "id": 2, "method": "post_review", "params": review_params("/demo") })
             .to_string();
-        let (status, payload) = post(state, Some("test-token"), &body).await;
+        let (status, payload) = post(state, Some(&secret), &body).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(payload["error"]["code"], INVALID_REQUEST);
         assert_eq!(payload["id"], 2);
@@ -609,9 +808,9 @@ mod tests {
     #[tokio::test]
     async fn unknown_method_is_method_not_found() {
         let pool = test_pool().await;
-        let state = test_state(pool, Arc::new(|_| {}));
+        let (state, secret) = test_state(pool, Arc::new(|_| {})).await;
         let (status, payload) =
-            post(state, Some("test-token"), &rpc_body(json!(3), "list_reviews", json!({}))).await;
+            post(state, Some(&secret), &rpc_body(json!(3), "list_reviews", json!({}))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(payload["error"]["code"], METHOD_NOT_FOUND);
         assert_eq!(payload["id"], 3);
@@ -620,9 +819,9 @@ mod tests {
     #[tokio::test]
     async fn oversized_body_is_rejected_without_parsing() {
         let pool = test_pool().await;
-        let state = test_state(pool, Arc::new(|_| {}));
+        let (state, secret) = test_state(pool, Arc::new(|_| {})).await;
         let body = "x".repeat(TRANSPORT_BODY_GUARD_BYTES + 1);
-        let (status, payload) = post(state, Some("test-token"), &body).await;
+        let (status, payload) = post(state, Some(&secret), &body).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(payload["error"]["code"], REQUEST_TOO_LARGE);
     }
@@ -632,9 +831,9 @@ mod tests {
         let pool = test_pool().await;
         seed_repo(&pool, "/demo").await;
         let (arrivals, received) = recording_sink();
-        let state = test_state(pool.clone(), arrivals);
+        let (state, secret) = test_state(pool.clone(), arrivals).await;
         let (status, payload) =
-            post(state, Some("test-token"), &rpc_body(json!(7), "post_review", review_params("/demo"))).await;
+            post(state, Some(&secret), &rpc_body(json!(7), "post_review", review_params("/demo"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(payload["id"], 7);
         let submission_id = payload["result"]["submission_id"].as_i64().unwrap();
@@ -645,6 +844,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored, 1);
+        // Ingested findings are owned by the authenticated token.
+        let owner: Option<i64> =
+            sqlx::query_scalar("SELECT author_token_id FROM comments WHERE submission_id = ?")
+                .bind(submission_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(owner, Some(1), "the test token is the pool's first agent row");
         let arrivals = received.lock().unwrap();
         assert_eq!(arrivals.len(), 1);
         assert_eq!(arrivals[0].submission_id, submission_id);
@@ -658,9 +865,9 @@ mod tests {
         let pool = test_pool().await;
         seed_repo(&pool, "/demo").await;
         let (arrivals, received) = recording_sink();
-        let state = test_state(pool, arrivals);
+        let (state, secret) = test_state(pool, arrivals).await;
         let (status, payload) =
-            post(state, Some("test-token"), &rpc_body(json!(8), "post_review", review_params("/missing"))).await;
+            post(state, Some(&secret), &rpc_body(json!(8), "post_review", review_params("/missing"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(payload["error"]["code"], UNKNOWN_REVIEW_TARGET);
         assert_eq!(received.lock().unwrap().len(), 0);
@@ -670,58 +877,180 @@ mod tests {
     async fn submission_shape_violations_are_invalid_params() {
         let pool = test_pool().await;
         seed_repo(&pool, "/demo").await;
-        let state = test_state(pool, Arc::new(|_| {}));
+        let (state, secret) = test_state(pool, Arc::new(|_| {})).await;
 
         let mut bad_priority = review_params("/demo");
         bad_priority["findings"][0]["priority"] = json!("P9");
-        let (_, payload) = post(state.clone(), Some("test-token"), &rpc_body(json!(9), "post_review", bad_priority)).await;
+        let (_, payload) = post(state.clone(), Some(&secret), &rpc_body(json!(9), "post_review", bad_priority)).await;
         assert_eq!(payload["error"]["code"], INVALID_PARAMS);
 
         let mut unknown_field = review_params("/demo");
         unknown_field["surprise"] = json!(true);
         let (_, payload) =
-            post(state.clone(), Some("test-token"), &rpc_body(json!(10), "post_review", unknown_field)).await;
+            post(state.clone(), Some(&secret), &rpc_body(json!(10), "post_review", unknown_field)).await;
         assert_eq!(payload["error"]["code"], INVALID_PARAMS);
 
         let mut bad_target_kind = review_params("/demo");
         bad_target_kind["target_kind"] = json!("branch");
-        let (_, payload) = post(state, Some("test-token"), &rpc_body(json!(11), "post_review", bad_target_kind)).await;
+        let (_, payload) = post(state, Some(&secret), &rpc_body(json!(11), "post_review", bad_target_kind)).await;
         assert_eq!(payload["error"]["code"], INVALID_PARAMS);
     }
 
-    // End-to-end over a real loopback socket: start() binds, writes the
-    // discovery file with the bound port and current token, and the served
-    // handler answers an authorized POST. This is the desktop e2e's transport
-    // path without a Tauri app. The test runtime stays multi-thread so the
-    // pool's connection workers stay alive while the handler runs on the
-    // endpoint's own dedicated runtime, mirroring production (Tauri's
-    // runtime owns the pool; it never sleeps).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn started_endpoint_serves_post_review_over_a_live_socket() {
-        use std::io::{Read, Write};
-        use std::net::TcpStream;
-        use std::time::{Duration, Instant};
-
+    // The refresh ping: an authenticated method over the shared refresh
+    // implementation. A repo without remotes is a no-op success that still
+    // announces through the injected sink; an unknown repo keeps the
+    // unknown_review_target code.
+    #[tokio::test]
+    async fn refresh_repo_is_a_noop_success_without_remotes_and_announces() {
         let pool = test_pool().await;
-        seed_repo(&pool, "/demo").await;
-        let (arrivals, received) = recording_sink();
-        let dir = crate::testutil::test_path("transport-socket");
+        let repo = crate::testutil::test_repo("transport-refresh-no-remote");
+        seed_repo(&pool, repo.to_str().unwrap()).await;
+        let (refreshes, announced) = recording_refreshes();
+        let (state, secret) = test_state(pool, Arc::new(|_| {})).await;
+        let state = TransportState { refreshes, ..state };
+        let params = json!({ "repo_path": repo.to_str().unwrap() });
+        let (status, payload) =
+            post(state.clone(), Some(&secret), &rpc_body(json!(4), "refresh_repo", params)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["result"]["ok"], true);
+        assert_eq!(
+            announced.lock().unwrap().as_slice(),
+            [repo.to_string_lossy().as_ref()]
+        );
+
+        let (status, payload) = post(
+            state,
+            Some(&secret),
+            &rpc_body(json!(5), "refresh_repo", json!({ "repo_path": "/missing" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["error"]["code"], UNKNOWN_REVIEW_TARGET);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn refresh_repo_params_are_strict() {
+        let pool = test_pool().await;
+        let (state, secret) = test_state(pool, Arc::new(|_| {})).await;
+        let (status, payload) = post(
+            state,
+            Some(&secret),
+            &rpc_body(json!(6), "refresh_repo", json!({ "repo_path": "/demo", "surprise": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["error"]["code"], INVALID_PARAMS);
+    }
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    // The listener binds the configured address and port, provisions the
+    // per-boot default, and writes the discovery file whose secret is the
+    // only copy of that default.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_uses_the_configured_port_and_provisions_the_default() {
+        let pool = test_pool().await;
+        let dir = crate::testutil::test_path("transport-start-configured");
         std::fs::create_dir_all(&dir).unwrap();
-        let handle = start(pool.clone(), &dir, arrivals).unwrap();
+        let port = free_port();
+        let mcp = start(pool.clone(), &dir, Arc::new(|_| {}), noop_refreshes(), test_config(port))
+            .await
+            .unwrap();
+        assert!(mcp.handle.is_some());
+        let status = mcp.status.lock_status().clone();
+        assert!(status.running);
+        assert_eq!(status.port, port);
+        assert_eq!(status.error, None);
+
         let discovery: EndpointDiscovery =
             serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
+        assert_eq!(discovery.port, port);
+        // The discovery secret authenticates: it is the provisioned default.
+        let identity = crate::agents::authenticate_token_in_pool(&pool, &discovery.token).await;
+        assert!(identity.is_some(), "the discovery secret is the live default token");
+        let default_row: (String, bool) = sqlx::query_as(
+            "SELECT name, is_default FROM agent_tokens WHERE is_default = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(default_row, ("default".into(), true));
+        mcp.handle.unwrap().shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        let body = rpc_body(json!(1), "post_review", review_params("/demo"));
+    // A bind collision is a normal condition: the app keeps running, the
+    // error surfaces in the status, and no discovery file or default token
+    // is written for the failed listener.
+    #[tokio::test]
+    async fn bind_failure_is_not_fatal_and_writes_no_discovery() {
+        let pool = test_pool().await;
+        let dir = crate::testutil::test_path("transport-start-collision");
+        std::fs::create_dir_all(&dir).unwrap();
+        let occupier = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = occupier.local_addr().unwrap().port();
+        let mcp = start(pool.clone(), &dir, Arc::new(|_| {}), noop_refreshes(), test_config(port))
+            .await
+            .unwrap();
+        assert!(mcp.handle.is_none());
+        let status = mcp.status.lock_status().clone();
+        assert!(!status.running);
+        assert!(status.error.is_some());
+        assert!(!discovery_path(&dir).exists());
+        let defaults: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_tokens WHERE is_default = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(defaults, 0, "no default token may be provisioned for a dead endpoint");
+        drop(occupier);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn disabled_listener_starts_nothing_and_writes_no_discovery() {
+        let pool = test_pool().await;
+        let dir = crate::testutil::test_path("transport-start-disabled");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mcp = start(
+            pool,
+            &dir,
+            Arc::new(|_| {}),
+            noop_refreshes(),
+            ListenerConfig { enabled: false, address: "127.0.0.1".into(), port: free_port() },
+        )
+        .await
+        .unwrap();
+        assert!(mcp.handle.is_none());
+        let status = mcp.status.lock_status().clone();
+        assert!(!status.enabled && !status.running);
+        assert!(status.error.is_none());
+        assert!(!discovery_path(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Sends one POST over a real loopback socket and returns the raw
+    // response; the blocking std client runs on its own thread so no async
+    // runtime is involved.
+    fn send_over_socket(port: u16, bearer: &str, body: String) -> std::thread::JoinHandle<String> {
         let request = format!(
-            "POST / HTTP/1.1\r\nhost: 127.0.0.1\r\nauthorization: Bearer {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-            discovery.token,
+            "POST / HTTP/1.1\r\nhost: 127.0.0.1\r\nauthorization: Bearer {bearer}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len(),
         );
-        // Blocking std client on its own thread: no async runtime involved.
-        let client = std::thread::spawn(move || {
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            use std::net::TcpStream;
+            use std::time::{Duration, Instant};
             let deadline = Instant::now() + Duration::from_secs(15);
             let mut stream = loop {
-                match TcpStream::connect(("127.0.0.1", discovery.port)) {
+                match TcpStream::connect(("127.0.0.1", port)) {
                     Ok(socket) => break socket,
                     Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
                     Err(error) => panic!("the endpoint never started listening: {error}"),
@@ -733,10 +1062,33 @@ mod tests {
             stream
                 .read_to_end(&mut response)
                 .expect("the endpoint did not answer within 10s");
-            response
-        });
-        let response = String::from_utf8(client.join().unwrap()).unwrap();
-        handle.shutdown();
+            String::from_utf8(response).unwrap()
+        })
+    }
+
+    // End-to-end over a real loopback socket: start() binds, provisions the
+    // default token, writes the discovery file with the bound port and its
+    // secret, and the served handler answers an authorized POST. This is
+    // the desktop e2e's transport path without a Tauri app. The test
+    // runtime stays multi-thread so the pool's connection workers stay
+    // alive while the handler runs on the endpoint's own dedicated runtime,
+    // mirroring production (Tauri's runtime owns the pool; it never sleeps).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn started_endpoint_serves_post_review_over_a_live_socket() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let (arrivals, received) = recording_sink();
+        let dir = crate::testutil::test_path("transport-socket");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mcp = start(pool, &dir, arrivals, noop_refreshes(), test_config(0))
+            .await
+            .unwrap();
+        let discovery: EndpointDiscovery =
+            serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
+
+        let body = rpc_body(json!(1), "post_review", review_params("/demo"));
+        let response = send_over_socket(discovery.port, &discovery.token, body).join().unwrap();
+        mcp.handle.unwrap().shutdown();
         assert!(response.starts_with("HTTP/1.1 200 OK"), "unexpected response: {response}");
         let payload = response.split("\r\n\r\n").nth(1).unwrap();
         let parsed: Value = serde_json::from_str(payload).unwrap();
@@ -747,5 +1099,41 @@ mod tests {
         // the pool cross-runtime here would only exercise sqlx, not the
         // transport.
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The raw face's second method round-trips over the live socket: an
+    // authorized refresh_repo against an open repo answers ok:true, and the
+    // per-boot default from the discovery file authenticates it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn started_endpoint_serves_refresh_repo_over_a_live_socket() {
+        let pool = test_pool().await;
+        let repo = crate::testutil::test_repo("transport-socket-refresh");
+        seed_repo(&pool, repo.to_str().unwrap()).await;
+        let (refreshes, announced) = recording_refreshes();
+        let dir = crate::testutil::test_path("transport-socket-refresh-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mcp = start(pool, &dir, Arc::new(|_| {}), refreshes, test_config(0))
+            .await
+            .unwrap();
+        let discovery: EndpointDiscovery =
+            serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
+
+        let body = rpc_body(
+            json!(2),
+            "refresh_repo",
+            json!({ "repo_path": repo.to_str().unwrap() }),
+        );
+        let response = send_over_socket(discovery.port, &discovery.token, body).join().unwrap();
+        mcp.handle.unwrap().shutdown();
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "unexpected response: {response}");
+        let payload = response.split("\r\n\r\n").nth(1).unwrap();
+        let parsed: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(parsed["result"]["ok"], true);
+        assert_eq!(
+            announced.lock().unwrap().as_slice(),
+            [repo.to_string_lossy().as_ref()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }

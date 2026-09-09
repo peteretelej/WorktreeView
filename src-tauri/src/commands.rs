@@ -1,3 +1,7 @@
+use crate::agents::{
+    create_agent_token_in_pool, list_agent_tokens_in_pool, revoke_agent_token_in_pool,
+    AgentToken, CreatedAgentToken,
+};
 use crate::git::{
     fetch_remotes, git_execution_error, parse_status_count, parse_worktrees, run_git, CommitPage,
     Worktree,
@@ -11,15 +15,18 @@ use crate::retrospection::{list_surfaces_in_pool, set_surface_pinned_in_pool, Su
 use crate::reviews::{
     create_comment_in_pool, delete_comment_in_pool, edit_comment_in_pool, list_comments_in_pool,
     list_submissions_in_pool, match_comment_anchors_in_pool, reply_comment_in_pool,
-    set_comment_resolved_in_pool, AnchorStatus, Comment, CommentDraft, PatchLine, Submission,
+    set_comment_resolved_in_pool, Actor, AnchorStatus, Comment, CommentDraft, PatchLine,
+    Submission,
 };
 use crate::store::{
     get_settings_in_pool, load_repos, open_repo_path, remove_repo_in_pool, set_repo_pinned_in_pool,
     set_settings_in_pool, Repo, Settings,
 };
+use crate::transport::{ListenerStatus, McpStatusHandle};
 use crate::{canonical_path, plain_path, AppState, CommandError};
 use serde::Serialize;
 use std::path::Path;
+use std::sync::Arc;
 
 #[tauri::command]
 pub(crate) async fn open_repo(
@@ -146,27 +153,42 @@ pub(crate) async fn get_branch_inventory(
     branch_inventory(path).await
 }
 
-// The refresh action's explicit network step: fetch updates only
+// Announces a completed refresh; production emits the `project-refreshed`
+// webview event, tests record. Injected so the shared refresh stays testable
+// without a running app.
+pub(crate) type RefreshSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+// The refresh action's one shared implementation, called by the human IPC
+// command and the endpoint's `refresh_repo` method alike: fetch updates only
 // remote-tracking refs (and prunes the deleted ones). It never runs as part
 // of a review computation; the read-only probes always see whatever state
-// the last fetch left behind.
-#[tauri::command]
-pub(crate) async fn fetch_project(path: String) -> Result<(), CommandError> {
-    let path = canonical_path(&path)?;
-    let (exit_code, stdout, stderr) = run_git(&path, &["remote"]).await?;
+// the last fetch left behind. Without a configured remote there is nothing
+// to fetch and no reason to spawn the network command at all; both outcomes
+// announce through the sink.
+pub(crate) async fn refresh_repo(path: &Path, refreshes: &RefreshSink) -> Result<(), CommandError> {
+    let (exit_code, stdout, stderr) = run_git(path, &["remote"]).await?;
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
     }
-    // Without a configured remote there is nothing to fetch and no reason to
-    // spawn the network command at all.
     if stdout.iter().all(|byte| byte.is_ascii_whitespace()) {
+        refreshes(&path.to_string_lossy());
         return Ok(());
     }
-    let (exit_code, _, stderr) = fetch_remotes(&path).await?;
+    let (exit_code, _, stderr) = fetch_remotes(path).await?;
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
     }
+    refreshes(&path.to_string_lossy());
     Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn fetch_project(
+    path: String,
+    refreshes: tauri::State<'_, RefreshSink>,
+) -> Result<(), CommandError> {
+    let path = canonical_path(&path)?;
+    refresh_repo(&path, &refreshes).await
 }
 
 #[tauri::command]
@@ -193,6 +215,36 @@ pub(crate) async fn set_settings(
     settings: Settings,
 ) -> Result<Settings, CommandError> {
     set_settings_in_pool(&state.pool, &settings).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_agent_tokens(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<AgentToken>, CommandError> {
+    list_agent_tokens_in_pool(&state.pool).await
+}
+
+#[tauri::command]
+pub(crate) async fn create_agent_token(
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<CreatedAgentToken, CommandError> {
+    create_agent_token_in_pool(&state.pool, &name).await
+}
+
+#[tauri::command]
+pub(crate) async fn revoke_agent_token(
+    id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    revoke_agent_token_in_pool(&state.pool, id).await
+}
+
+#[tauri::command]
+pub(crate) async fn get_mcp_status(
+    status: tauri::State<'_, McpStatusHandle>,
+) -> Result<ListenerStatus, CommandError> {
+    Ok(status.lock_status().clone())
 }
 
 #[tauri::command]
@@ -356,6 +408,8 @@ pub(crate) fn open_review_file(
 
 // Review identity keys on resolved SHAs: the frontend derives base_sha and
 // target_key from the loaded ReviewIndex, never from symbolic ref names.
+// Human IPC callers act as Actor::Human; ownership is enforced in the
+// shared implementations, not here.
 #[tauri::command]
 pub(crate) async fn create_comment(
     repo_path: String,
@@ -372,6 +426,7 @@ pub(crate) async fn create_comment(
         &target_key,
         &target_kind,
         &draft,
+        &Actor::Human,
     )
     .await
 }
@@ -405,7 +460,7 @@ pub(crate) async fn reply_comment(
     severity: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Comment, CommandError> {
-    reply_comment_in_pool(&state.pool, parent_id, &body, severity).await
+    reply_comment_in_pool(&state.pool, parent_id, &body, severity, &Actor::Human).await
 }
 
 #[tauri::command]
@@ -414,7 +469,7 @@ pub(crate) async fn set_comment_resolved(
     resolved: bool,
     state: tauri::State<'_, AppState>,
 ) -> Result<Comment, CommandError> {
-    set_comment_resolved_in_pool(&state.pool, comment_id, resolved).await
+    set_comment_resolved_in_pool(&state.pool, comment_id, resolved, &Actor::Human).await
 }
 
 #[tauri::command]
@@ -423,7 +478,7 @@ pub(crate) async fn edit_comment(
     body: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Comment, CommandError> {
-    edit_comment_in_pool(&state.pool, comment_id, &body).await
+    edit_comment_in_pool(&state.pool, comment_id, &body, &Actor::Human).await
 }
 
 #[tauri::command]
@@ -431,7 +486,7 @@ pub(crate) async fn delete_comment(
     comment_id: i64,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    delete_comment_in_pool(&state.pool, comment_id).await
+    delete_comment_in_pool(&state.pool, comment_id, &Actor::Human).await
 }
 
 #[tauri::command]
@@ -458,13 +513,25 @@ pub(crate) async fn match_comment_anchors(
 
 #[cfg(test)]
 mod tests {
-    use super::{fetch_project, worktree_change_count};
+    use super::{refresh_repo, worktree_change_count, RefreshSink};
     use crate::overview::branch_inventory;
     use crate::testutil::{test_git, test_path, test_repo};
     use std::process::Command as StdCommand;
+    use std::sync::{Arc, Mutex};
+
+    // The no-op sink stands in for the app's event emit in the direct calls;
+    // fetch_project (the IPC adapter) reads its sink from managed state.
+    fn recording_sink() -> (RefreshSink, Arc<Mutex<Vec<String>>>) {
+        let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received);
+        (
+            Arc::new(move |repo_path: &str| sink.lock().unwrap().push(repo_path.to_string())),
+            received,
+        )
+    }
 
     #[tokio::test]
-    async fn fetch_project_updates_remote_tracking_refs() {
+    async fn refresh_updates_remote_tracking_refs_and_announces() {
         let origin = test_repo("fetch-origin");
         test_git(&origin, &["branch", "-M", "main"]);
         let clone = test_path("fetch-clone");
@@ -474,10 +541,11 @@ mod tests {
             &clone,
             &["remote", "add", "origin", origin.to_str().unwrap()],
         );
+        let (refreshes, announced) = recording_sink();
 
         // A repository with no fetched refs yet picks up the remote's
         // branches on the first refresh.
-        fetch_project(clone.to_str().unwrap().into()).await.unwrap();
+        refresh_repo(&clone, &refreshes).await.unwrap();
         let inventory = branch_inventory(clone.to_str().unwrap().into())
             .await
             .unwrap();
@@ -486,12 +554,16 @@ mod tests {
             inventory.remote_branches[0].ref_name,
             "refs/remotes/origin/main"
         );
+        assert_eq!(
+            announced.lock().unwrap().as_slice(),
+            [clone.to_string_lossy().as_ref()]
+        );
 
         // New remote branches and commits appear on the next refresh.
         test_git(&origin, &["checkout", "--quiet", "-b", "side"]);
         std::fs::write(origin.join("tracked.txt"), "changed\n").unwrap();
         test_git(&origin, &["commit", "--quiet", "-am", "advance"]);
-        fetch_project(clone.to_str().unwrap().into()).await.unwrap();
+        refresh_repo(&clone, &refreshes).await.unwrap();
         let inventory = branch_inventory(clone.to_str().unwrap().into())
             .await
             .unwrap();
@@ -503,9 +575,11 @@ mod tests {
             .unwrap();
         assert_eq!(side.subject, "advance");
 
-        // A repository without remotes fetches nothing and still succeeds.
+        // A repository without remotes fetches nothing and still succeeds,
+        // announcing the no-op like any completed refresh.
         let bare = test_repo("fetch-no-remote");
-        fetch_project(bare.to_str().unwrap().into()).await.unwrap();
+        refresh_repo(&bare, &refreshes).await.unwrap();
+        assert_eq!(announced.lock().unwrap().len(), 3);
 
         let _ = std::fs::remove_dir_all(&origin);
         let _ = std::fs::remove_dir_all(&clone);

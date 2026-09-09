@@ -1,16 +1,27 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ArrowLeft } from "lucide-react";
 import { ZOOM_LEVELS, snapZoom } from "./zoom.ts";
 
 export type Theme = "system" | "light" | "dark";
 export type DiffLayout = "unified" | "split";
-export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; syntax_visible: boolean; zoom: number };
+export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; syntax_visible: boolean; zoom: number; mcp_enabled: boolean; mcp_listen_address: string; mcp_port: number };
 
-export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false, syntax_visible: true, zoom: 1 };
+export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false, syntax_visible: true, zoom: 1, mcp_enabled: true, mcp_listen_address: "127.0.0.1", mcp_port: 9888 };
 
 export function getSettings() { return invoke<Settings>("get_settings"); }
 export function persistSettings(settings: Settings) { return invoke<Settings>("set_settings", { settings }); }
+
+// Mirrors the Rust agent token rows; the secret exists only in the create
+// response and is shown once.
+export type AgentToken = { id: number; name: string; is_default: boolean; created_at: number; last_used_at: number | null; revoked_at: number | null };
+export type CreatedAgentToken = { token: AgentToken; secret: string };
+export type McpStatus = { enabled: boolean; running: boolean; address: string; port: number; error: string | null };
+
+export function listAgentTokens() { return invoke<AgentToken[]>("list_agent_tokens"); }
+export function createAgentToken(name: string) { return invoke<CreatedAgentToken>("create_agent_token", { name }); }
+export function revokeAgentToken(id: number) { return invoke<void>("revoke_agent_token", { id }); }
+export function getMcpStatus() { return invoke<McpStatus>("get_mcp_status"); }
 
 const DARK_MEDIA_QUERY = "(prefers-color-scheme: dark)";
 
@@ -40,6 +51,102 @@ const DIFF_LAYOUT_OPTIONS: { value: DiffLayout; label: string }[] = [
 
 const zoomLabel = (level: number) => `${Math.round(level * 100)}%`;
 
+function formatDate(unixMillis: number) {
+  return new Date(unixMillis).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+// The MCP section is the control surface for the agent endpoint: enable,
+// address, and port apply at the next app start; the token table mints
+// named tokens (secret revealed once, with a connection snippet while it
+// is visible) and revokes them; the status line surfaces the live
+// listener, including a non-fatal bind failure.
+function McpSection({ settings, onChange }: { settings: Settings; onChange: (next: Settings) => void }) {
+  const [tokens, setTokens] = useState<AgentToken[]>([]);
+  const [status, setStatus] = useState<McpStatus | null>(null);
+  const [newName, setNewName] = useState("");
+  const [revealed, setRevealed] = useState<CreatedAgentToken | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+    listAgentTokens().then((loaded) => { if (mounted) setTokens(loaded); }).catch((caught) => { if (mounted) setError(errorMessageOf(caught)); });
+    getMcpStatus().then((loaded) => { if (mounted) setStatus(loaded); }).catch((caught) => { if (mounted) setError(errorMessageOf(caught)); });
+    return () => { mounted = false; };
+  }, []);
+
+  async function mint() {
+    setError("");
+    try {
+      const created = await createAgentToken(newName);
+      setRevealed(created);
+      setNewName("");
+      setTokens(await listAgentTokens());
+    } catch (caught) {
+      setError(errorMessageOf(caught));
+    }
+  }
+
+  async function revoke(token: AgentToken) {
+    setError("");
+    try {
+      await revokeAgentToken(token.id);
+      setTokens(await listAgentTokens());
+      if (revealed?.token.id === token.id) setRevealed(null);
+    } catch (caught) {
+      setError(errorMessageOf(caught));
+    }
+  }
+
+  const liveAddress = `http://${status?.address ?? settings.mcp_listen_address}:${status?.port ?? settings.mcp_port}/`;
+  return <section id="settings-mcp" className="settings-section" aria-labelledby="settings-mcp-heading">
+    <h2 id="settings-mcp-heading">Agent API</h2>
+    <label className="settings-row settings-toggle">
+      <span className="settings-row-copy"><strong>Agent endpoint</strong><span>Let coding agents deliver reviews, comment, and ping for refresh.</span></span>
+      <input type="checkbox" checked={settings.mcp_enabled} onChange={(event) => onChange({ ...settings, mcp_enabled: event.currentTarget.checked })} />
+    </label>
+    <div className="settings-row">
+      <div className="settings-row-copy"><strong>Listen address</strong><span>Beyond 127.0.0.1 the token is the real auth boundary.</span></div>
+      <input className="settings-select" type="text" aria-label="Listen address" value={settings.mcp_listen_address} onChange={(event) => onChange({ ...settings, mcp_listen_address: event.currentTarget.value })} />
+    </div>
+    <div className="settings-row">
+      <div className="settings-row-copy"><strong>Port</strong><span>1-65535; a port already in use surfaces below without blocking startup.</span></div>
+      <input className="settings-select" type="number" min={1} max={65535} step={1} aria-label="Listen port" value={String(settings.mcp_port)} onChange={(event) => { const port = Number(event.currentTarget.value); if (Number.isInteger(port) && port >= 1 && port <= 65535) onChange({ ...settings, mcp_port: port }); }} />
+    </div>
+    <div className="settings-row">
+      <div className="settings-row-copy"><strong>Listener</strong><span>{status === null ? "Checking..." : status.enabled ? status.running ? `Running at ${liveAddress}` : status.error ?? "Not running." : "The agent endpoint is off."}</span></div>
+    </div>
+    <div className="settings-row">
+      <div className="settings-row-copy"><strong>Agent tokens</strong><span>Name an agent, paste the secret into its config. Address and port changes apply at the next app start.</span></div>
+      <span style={{ display: "flex", gap: 6 }}>
+        <input className="settings-select" type="text" aria-label="Token name" placeholder="codex" value={newName} onChange={(event) => setNewName(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter" && newName.trim()) void mint(); }} />
+        <button className="settings-select" type="button" disabled={!newName.trim()} onClick={() => void mint()}>Create token</button>
+      </span>
+    </div>
+    {revealed && <div className="settings-row">
+      <div className="settings-row-copy">
+        <strong>{revealed.token.name}</strong>
+        <span>Shown once; paste it into the agent's config now.</span>
+        <code style={{ fontSize: 10, wordBreak: "break-all" }}>{revealed.secret}</code>
+        <code style={{ fontSize: 10 }}>POST {liveAddress}</code>
+        <code style={{ fontSize: 10 }}>Authorization: Bearer {revealed.secret}</code>
+      </div>
+    </div>}
+    {tokens.length > 0 && tokens.map((token) => <div className="settings-row" key={token.id}>
+      <div className="settings-row-copy">
+        <strong>{token.name}{token.is_default ? " (default, rotates each start)" : ""}{token.revoked_at ? " (revoked)" : ""}</strong>
+        <span>Created {formatDate(token.created_at)}{token.last_used_at ? `; last used ${formatDate(token.last_used_at)}` : ""}</span>
+      </div>
+      {!token.revoked_at && <button className="settings-select" type="button" onClick={() => void revoke(token)}>Revoke</button>}
+    </div>)}
+    {error && <div className="settings-inline-error" role="status" aria-live="polite">{error}</div>}
+  </section>;
+}
+
+function errorMessageOf(error: unknown) {
+  if (typeof error === "object" && error !== null && "message" in error) return String((error as { message: unknown }).message);
+  return "The agent API settings could not be loaded.";
+}
+
 export function SettingsPage({ settings, saveError, onBack, onChange }: { settings: Settings; saveError: string; onBack: () => void; onChange: (next: Settings) => void }) {
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -57,6 +164,7 @@ export function SettingsPage({ settings, saveError, onBack, onChange }: { settin
       <nav className="settings-nav-sections" aria-label="Settings sections">
         <button className="settings-nav-link" type="button" onClick={() => document.getElementById("settings-appearance")?.scrollIntoView({ block: "start" })}>Appearance</button>
         <button className="settings-nav-link" type="button" onClick={() => document.getElementById("settings-diff")?.scrollIntoView({ block: "start" })}>Diff</button>
+        <button className="settings-nav-link" type="button" onClick={() => document.getElementById("settings-mcp")?.scrollIntoView({ block: "start" })}>Agent API</button>
       </nav>
     </aside>
     <div className="settings-content">
@@ -92,6 +200,7 @@ export function SettingsPage({ settings, saveError, onBack, onChange }: { settin
           <input type="checkbox" checked={settings.line_wrap} onChange={(event) => onChange({ ...settings, line_wrap: event.currentTarget.checked })} />
         </label>
       </section>
+      <McpSection settings={settings} onChange={onChange} />
       {saveError && <div className="settings-inline-error" role="status" aria-live="polite">{saveError}</div>}
     </div>
   </section>;

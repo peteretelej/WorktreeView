@@ -1,3 +1,4 @@
+mod agents;
 mod cache;
 mod commands;
 mod git;
@@ -11,12 +12,12 @@ mod testutil;
 mod transport;
 
 use commands::{
-    create_comment, delete_comment, describe_commit, edit_comment, fetch_project,
-    get_branch_inventory, get_settings, list_comments, list_commits, list_refs, list_repos,
-    list_review_changes, list_submissions, list_surfaces, list_worktree_status, list_worktrees,
-    match_comment_anchors, open_repo, open_review_file, read_review_file, read_review_patch,
-    remove_repo, reply_comment, set_comment_resolved, set_repo_pinned, set_settings,
-    set_surface_pinned,
+    create_agent_token, create_comment, delete_comment, describe_commit, edit_comment,
+    fetch_project, get_branch_inventory, get_mcp_status, get_settings, list_agent_tokens,
+    list_comments, list_commits, list_refs, list_repos, list_review_changes, list_submissions,
+    list_surfaces, list_worktree_status, list_worktrees, match_comment_anchors, open_repo,
+    open_review_file, read_review_file, read_review_patch, remove_repo, reply_comment,
+    revoke_agent_token, set_comment_resolved, set_repo_pinned, set_settings, set_surface_pinned,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -267,6 +268,10 @@ pub fn run() {
             open_review_file,
             get_settings,
             set_settings,
+            list_agent_tokens,
+            create_agent_token,
+            revoke_agent_token,
+            get_mcp_status,
             create_comment,
             list_comments,
             list_submissions,
@@ -372,14 +377,41 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
         })?;
         Ok::<_, String>(pool)
     })?;
+    let settings = tauri::async_runtime::block_on(store::get_settings_in_pool(&pool))
+        .map_err(|error| format!("Could not read settings: {}", error.message))?;
     app.manage(AppState { pool: pool.clone() });
     let app_handle = app.handle().clone();
     let arrivals: transport::ArrivalSink = Arc::new(move |arrival| {
         let _ = app_handle.emit("submission-received", arrival);
     });
-    let endpoint = transport::start(pool, &data_dir, arrivals)
-        .map_err(|error| format!("Could not start the agent endpoint: {error}"))?;
-    app.manage(endpoint);
+    let refresh_app_handle = app.handle().clone();
+    let refreshes: transport::RefreshSink = Arc::new(move |repo_path| {
+        let _ = refresh_app_handle.emit(
+            "project-refreshed",
+            serde_json::json!({ "repo_path": repo_path }),
+        );
+    });
+    let config = transport::ListenerConfig {
+        enabled: settings.mcp_enabled,
+        address: settings.mcp_listen_address.clone(),
+        port: settings.mcp_port,
+    };
+    // A failed bind is a normal, user-visible condition (a configured port
+    // collision): the app starts and the Settings MCP section shows the
+    // error instead of startup failing.
+    let mcp = tauri::async_runtime::block_on(transport::start(
+        pool,
+        &data_dir,
+        arrivals,
+        Arc::clone(&refreshes),
+        config,
+    ))
+    .map_err(|error| format!("Could not start the agent endpoint: {error}"))?;
+    app.manage(refreshes);
+    app.manage(mcp.status);
+    if let Some(endpoint) = mcp.handle {
+        app.manage(endpoint);
+    }
     Ok(())
 }
 
@@ -481,7 +513,8 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions.len(), 1);
+        // The embedded set: the consolidated baseline plus 0002.
+        assert_eq!(versions.len(), 2);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await
@@ -540,7 +573,9 @@ mod tests {
                 .fetch_one(&sqlx::SqlitePool::connect_with(backup).await.unwrap())
                 .await
                 .unwrap();
-        assert_eq!(preserved.0, 1);
+        // The overwritten backup held the first rebuilt store: the full
+        // embedded migration set.
+        assert_eq!(preserved.0, 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -614,7 +649,8 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions.len(), 1);
+        // The rebuilt store carries the full embedded migration set.
+        assert_eq!(versions.len(), 2);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await

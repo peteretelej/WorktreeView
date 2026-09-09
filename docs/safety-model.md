@@ -13,9 +13,12 @@ repository cannot mutate it or execute code it defines.
   --no-optional-locks so it can never refresh or lock the index.
 - The one Git write sits outside review computation: the refresh action
   runs `git fetch --all --prune`, which updates remote-tracking refs only.
-  It is always user-initiated, never runs as a side effect of opening or
-  reading a surface, and every review computation reads whatever state the
-  last fetch left behind. Repositories without a remote never spawn it.
+  It never runs as a side effect of opening or reading a surface, and
+  every review computation reads whatever state the last fetch left
+  behind. The refresh is initiated by the user, or pinged by an
+  authenticated agent through the endpoint's `refresh_repo` method; the
+  app owns the operation in both cases and runs it on the same path.
+  Repositories without a remote never spawn it.
 
 ## Spawn hygiene
 
@@ -70,20 +73,27 @@ repository cannot mutate it or execute code it defines.
 - The refresh fetch is the single deliberate outbound network operation: it
   contacts only the repository's own configured remotes, exactly as the
   user's Git would from a terminal, with a wider 60 second deadline for
-  slow links.
-- The app accepts agent submissions on a loopback-only, token-gated
-  endpoint inside the app process: it binds 127.0.0.1 only,
-  authenticates with a per-boot bearer token published to a discovery
-  file in the app data directory, and serves one write-only method
-  (`post_review`). The endpoint serves axum HTTP semantics over a raw
-  tokio connection loop; request heads are parsed with httparse, hyper's
-  own parser, under bounded head, header, and body caps. hyper's h1
-  connection layer is bypassed because it does not deliver responses on
-  the current Windows host (upstream-report candidate). See
+  slow links. The endpoint's `refresh_repo` method pings this same fetch;
+  it adds no new Git surface, only an authenticated trigger for the one
+  the app already owns.
+- The agent endpoint is the app's one inbound network surface, served
+  inside the app process: it binds the address and port configured in
+  Settings (loopback `127.0.0.1:9888` by default; a bind failure is shown
+  in Settings and never blocks startup) and serves only `post_review` and
+  `refresh_repo` over bearer-token authentication. Tokens are per-agent
+  rows; the discovery file in the app data directory carries the current
+  boot's default token. Beyond loopback the token is the real
+  authentication boundary; locally it still guards accidents. The
+  endpoint serves axum HTTP semantics over a raw tokio connection loop;
+  request heads are parsed with httparse, hyper's own parser, under
+  bounded head, header, and body caps. hyper's h1 connection layer is
+  bypassed because it does not deliver responses on the current Windows
+  host (upstream-report candidate). See
   [agent-submissions.md](agent-submissions.md).
 - The local threat model is unchanged: any process running as the user
-  can already read the app's store, so the token guards against stale
-  clients and accidents, not against user-level processes.
+  can already read the app's store and the discovery file, so the token
+  guards against stale clients and accidents, not against user-level
+  processes.
 - Remote and SSH review are still not implemented; they wait until their
   execution, trust, latency, freshness, reconnection, and persistence model
   is settled.

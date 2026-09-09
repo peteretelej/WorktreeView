@@ -72,6 +72,9 @@ pub struct Settings {
     pub line_wrap: bool,
     pub syntax_visible: bool,
     pub zoom: f64,
+    pub mcp_enabled: bool,
+    pub mcp_listen_address: String,
+    pub mcp_port: u16,
 }
 
 // Bounds cover the frontend's zoom level set (src/zoom.ts); stored values
@@ -92,6 +95,9 @@ impl Default for Settings {
             line_wrap: false,
             syntax_visible: true,
             zoom: 1.0,
+            mcp_enabled: true,
+            mcp_listen_address: "127.0.0.1".into(),
+            mcp_port: 9888,
         }
     }
 }
@@ -274,6 +280,21 @@ pub(crate) async fn get_settings_in_pool(pool: &SqlitePool) -> Result<Settings, 
                     settings.zoom = clamp_zoom(zoom);
                 }
             }
+            "mcp_enabled" => {
+                if let Some(flag) = settings_bool_from_value(&value) {
+                    settings.mcp_enabled = flag;
+                }
+            }
+            "mcp_listen_address" => {
+                if !value.trim().is_empty() {
+                    settings.mcp_listen_address = value;
+                }
+            }
+            "mcp_port" => {
+                if let Ok(port) = value.parse::<u16>() {
+                    settings.mcp_port = port;
+                }
+            }
             _ => {}
         }
     }
@@ -298,6 +319,12 @@ pub(crate) async fn set_settings_in_pool(
             settings_bool_value(settings.syntax_visible).to_string(),
         ),
         ("zoom", zoom.to_string()),
+        (
+            "mcp_enabled",
+            settings_bool_value(settings.mcp_enabled).to_string(),
+        ),
+        ("mcp_listen_address", settings.mcp_listen_address.clone()),
+        ("mcp_port", settings.mcp_port.to_string()),
     ];
     let mut transaction = pool.begin().await?;
     for (key, value) in values {
@@ -417,6 +444,9 @@ mod tests {
             line_wrap: true,
             syntax_visible: true,
             zoom: 1.25,
+            mcp_enabled: false,
+            mcp_listen_address: "0.0.0.0".into(),
+            mcp_port: 9899,
         };
         let persisted = set_settings_in_pool(&pool, &settings).await.unwrap();
         assert_eq!(persisted, settings);
@@ -439,7 +469,7 @@ mod tests {
     async fn corrupt_settings_rows_fall_back_to_defaults() {
         let pool = test_pool().await;
         sqlx::query(
-            "INSERT INTO settings (key, value) VALUES ('theme', 'neon'), ('diff_layout', 'fancy'), ('whitespace_visible', 'maybe'), ('line_wrap', 'sometimes'), ('zoom', 'huge')",
+            "INSERT INTO settings (key, value) VALUES ('theme', 'neon'), ('diff_layout', 'fancy'), ('whitespace_visible', 'maybe'), ('line_wrap', 'sometimes'), ('zoom', 'huge'), ('mcp_enabled', 'perhaps'), ('mcp_listen_address', ''), ('mcp_port', 'not-a-port')",
         )
         .execute(&pool)
         .await

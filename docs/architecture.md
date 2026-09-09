@@ -11,11 +11,21 @@ normalized domain data through narrow, typed Tauri commands.
   `open_repo`, `list_repos`, `list_worktrees`, `list_worktree_status`,
   `remove_repo`, `get_branch_inventory`, `fetch_project`,
   `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
+  `list_agent_tokens`, `create_agent_token`, `revoke_agent_token`,
+  `get_mcp_status`,
   `list_refs`, `list_commits`, `describe_commit`, `list_review_changes`,
   `list_surfaces`, `read_review_patch`, `read_review_file`, `open_review_file`,
   `create_comment`,
   `list_comments`, `list_submissions`, `reply_comment`, `set_comment_resolved`,
   `edit_comment`, `match_comment_anchors`.
+- `agents.rs`: the token store: per-agent tokens as table rows with only
+  their SHA-256 hex hash persisted. Secrets are 32 random bytes hex,
+  generated once at creation and never stored or logged; authentication
+  hashes the presented secret and matches a non-revoked row, recording a
+  last-used timestamp. Revocation is immediate and refuses the current
+  boot's default token, which the listener's startup path provisions fresh
+  per boot (revoking the previous default in the same transaction) and
+  publishes only through the discovery file.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
   (16 MiB per stream), a deadline (30 seconds for local probes, 300 for the
   fetch the refresh action runs), and kill-on-drop cancellation.
@@ -47,32 +57,47 @@ normalized domain data through narrow, typed Tauri commands.
   (current, moved with the nearest re-anchored line, outdated); the
   frontend only maps display sides to logical sides and places the
   results. Anchor-shape validation lives here and is authoritative for
-  the package. It also owns the submission ingest: one
-  `ingest_submission_in_pool` validates schema, vocabulary, and size caps
-  against the [client contract](agent-submissions.md), reuses the anchor
-  validator, stores sections as sent, and materializes findings as agent
-  comments with severity and submission reference in one transaction; the
-  loopback transport calls it unchanged. `list_submissions` returns
-  stored sections as typed entries, never raw JSON.
-- `transport.rs`: the loopback agent endpoint, the app's one inbound
-  network surface. A `TcpListener` binds 127.0.0.1 on an ephemeral port
-  inside the app process, authenticated by a per-boot bearer token (32
-  random bytes via `getrandom`) published to `agent-endpoint.json` in the
-  app data dir after bind. Requests and responses use axum's HTTP
-  semantics over a raw tokio connection loop whose request heads are
-  parsed with httparse (hyper's own parser); hyper's h1 connection layer
-  is bypassed because it does not deliver responses on the current
-  Windows host (upstream-report candidate). It owns transport concerns
-  only: bearer auth, JSON-RPC 2.0 framing with the documented error-code
-  matrix, and a coarse 3 MiB pre-parse body guard. Connections are served
-  serially; heads are capped at 64 KiB and 64 headers, and a stalled
-  connection is dropped after 30 s. The single write-only method
-  `post_review` delegates to `ingest_submission_in_pool` unchanged and,
-  after a successful ingest, pushes a `submission-received` event to the
-  webview, which renders the arrival cue; the webview never listens on a
-  socket. Exit shutdown is best-effort: the app signals the server task,
-  which stops serving. A stale discovery file may be left behind; clients
-  tolerate that by re-reading the file when their token is refused.
+  the package. Every mutating comment operation takes an explicit actor
+  (`Human` for the IPC commands, `Agent(identity)` at the endpoint), and
+  ownership is enforced exactly here in one site: an agent edits or
+  deletes only comments carrying its own `author_token_id`, while human
+  and legacy unowned comments are never agent-mutable; replies and
+  resolve toggles are open to any actor. It also owns the submission
+  ingest: one `ingest_submission_in_pool` validates schema, vocabulary,
+  and size caps against the [client contract](agent-submissions.md),
+  reuses the anchor validator, stores sections as sent, and materializes
+  findings as agent comments with severity, submission reference, and the
+  calling token's ownership in one transaction. `list_submissions`
+  returns stored sections as typed entries, never raw JSON.
+- `transport.rs`: the agent endpoint, the app's one inbound network
+  surface. A `TcpListener` binds the address and port configured in
+  Settings (loopback `127.0.0.1:9888` by default) inside the app process;
+  a bind failure is a normal condition that updates a shared status
+  handle the `get_mcp_status` command reads and the Settings Agent API
+  section shows, never a startup failure, and it writes no discovery
+  file or default token for a dead endpoint. Bearer authentication is
+  evaluated only here, once per request, against the `agent_tokens`
+  table; the resolved identity flows into every handler. Requests and
+  responses use axum's HTTP semantics over a raw tokio connection loop
+  whose request heads are parsed with httparse (hyper's own parser);
+  hyper's h1 connection layer is bypassed because it does not deliver
+  responses on the current Windows host (upstream-report candidate). It
+  owns transport concerns only: bearer auth, JSON-RPC 2.0 framing with
+  the documented error-code matrix, and a coarse 3 MiB pre-parse body
+  guard. Connections are served serially; heads are capped at 64 KiB and
+  64 headers, and a stalled connection is dropped after 30 s. The methods
+  `post_review` and `refresh_repo` delegate to the shared implementations
+  (`ingest_submission_in_pool`, `refresh_repo`) with the authenticated
+  actor; after a successful ingest the endpoint pushes a
+  `submission-received` event, and after a successful refresh (including
+  the no-remote no-op, which the shared path announces) a
+  `project-refreshed` event, both via injected sinks so the handler
+  matrix is testable without an app; the webview never listens on a
+  socket. On a successful bind the startup path provisions the per-boot
+  default token and writes the discovery file; exit shutdown is
+  best-effort and removes the file only when still owned. A stale
+  discovery file may be left behind; clients tolerate that by re-reading
+  the file when their token is refused.
 - `cache.rs`: SQLite-backed history cache for commit pages and ancestry
   marks, keyed by resolved SHAs.
 - `retrospection.rs`: records reviewed worktree and branch identities
@@ -132,11 +157,14 @@ anchor hash and bounded snippet that drift detection needs later.
 Submissions reference their review and store the agent identity and their
 sections as JSON; findings are never stored separately, they are comment
 rows authored by the agent with a severity and a submission reference.
-All three tables cascade from the `repos` row, as do the older repo-scoped
-caches. The whole schema is one consolidated `0001` migration; a store
-recorded under an older migration set diverges from the embedded baseline
-and is set aside as `worktreeview.sqlite3.bak` at startup while a fresh
-store is rebuilt, so no manual deletion is needed.
+Comments may carry an `author_token_id` naming the agent token that owns
+them. All three tables cascade from the `repos` row, as do the older
+repo-scoped caches. The schema is one consolidated `0001` migration plus
+append-only additive migrations (`0002` adds the `agent_tokens` table and
+comment ownership); a store recorded under an older migration set
+diverges from the embedded baseline and is set aside as
+`worktreeview.sqlite3.bak` at startup while a fresh store is rebuilt, so
+no manual deletion is needed.
 
 Retrospected surfaces key on `(repo_path, kind, identity_key)` and carry the
 recorded label, head, pin state, and row origin (`review` for recorded

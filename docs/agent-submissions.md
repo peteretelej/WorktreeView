@@ -2,9 +2,9 @@
 
 Agents deliver review output to WorktreeView as submissions: ordered typed
 sections, static html blocks, and findings that surface as ordinary agent
-comments. This page is the client contract for the submission schema and
-the delivery transport (discovery file, `post_review` JSON-RPC method,
-arrival cue) as of this phase.
+comments. This page is the client contract for the submission schema, the
+delivery transport (authentication, discovery file, the `post_review` and
+`refresh_repo` JSON-RPC methods, arrival cue) as of this phase.
 
 ## Submission schema
 
@@ -54,7 +54,10 @@ the stored comment body is the finding body. The priority must be `P0`,
 Findings do not duplicate into a separate store: each one materializes as
 an ordinary comment authored by the agent (name and model from the
 submission), tagged with its priority and a reference to the submission,
-in the review's merged comment stream.
+in the review's merged comment stream. Ingested findings are also
+attributed to the calling token, so the agent owns its comments: only
+that token (or a human) can later edit or delete them. The submission's
+`agent_name` stays the display name; it is not tied to the token.
 
 Anchors mirror human comments:
 
@@ -89,12 +92,32 @@ separates agent authors.
 ## Delivery
 
 Agents deliver submissions over JSON-RPC 2.0 to an HTTP endpoint served
-inside the WorktreeView process. The listener binds `127.0.0.1` on an
-ephemeral port; nothing is reachable from outside the machine. The
-endpoint serves axum HTTP semantics over a raw tokio connection loop;
-request heads are parsed with httparse, hyper's own parser, because
-hyper's h1 connection layer does not deliver responses on the current
-Windows host (upstream-report candidate).
+inside the WorktreeView process. The listener binds the address and port
+configured in the Settings Agent API section (loopback `127.0.0.1:9888`
+by default) when the app starts; nothing is reachable from outside the
+machine unless the listen address is changed there. A bind failure, such
+as a port already in use, never blocks app startup: the Settings section
+shows the error and no discovery file is written. The endpoint serves
+axum HTTP semantics over a raw tokio connection loop; request heads are
+parsed with httparse, hyper's own parser, because hyper's h1 connection
+layer does not deliver responses on the current Windows host
+(upstream-report candidate).
+
+### Authentication
+
+Every request carries `Authorization: Bearer <token>`. Tokens are
+per-agent rows minted in the Settings Agent API section: the secret is 32
+random bytes hex-encoded, shown once at creation, and only its SHA-256
+hash is stored. A token's activity is recorded as a last-used timestamp,
+so agent calls are attributable. Revoking a token refuses it immediately;
+the endpoint answers a missing, wrong, or revoked secret identically.
+
+One designated default token is provisioned fresh at every app start
+(exactly like the per-boot secret this token model replaced): its secret
+goes only into the discovery file, so zero-config discovery clients keep
+working across restarts without any secret persisting. The default token
+cannot be revoked for the current boot; it rotates at the next start.
+Named tokens persist across restarts.
 
 ### Discovery
 
@@ -107,8 +130,10 @@ data directory (Linux `$XDG_DATA_HOME/com.etelej.worktreeview`, macOS
 { "port": 54321, "token": "<64 lowercase hex chars>" }
 ```
 
-The token is 32 random bytes hex-encoded, generated fresh per boot and
-never persisted across restarts. Debug builds write
+The token is the current boot's default agent token: 32 random bytes
+hex-encoded, generated fresh per boot and never persisted across
+restarts. When the endpoint is disabled in Settings, or its bind fails,
+no discovery file is written or refreshed. Debug builds write
 `agent-endpoint-dev.json` instead, so a dev instance and an installed
 release never claim each other's registration. Clients read the discovery
 file on startup and re-read it whenever the endpoint refuses their token.
@@ -155,6 +180,33 @@ announces the arrival with a visible cue naming the agent.
 { "jsonrpc": "2.0", "id": 1, "result": { "submission_id": 12 } }
 ```
 
+### Calling refresh_repo
+
+The endpoint accepts a second method, `refresh_repo`: a ping that asks
+the app to refresh one open repository's remote-tracking refs. The ping
+reuses the app's own refresh path unchanged (remote-tracking refs only,
+a 60 second deadline, bounded output) and the app owns the operation;
+agents never drive Git themselves.
+
+POST to the same URL with the same authorization header and strict
+params: unknown fields are rejected.
+
+```json
+{ "jsonrpc": "2.0", "id": 2, "method": "refresh_repo", "params": { "repo_path": "/repos/demo" } }
+```
+
+`repo_path` must match an open repository exactly as the app displays it.
+A successful fetch, including the no-remote no-op, answers:
+
+```json
+{ "jsonrpc": "2.0", "id": 2, "result": { "ok": true } }
+```
+
+A fetch failure (offline, rejected credentials) returns `-32603` with the
+Git error message; an unknown `repo_path` returns `-32002`. The call is
+attributable like any other request: it requires a valid token and its
+use is recorded on the token row.
+
 ### Errors
 
 Error responses carry `{ "code", "message" }`:
@@ -163,10 +215,10 @@ Error responses carry `{ "code", "message" }`:
 | --- | --- |
 | `-32700` | the body is not valid JSON |
 | `-32600` | the request is not JSON-RPC 2.0 |
-| `-32601` | method other than `post_review` (the endpoint is write-only v0) |
+| `-32601` | method other than `post_review` or `refresh_repo` |
 | `-32602` | invalid params or submission-shape violation (store message passes through) |
-| `-32603` | internal error, such as a storage failure |
-| `-32001` | missing or wrong bearer token |
+| `-32603` | internal error, such as a storage or fetch failure |
+| `-32001` | missing, wrong, or revoked bearer token |
 | `-32002` | unknown review target: `repo_path` has no open repository |
 | `-32003` | request body exceeds the 3 MiB transport guard |
 
@@ -179,7 +231,9 @@ JSON-RPC-framed outcomes otherwise use 200.
 
 The schema's ingest caps are authoritative; the transport adds only a
 coarse 3 MiB pre-parse guard, so a schema-legal submission is never
-transport-rejected. A 401 means the token no longer matches this boot:
-the app restarted or another instance owns the discovery file. Re-read
-the discovery file and retry with the fresh token; connection refusal
-simply means the app is not running.
+transport-rejected. A 401 means the presented secret is missing, wrong,
+or revoked. Discovery clients should first re-read the discovery file:
+each boot rotates the default token, and another instance may own the
+registration. Agents using a named token paste a fresh one from the
+Settings Agent API section; a revoked token is refused until replaced.
+Connection refusal simply means the app is not running.
