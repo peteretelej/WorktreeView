@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ArrowLeft } from "lucide-react";
 import { ZOOM_LEVELS, snapZoom } from "./zoom.ts";
@@ -55,12 +55,37 @@ function formatDate(unixMillis: number) {
   return new Date(unixMillis).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-// The MCP section is the control surface for the agent endpoint: enable,
-// address, and port apply at the next app start; the token table mints
-// named tokens (secret revealed once, with a connection snippet while it
-// is visible) and revokes them; the status line surfaces the live
-// listener, including a non-fatal bind failure.
-function McpSection({ settings, onChange }: { settings: Settings; onChange: (next: Settings) => void }) {
+function SettingSwitch({ checked, label, onChange }: { checked: boolean; label: string; onChange: (next: boolean) => void }) {
+  return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`settings-switch${checked ? " on" : ""}`} onClick={() => onChange(!checked)}><span className="settings-switch-knob" /></button>;
+}
+
+function CopyButton({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  return <button className="settings-copy-button" type="button" onClick={() => {
+    navigator.clipboard?.writeText(value).then(() => {
+      setCopied(true);
+      window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => setCopied(false), 1500);
+    }).catch(() => { /* clipboard unavailable; the text is selectable */ });
+  }}>{copied ? "Copied" : label}</button>;
+}
+
+function StatusLine({ status }: { status: McpStatus | null }) {
+  const [state, text] = status === null ? ["off", "Checking..."]
+    : !status.enabled ? ["off", "The agent endpoint is off."]
+    : status.running ? ["ok", `Running at http://${status.address}:${status.port}/`]
+    : ["err", status.error ?? "Not running."];
+  return <span className="settings-status"><span className={`settings-status-dot ${state}`} />{state === "ok" ? <code>{text}</code> : text}</span>;
+}
+
+// The Agent API page is the control surface for the agent endpoint:
+// enable, address, and port apply at the next app start; the token list
+// mints named tokens (secret revealed once, with a connection snippet
+// while it is visible) and revokes them; the status line surfaces the
+// live listener, including a non-fatal bind failure.
+function AgentApiSection({ settings, onChange }: { settings: Settings; onChange: (next: Settings) => void }) {
   const [tokens, setTokens] = useState<AgentToken[]>([]);
   const [status, setStatus] = useState<McpStatus | null>(null);
   const [newName, setNewName] = useState("");
@@ -98,48 +123,52 @@ function McpSection({ settings, onChange }: { settings: Settings; onChange: (nex
   }
 
   const liveAddress = `http://${status?.address ?? settings.mcp_listen_address}:${status?.port ?? settings.mcp_port}/`;
-  return <section id="settings-mcp" className="settings-section" aria-labelledby="settings-mcp-heading">
-    <h2 id="settings-mcp-heading">Agent API</h2>
-    <label className="settings-row settings-toggle">
-      <span className="settings-row-copy"><strong>Agent endpoint</strong><span>Let coding agents deliver reviews, comment, and ping for refresh.</span></span>
-      <input type="checkbox" checked={settings.mcp_enabled} onChange={(event) => onChange({ ...settings, mcp_enabled: event.currentTarget.checked })} />
-    </label>
-    <div className="settings-row">
-      <div className="settings-row-copy"><strong>Listen address</strong><span>Beyond 127.0.0.1 the token is the real auth boundary.</span></div>
-      <input className="settings-select" type="text" aria-label="Listen address" value={settings.mcp_listen_address} onChange={(event) => onChange({ ...settings, mcp_listen_address: event.currentTarget.value })} />
-    </div>
-    <div className="settings-row">
-      <div className="settings-row-copy"><strong>Port</strong><span>1-65535; a port already in use surfaces below without blocking startup.</span></div>
-      <input className="settings-select" type="number" min={1} max={65535} step={1} aria-label="Listen port" value={String(settings.mcp_port)} onChange={(event) => { const port = Number(event.currentTarget.value); if (Number.isInteger(port) && port >= 1 && port <= 65535) onChange({ ...settings, mcp_port: port }); }} />
-    </div>
-    <div className="settings-row">
-      <div className="settings-row-copy"><strong>Listener</strong><span>{status === null ? "Checking..." : status.enabled ? status.running ? `Running at ${liveAddress}` : status.error ?? "Not running." : "The agent endpoint is off."}</span></div>
-    </div>
-    <div className="settings-row">
-      <div className="settings-row-copy"><strong>Agent tokens</strong><span>Name an agent, paste the secret into its config. Address and port changes apply at the next app start.</span></div>
-      <span style={{ display: "flex", gap: 6 }}>
-        <input className="settings-select" type="text" aria-label="Token name" placeholder="codex" value={newName} onChange={(event) => setNewName(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter" && newName.trim()) void mint(); }} />
-        <button className="settings-select" type="button" disabled={!newName.trim()} onClick={() => void mint()}>Create token</button>
-      </span>
-    </div>
-    {revealed && <div className="settings-row">
-      <div className="settings-row-copy">
-        <strong>{revealed.token.name}</strong>
-        <span>Shown once; paste it into the agent's config now.</span>
-        <code style={{ fontSize: 10, wordBreak: "break-all" }}>{revealed.secret}</code>
-        <code style={{ fontSize: 10 }}>MCP: POST {liveAddress}mcp</code>
-        <code style={{ fontSize: 10 }}>Authorization: Bearer {revealed.secret}</code>
+  return <>
+    <section id="settings-mcp" className="settings-section" aria-labelledby="settings-mcp-heading">
+      <h2 id="settings-mcp-heading">Agent API</h2>
+      <div className="settings-row">
+        <div className="settings-row-copy"><strong>Agent endpoint</strong><span>Let coding agents deliver reviews, comment, and ping for refresh.</span></div>
+        <SettingSwitch checked={settings.mcp_enabled} label="Agent endpoint" onChange={(mcp_enabled) => onChange({ ...settings, mcp_enabled })} />
       </div>
-    </div>}
-    {tokens.length > 0 && tokens.map((token) => <div className="settings-row" key={token.id}>
-      <div className="settings-row-copy">
-        <strong>{token.name}{token.is_default ? " (default, rotates each start)" : ""}{token.revoked_at ? " (revoked)" : ""}</strong>
-        <span>Created {formatDate(token.created_at)}{token.last_used_at ? `; last used ${formatDate(token.last_used_at)}` : ""}</span>
+      <div className="settings-row">
+        <div className="settings-row-copy"><strong>Listen address</strong><span>Beyond 127.0.0.1 the token is the real auth boundary.</span></div>
+        <input className="settings-select settings-input-address" type="text" spellCheck={false} aria-label="Listen address" value={settings.mcp_listen_address} onChange={(event) => onChange({ ...settings, mcp_listen_address: event.currentTarget.value })} />
       </div>
-      {!token.revoked_at && <button className="settings-select" type="button" onClick={() => void revoke(token)}>Revoke</button>}
-    </div>)}
-    {error && <div className="settings-inline-error" role="status" aria-live="polite">{error}</div>}
-  </section>;
+      <div className="settings-row">
+        <div className="settings-row-copy"><strong>Port</strong><span>1-65535; a port already in use surfaces below without blocking startup.</span></div>
+        <input className="settings-select settings-input-port" type="number" min={1} max={65535} step={1} aria-label="Listen port" value={String(settings.mcp_port)} onChange={(event) => { const port = Number(event.currentTarget.value); if (Number.isInteger(port) && port >= 1 && port <= 65535) onChange({ ...settings, mcp_port: port }); }} />
+      </div>
+      <div className="settings-row">
+        <div className="settings-row-copy"><strong>Listener</strong><StatusLine status={status} /></div>
+      </div>
+    </section>
+    <section id="settings-tokens" className="settings-section" aria-labelledby="settings-tokens-heading">
+      <h2 id="settings-tokens-heading">Agent tokens</h2>
+      <div className="settings-row settings-row-flush">
+        <div className="settings-row-copy"><strong>Mint a token</strong><span>Name the agent, paste the secret into its config once. Named tokens survive restarts.</span></div>
+        <span className="settings-row-actions">
+          <input className="settings-select settings-input-name" type="text" spellCheck={false} aria-label="Token name" placeholder="codex" value={newName} onChange={(event) => setNewName(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter" && newName.trim()) void mint(); }} />
+          <button className="settings-select settings-button" type="button" disabled={!newName.trim()} onClick={() => void mint()}>Create token</button>
+        </span>
+      </div>
+      {revealed && <div className="settings-reveal" role="status">
+        <div className="settings-reveal-head"><strong>{revealed.token.name}</strong><CopyButton value={revealed.secret} label="Copy secret" /></div>
+        <code>{revealed.secret}</code>
+        <div className="settings-reveal-head"><code>Authorization: Bearer &lt;secret&gt; on POST {liveAddress}mcp</code><CopyButton value={`Authorization: Bearer ${revealed.secret}`} label="Copy header" /></div>
+        <span>Shown once; it is stored only as a hash and cannot be displayed again.</span>
+      </div>}
+      {tokens.length > 0 && <div className="settings-token-list">
+        {tokens.map((token) => <div className="settings-token" key={token.id}>
+          <div className="settings-token-copy">
+            <strong>{token.name}{token.is_default && <span className="settings-badge default">built-in</span>}{token.revoked_at && <span className="settings-badge revoked">revoked</span>}</strong>
+            <span>{token.is_default ? "Renewed at every app start; discovery clients re-read it automatically." : `Created ${formatDate(token.created_at)}${token.last_used_at ? ` · last used ${formatDate(token.last_used_at)}` : " · never used"}`}</span>
+          </div>
+          {!token.revoked_at && !token.is_default && <button className="settings-select settings-button" type="button" onClick={() => void revoke(token)}>Revoke</button>}
+        </div>)}
+      </div>}
+      {error && <div className="settings-inline-error" role="status" aria-live="polite">{error}</div>}
+    </section>
+  </>;
 }
 
 function errorMessageOf(error: unknown) {
@@ -147,7 +176,15 @@ function errorMessageOf(error: unknown) {
   return "The agent API settings could not be loaded.";
 }
 
+type SettingsPageId = "general" | "agents";
+
+const SETTINGS_PAGES: { id: SettingsPageId; label: string }[] = [
+  { id: "general", label: "General" },
+  { id: "agents", label: "Agent API" },
+];
+
 export function SettingsPage({ settings, saveError, onBack, onChange }: { settings: Settings; saveError: string; onBack: () => void; onChange: (next: Settings) => void }) {
+  const [page, setPage] = useState<SettingsPageId>("general");
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape" || event.defaultPrevented) return;
@@ -161,46 +198,46 @@ export function SettingsPage({ settings, saveError, onBack, onChange }: { settin
     <aside className="settings-nav">
       <button className="back-button" type="button" onClick={onBack}><ArrowLeft size={15} /> Back</button>
       <p className="eyebrow">Settings</p>
-      <nav className="settings-nav-sections" aria-label="Settings sections">
-        <button className="settings-nav-link" type="button" onClick={() => document.getElementById("settings-appearance")?.scrollIntoView({ block: "start" })}>Appearance</button>
-        <button className="settings-nav-link" type="button" onClick={() => document.getElementById("settings-diff")?.scrollIntoView({ block: "start" })}>Diff</button>
-        <button className="settings-nav-link" type="button" onClick={() => document.getElementById("settings-mcp")?.scrollIntoView({ block: "start" })}>Agent API</button>
+      <nav className="settings-nav-sections" aria-label="Settings pages">
+        {SETTINGS_PAGES.map((entry) => <button key={entry.id} className="settings-nav-link" type="button" aria-current={page === entry.id ? "page" : undefined} onClick={() => setPage(entry.id)}>{entry.label}</button>)}
       </nav>
     </aside>
     <div className="settings-content">
-      <section id="settings-appearance" className="settings-section" aria-labelledby="settings-appearance-heading">
-        <h2 id="settings-appearance-heading">Appearance</h2>
-        <div className="settings-row">
-          <div className="settings-row-copy"><strong>Theme</strong><span>Interface color scheme; system follows the OS color scheme.</span></div>
-          <div className="scope-toggle" role="group" aria-label="Theme">{THEME_OPTIONS.map((option) => <button key={option.value} type="button" className={settings.theme === option.value ? "active" : ""} aria-pressed={settings.theme === option.value} onClick={() => onChange({ ...settings, theme: option.value })}>{option.label}</button>)}</div>
-        </div>
-        <div className="settings-row">
-          <div className="settings-row-copy"><strong>Zoom</strong><span>Interface scale; Ctrl +, Ctrl -, and Ctrl 0 also work.</span></div>
-          <select className="settings-select" aria-label="Interface zoom" value={String(snapZoom(settings.zoom))} onChange={(event) => onChange({ ...settings, zoom: Number(event.currentTarget.value) })}>
-            {ZOOM_LEVELS.map((level) => <option key={level} value={String(level)}>{zoomLabel(level)}</option>)}
-          </select>
-        </div>
-      </section>
-      <section id="settings-diff" className="settings-section" aria-labelledby="settings-diff-heading">
-        <h2 id="settings-diff-heading">Diff</h2>
-        <div className="settings-row">
-          <div className="settings-row-copy"><strong>Diff layout</strong><span>How changed files are rendered in reviews.</span></div>
-          <div className="scope-toggle" role="group" aria-label="Diff layout">{DIFF_LAYOUT_OPTIONS.map((option) => <button key={option.value} type="button" className={settings.diff_layout === option.value ? "active" : ""} aria-pressed={settings.diff_layout === option.value} onClick={() => onChange({ ...settings, diff_layout: option.value })}>{option.label}</button>)}</div>
-        </div>
-        <label className="settings-row settings-toggle">
-          <span className="settings-row-copy"><strong>Syntax highlighting</strong><span>Colorize code tokens in rendered patches.</span></span>
-          <input type="checkbox" checked={settings.syntax_visible} onChange={(event) => onChange({ ...settings, syntax_visible: event.currentTarget.checked })} />
-        </label>
-        <label className="settings-row settings-toggle">
-          <span className="settings-row-copy"><strong>Whitespace visibility</strong><span>Show whitespace changes in rendered patches.</span></span>
-          <input type="checkbox" checked={settings.whitespace_visible} onChange={(event) => onChange({ ...settings, whitespace_visible: event.currentTarget.checked })} />
-        </label>
-        <label className="settings-row settings-toggle">
-          <span className="settings-row-copy"><strong>Line wrap</strong><span>Wrap long lines instead of scrolling horizontally.</span></span>
-          <input type="checkbox" checked={settings.line_wrap} onChange={(event) => onChange({ ...settings, line_wrap: event.currentTarget.checked })} />
-        </label>
-      </section>
-      <McpSection settings={settings} onChange={onChange} />
+      {page === "general" && <>
+        <section id="settings-appearance" className="settings-section" aria-labelledby="settings-appearance-heading">
+          <h2 id="settings-appearance-heading">Appearance</h2>
+          <div className="settings-row">
+            <div className="settings-row-copy"><strong>Theme</strong><span>Interface color scheme; system follows the OS color scheme.</span></div>
+            <div className="scope-toggle" role="group" aria-label="Theme">{THEME_OPTIONS.map((option) => <button key={option.value} type="button" className={settings.theme === option.value ? "active" : ""} aria-pressed={settings.theme === option.value} onClick={() => onChange({ ...settings, theme: option.value })}>{option.label}</button>)}</div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy"><strong>Zoom</strong><span>Interface scale; Ctrl +, Ctrl -, and Ctrl 0 also work.</span></div>
+            <select className="settings-select" aria-label="Interface zoom" value={String(snapZoom(settings.zoom))} onChange={(event) => onChange({ ...settings, zoom: Number(event.currentTarget.value) })}>
+              {ZOOM_LEVELS.map((level) => <option key={level} value={String(level)}>{zoomLabel(level)}</option>)}
+            </select>
+          </div>
+        </section>
+        <section id="settings-diff" className="settings-section" aria-labelledby="settings-diff-heading">
+          <h2 id="settings-diff-heading">Diff</h2>
+          <div className="settings-row">
+            <div className="settings-row-copy"><strong>Diff layout</strong><span>How changed files are rendered in reviews.</span></div>
+            <div className="scope-toggle" role="group" aria-label="Diff layout">{DIFF_LAYOUT_OPTIONS.map((option) => <button key={option.value} type="button" className={settings.diff_layout === option.value ? "active" : ""} aria-pressed={settings.diff_layout === option.value} onClick={() => onChange({ ...settings, diff_layout: option.value })}>{option.label}</button>)}</div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy"><strong>Syntax highlighting</strong><span>Colorize code tokens in rendered patches.</span></div>
+            <SettingSwitch checked={settings.syntax_visible} label="Syntax highlighting" onChange={(syntax_visible) => onChange({ ...settings, syntax_visible })} />
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy"><strong>Whitespace visibility</strong><span>Show whitespace changes in rendered patches.</span></div>
+            <SettingSwitch checked={settings.whitespace_visible} label="Whitespace visibility" onChange={(whitespace_visible) => onChange({ ...settings, whitespace_visible })} />
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy"><strong>Line wrap</strong><span>Wrap long lines instead of scrolling horizontally.</span></div>
+            <SettingSwitch checked={settings.line_wrap} label="Line wrap" onChange={(line_wrap) => onChange({ ...settings, line_wrap })} />
+          </div>
+        </section>
+      </>}
+      {page === "agents" && <AgentApiSection settings={settings} onChange={onChange} />}
       {saveError && <div className="settings-inline-error" role="status" aria-live="polite">{saveError}</div>}
     </div>
   </section>;
