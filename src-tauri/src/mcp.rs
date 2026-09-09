@@ -23,10 +23,20 @@ use std::path::Path;
 // treated as this revision.
 const PROTOCOL_VERSION: &str = "2026-07-28";
 const PROTOCOL_VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
-// Revisions an `initialize` client may name; a named one is echoed back,
-// anything else gets the supported revision.
-const KNOWN_PROTOCOL_VERSIONS: [&str; 4] =
-    ["2024-11-05", "2025-03-26", "2025-06-18", PROTOCOL_VERSION];
+// An `initialize` client names the revision it speaks. The face behaves the
+// same under every revision (stateless, per-request version default), so any
+// well-formed revision is echoed back to let the client proceed; only an
+// absent or malformed name gets the supported revision.
+fn negotiated_protocol_version(requested: Option<&str>) -> &str {
+    let well_formed = requested
+        .map(str::as_bytes)
+        .is_some_and(|bytes| bytes.len() == 10 && bytes[4] == b'-' && bytes[7] == b'-');
+    if well_formed {
+        requested.unwrap()
+    } else {
+        PROTOCOL_VERSION
+    }
+}
 // The spec's unsupported-version error.
 const UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
 // The tool set is static per boot, so a generous private cache hint is
@@ -234,10 +244,9 @@ pub(crate) async fn serve(
         // successful handshake, so the face answers one: echo a revision the
         // client named, default to the supported one, and store nothing.
         "initialize" => {
-            let version = match request.params.get("protocolVersion").and_then(Value::as_str) {
-                Some(version) if KNOWN_PROTOCOL_VERSIONS.contains(&version) => version,
-                _ => PROTOCOL_VERSION,
-            };
+            let version = negotiated_protocol_version(
+                request.params.get("protocolVersion").and_then(Value::as_str),
+            );
             return rpc_result(
                 &request.id,
                 json!({
@@ -1018,13 +1027,20 @@ mod tests {
     }
 
     // Clients on pre-2026-07-28 revisions cannot connect without a
-    // successful initialize: the face answers one, echoing a revision the
-    // client named, still without storing any session state.
+    // successful initialize: the face answers one, echoing any well-formed
+    // revision the client names, still without storing any session state.
     #[tokio::test]
-    async fn initialize_echoes_known_revisions_and_defaults_the_rest() {
+    async fn initialize_echoes_well_formed_revisions_and_defaults_the_rest() {
         let pool = test_pool().await;
         let (state, secret) = test_state(pool).await;
-        for version in KNOWN_PROTOCOL_VERSIONS {
+        for version in [
+            "2024-11-05",
+            "2025-03-26",
+            "2025-06-18",
+            "2025-11-25",
+            PROTOCOL_VERSION,
+            "1999-01-01",
+        ] {
             let (_, payload) = post_mcp(
                 &state,
                 Some(&secret),
@@ -1039,7 +1055,7 @@ mod tests {
             );
             assert!(payload["result"]["capabilities"]["tools"].is_object());
         }
-        for version in ["1999-01-01", "0000-not-a-revision"] {
+        for version in ["not-a-revision", "2025-1-1"] {
             let (_, payload) = post_mcp(
                 &state,
                 Some(&secret),
