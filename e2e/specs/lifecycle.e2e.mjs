@@ -414,7 +414,10 @@ describe("bundled desktop lifecycle", () => {
     await expect($(".review-counts")).toHaveText("4 files, +1202 -1");
     git(["config", "core.filemode", "true"], repository);
     chmodSync(path.join(worktree, ".gitignore"), 0o755);
+    // Wait out each toggle's recompute: a click issued into the loading
+    // reflow can land on the neighboring preset button.
     await $('button=Committed only').click();
+    await expect($(".review-counts")).toHaveText("2 files, +1201 -0");
     await $('button=All changes').click();
     await expect($(".review-counts")).toHaveText("5 files, +1202 -1");
     assert.equal(await $("span=ignored.txt").isExisting(), false);
@@ -427,6 +430,7 @@ describe("bundled desktop lifecycle", () => {
     writeFileSync(path.join(worktree, ".gitattributes"), "*.txt filter=e2e\n");
     git(["config", "filter.e2e.clean", filterHelper], repository);
     await $('button=Committed only').click();
+    await expect($(".review-counts")).toHaveText("2 files, +1201 -0");
     await $('button=All changes').click();
     await expect($("strong=Review unavailable")).toBeDisplayed();
     await expect($("span=This review cannot run because Git conversion filters apply to files in this review.")).toBeDisplayed();
