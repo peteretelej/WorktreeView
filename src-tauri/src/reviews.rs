@@ -141,12 +141,7 @@ pub struct AnchorStatus {
 // lowercase hex. Stable across restarts and layouts, never cryptographic:
 // hashing the marker-inclusive text would flip every hash under -R.
 fn anchor_hash(content: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in content.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{hash:016x}")
+    format!("{:016x}", crate::fnv1a64(content.as_bytes()))
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {

@@ -17,7 +17,7 @@ normalized domain data through narrow, typed Tauri commands.
   `list_comments`, `list_submissions`, `reply_comment`, `set_comment_resolved`,
   `edit_comment`, `match_comment_anchors`.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
-  (4 MiB per stream), a deadline (10 seconds for local probes, 60 for the
+  (16 MiB per stream), a deadline (30 seconds for local probes, 300 for the
   fetch the refresh action runs), and kill-on-drop cancellation.
   Repository-scoped runs share one hardened builder; no-index diffs get
   their own isolated stdin command.
@@ -166,10 +166,12 @@ and rebuilds the store; a store recording a migration version the running
 binary does not know also keeps its files untouched, but startup asks
 whether to set it aside as the same backup and rebuild, or to quit so the
 app can be updated instead. Debug builds (`npm run dev`) keep their own
-store and endpoint registration in the same data directory
-(`worktreeview-dev.sqlite3`, `agent-endpoint-dev.json`), so alternating
-with an installed release never trades migration skew between the two.
-Migrations are append-only
+store per checkout, named from the checkout's target directory
+(`worktreeview-dev-<label>-<hash>.sqlite3`); installed releases use
+`worktreeview.sqlite3`, and the endpoint discovery file's `-dev` suffix
+pairs each channel's registration the same way.
+`WORKTREEVIEW_DATA_DIR` relocates the data directory. Migrations are
+append-only
 (CONTRIBUTING.md), so divergence is not expected on normal upgrades; desktop
 e2e containers rebuild their database on every run. Review flows remain
 read-only; the refresh action's fetch is the one Git write, and it touches

@@ -289,18 +289,71 @@ pub fn run() {
     });
 }
 
+// Dev builds run from their own checkout's target directory, so the binary's
+// folder identifies the checkout. The derived key must be stable across runs
+// and toolchain updates, which rules out DefaultHasher; FNV-1a is the same
+// deterministic hash the comment anchor uses.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn checkout_store_key(exe_dir: &Path) -> String {
+    format!("{:016x}", fnv1a64(exe_dir.to_string_lossy().to_ascii_lowercase().as_bytes()))
+}
+
+// A readable checkout label when the binary sits in the standard
+// `<checkout>/src-tauri/target/debug` layout; the hash stays the uniqueness
+// guarantee for every other layout.
+fn checkout_label(exe_dir: &Path) -> Option<String> {
+    fn named(path: &Path, expected: &str) -> bool {
+        path.file_name().and_then(|name| name.to_str()) == Some(expected)
+    }
+    let mut ancestors = exe_dir.ancestors();
+    if !named(ancestors.next()?, "debug")
+        || !named(ancestors.next()?, "target")
+        || !named(ancestors.next()?, "src-tauri")
+    {
+        return None;
+    }
+    let label: String = ancestors
+        .next()?
+        .file_name()?
+        .to_str()?
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '-' })
+        .collect();
+    Some(label)
+}
+
 fn initialize(app: &tauri::App) -> Result<(), String> {
-    let data_dir = app.path().app_data_dir().map_err(|error| {
-        format!("Could not resolve application data directory: {error}")
-    })?;
+    let data_dir = match std::env::var("WORKTREEVIEW_DATA_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir.trim()),
+        _ => app.path().app_data_dir().map_err(|error| {
+            format!("Could not resolve application data directory: {error}")
+        })?,
+    };
     std::fs::create_dir_all(&data_dir)
         .map_err(|error| format!("Could not create application data directory: {error}"))?;
-    // Dev builds keep their own store so alternating with an installed
-    // release never trades migration skew across the two channels.
+    // Every parallel dev checkout gets its own store: the binary runs from
+    // that checkout's target directory, so a per-checkout name keeps two
+    // worktrees (which may carry different schema versions) from trading
+    // migration skew through one shared dev store.
     let db_name = if cfg!(debug_assertions) {
-        "worktreeview-dev.sqlite3"
+        let exe = std::env::current_exe()
+            .map_err(|error| format!("Could not locate the running binary: {error}"))?;
+        let exe_dir = exe.parent().unwrap_or_else(|| exe.as_path());
+        let key = checkout_store_key(exe_dir);
+        match checkout_label(exe_dir) {
+            Some(label) if !label.is_empty() => format!("worktreeview-dev-{label}-{key}.sqlite3"),
+            _ => format!("worktreeview-dev-{key}.sqlite3"),
+        }
     } else {
-        "worktreeview.sqlite3"
+        "worktreeview.sqlite3".to_string()
     };
     let db_path = data_dir.join(db_name);
     let options = SqliteConnectOptions::new()
@@ -333,8 +386,36 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::plain_path;
-    use super::{connect_store_pool, set_aside_store, StoreOpenError, SqliteConnectOptions};
+    use super::{
+        checkout_label, checkout_store_key, connect_store_pool, set_aside_store, StoreOpenError,
+        SqliteConnectOptions,
+    };
     use std::path::{Path, PathBuf};
+
+    fn layout_path(parts: &[&str]) -> PathBuf {
+        parts.iter().collect::<PathBuf>()
+    }
+
+    #[test]
+    fn checkout_store_key_is_stable_and_case_insensitive() {
+        let dir = layout_path(&["base", "X", "src-tauri", "target", "debug"]);
+        assert_eq!(checkout_store_key(&dir), checkout_store_key(&dir));
+        let upper = layout_path(&["BASE", "X", "SRC-TAURI", "TARGET", "DEBUG"]);
+        assert_eq!(checkout_store_key(&dir), checkout_store_key(&upper));
+        let other = layout_path(&["base", "worktree-ai", "src-tauri", "target", "debug"]);
+        assert_ne!(checkout_store_key(&dir), checkout_store_key(&other));
+    }
+
+    #[test]
+    fn checkout_label_reads_the_standard_dev_layout() {
+        let dir = layout_path(&["base", "X", "src-tauri", "target", "debug"]);
+        assert_eq!(checkout_label(&dir).as_deref(), Some("X"));
+        // Non-standard layouts fall back to the hash-only name.
+        let plain = layout_path(&["base", "debug"]);
+        assert_eq!(checkout_label(&plain), None);
+        let no_crate = layout_path(&["base", "X", "target", "debug"]);
+        assert_eq!(checkout_label(&no_crate), None);
+    }
 
     #[test]
     fn verbatim_prefixes_are_stripped() {

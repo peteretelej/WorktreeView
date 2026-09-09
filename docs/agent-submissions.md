@@ -112,6 +112,10 @@ never persisted across restarts. Debug builds write
 `agent-endpoint-dev.json` instead, so a dev instance and an installed
 release never claim each other's registration. Clients read the discovery
 file on startup and re-read it whenever the endpoint refuses their token.
+Parallel dev instances (separate worktree checkouts) share that dev
+discovery file and the last-started instance owns it, so a submission can
+land in a different checkout's instance; per-checkout isolation of the
+registration is not part of this contract yet.
 
 ### Calling post_review
 

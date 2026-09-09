@@ -199,8 +199,9 @@ pub(crate) async fn set_settings(
 pub(crate) async fn list_refs(
     path: String,
     worktree_branch: Option<String>,
+    target_ref: Option<String>,
 ) -> Result<RefInventory, CommandError> {
-    refs_inventory(path, worktree_branch).await
+    refs_inventory(path, worktree_branch, target_ref).await
 }
 
 #[tauri::command]

@@ -2,6 +2,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 const host = process.env.TAURI_DEV_HOST;
+// scripts/dev.mjs pins a free port for both vite and tauri's devUrl; a bare
+// `npm run dev:web` defaults to 1420 unless WORKTREEVIEW_DEV_PORT says else.
+const port = Number(process.env.WORKTREEVIEW_DEV_PORT) || 1420;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
@@ -19,7 +22,7 @@ export default defineConfig(async () => ({
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    port: 1420,
+    port,
     strictPort: true,
     host: host || false,
     allowedHosts: process.env.WORKTREEVIEW_DEV_HOST
@@ -29,7 +32,7 @@ export default defineConfig(async () => ({
       ? {
           protocol: "ws",
           host,
-          port: 1421,
+          port: port + 1,
         }
       : undefined,
     watch: {

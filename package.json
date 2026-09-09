@@ -19,7 +19,7 @@
     }
   },
   "scripts": {
-    "dev": "tauri dev",
+    "dev": "node scripts/dev.mjs",
     "dev:web": "vite",
     "dev:lab": "fuser -k 1420/tcp 2>/dev/null; npm run dev:web",
     "build": "tauri build",

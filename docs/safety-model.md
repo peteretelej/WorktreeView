@@ -40,8 +40,8 @@ repository cannot mutate it or execute code it defines.
   working-changes reads go through the same cap-std path as untracked
   captures: relative paths only, the root pinned to a verified worktree,
   regular files only.
-- Every content read shares the patch read's bounds: 4 MiB ceiling per
-  stream, a 10 second deadline, kill-on-drop, and a binary check that
+- Every content read shares the patch read's bounds: 16 MiB ceiling per
+  stream, a 30 second deadline, kill-on-drop, and a binary check that
   refuses NUL-bearing content instead of rendering it.
 
 ## Opening reviewed files

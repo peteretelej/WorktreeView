@@ -177,12 +177,37 @@ fn open_untracked_file(root: &Path, file: &str) -> Result<Vec<u8>, CommandError>
     }
 }
 
+// The remote-tracking ref a remote branch's review defaults against: the
+// remote's own HEAD when the clone recorded it, else its main/master/develop.
+// The local primary checkout is often weeks stale on machines that review
+// remote branches without checking them out, so the remote's own state is
+// the fork point that shows only the branch's changes.
+fn remote_default_ref<'a>(remotes: &'a [String], target_ref: &str) -> Option<&'a str> {
+    let (remote, _) = target_ref.strip_prefix("refs/remotes/")?.split_once('/')?;
+    let candidates = [
+        format!("refs/remotes/{remote}/HEAD"),
+        format!("refs/remotes/{remote}/main"),
+        format!("refs/remotes/{remote}/master"),
+        format!("refs/remotes/{remote}/develop"),
+    ];
+    candidates.iter().find_map(|candidate| {
+        remotes
+            .iter()
+            .find(|reference| **reference == *candidate)
+            .map(|reference| reference.as_str())
+    })
+}
+
 pub(crate) async fn refs_inventory(
     path: String,
     worktree_branch: Option<String>,
+    target_ref: Option<String>,
 ) -> Result<RefInventory, CommandError> {
     if let Some(worktree_branch) = &worktree_branch {
         validate_ref(worktree_branch, "worktree_branch")?;
+    }
+    if let Some(target_ref) = &target_ref {
+        validate_ref(target_ref, "target_ref")?;
     }
     let path = canonical_path(&path)?;
     let (exit_code, stdout, stderr) = run_git(
@@ -214,6 +239,9 @@ pub(crate) async fn refs_inventory(
         }
     }
     let primary = primary_branch(&heads);
+    let remote_base = target_ref
+        .as_deref()
+        .and_then(|reference| remote_default_ref(&remotes, reference));
     let default_base = if worktree_branch.as_deref() == Some("detached") {
         None
     } else if let Some(worktree_branch) = worktree_branch {
@@ -239,6 +267,20 @@ pub(crate) async fn refs_inventory(
             }
         } else {
             None
+        }
+    } else if let (Some(target_ref), Some(base_ref)) = (&target_ref, remote_base) {
+        // A remote branch reviews from its fork point: the merge-base
+        // against the remote's own default ref, so the local primary's
+        // staleness cannot inflate the change list. Unrelated histories
+        // fall back to the plain primary-branch base.
+        let args = vec!["merge-base".into(), target_ref.clone(), base_ref.into()];
+        let args = git_args(&args);
+        match run_git(&path, &args).await? {
+            (0, stdout, _) => match std::str::from_utf8(&stdout).ok().map(str::trim) {
+                Some(sha) if !sha.is_empty() => Some(sha.to_string()),
+                _ => primary.map(str::to_string),
+            },
+            _ => primary.map(str::to_string),
         }
     } else {
         primary.map(str::to_string)
@@ -989,6 +1031,7 @@ mod tests {
         let inventory = refs_inventory(
             repo.to_str().unwrap().into(),
             Some("refs/heads/feature".into()),
+            None,
         )
         .await
         .unwrap();
@@ -1003,7 +1046,7 @@ mod tests {
             .iter()
             .any(|reference| reference == "refs/notes/review"));
 
-        let ref_context = refs_inventory(repo.to_str().unwrap().into(), None)
+        let ref_context = refs_inventory(repo.to_str().unwrap().into(), None, None)
             .await
             .unwrap();
         assert_eq!(ref_context.default_base.as_deref(), Some("refs/heads/main"));
@@ -2417,6 +2460,100 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(flagged.code, "invalid_path");
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn remote_default_ref_prefers_the_target_remote_own_state() {
+        let remotes = vec![
+            "refs/remotes/origin/HEAD".to_string(),
+            "refs/remotes/origin/main".to_string(),
+            "refs/remotes/azure/develop".to_string(),
+        ];
+        assert_eq!(
+            remote_default_ref(&remotes, "refs/remotes/origin/feature"),
+            Some("refs/remotes/origin/HEAD")
+        );
+        assert_eq!(
+            remote_default_ref(&remotes, "refs/remotes/azure/feature"),
+            Some("refs/remotes/azure/develop")
+        );
+        // No candidate on the target's remote and no cross-remote pickup.
+        assert_eq!(remote_default_ref(&remotes, "refs/remotes/upstream/main"), None);
+        assert_eq!(remote_default_ref(&remotes, "refs/heads/main"), None);
+        assert_eq!(remote_default_ref(&remotes, "HEAD"), None);
+    }
+
+    #[tokio::test]
+    async fn remote_ref_target_defaults_to_its_fork_point() {
+        let repo = test_repo("remote-fork-base");
+        test_git(&repo, &["branch", "-M", "main"]);
+        let fork_sha = test_rev_parse(&repo, "HEAD");
+
+        test_git(&repo, &["checkout", "--quiet", "-b", "feature"]);
+        std::fs::write(repo.join("feature.txt"), "feature\n").unwrap();
+        test_git(&repo, &["add", "feature.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "feature work"]);
+        let feature_sha = test_rev_parse(&repo, "HEAD");
+
+        // The local primary moves past the fork point while the remote
+        // tracking state stays at it: the review base must be the fork
+        // point, not the stale local branch tip.
+        test_git(&repo, &["checkout", "--quiet", "main"]);
+        std::fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
+        test_git(&repo, &["commit", "--quiet", "-am", "main moves"]);
+
+        test_git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/main", &fork_sha],
+        );
+        test_git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        test_git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/feature", &feature_sha],
+        );
+
+        let inventory = refs_inventory(repo.to_str().unwrap().into(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(inventory.default_base, Some("refs/heads/main".into()));
+
+        let inventory = refs_inventory(
+            repo.to_str().unwrap().into(),
+            None,
+            Some("refs/remotes/origin/feature".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(inventory.default_base, Some(fork_sha.clone()));
+
+        // Reviewing the remote default itself forks from its own tip.
+        let inventory = refs_inventory(
+            repo.to_str().unwrap().into(),
+            None,
+            Some("refs/remotes/origin/main".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(inventory.default_base, Some(fork_sha));
+
+        // Local targets keep the primary-branch base.
+        let inventory = refs_inventory(
+            repo.to_str().unwrap().into(),
+            None,
+            Some("refs/heads/feature".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(inventory.default_base, Some("refs/heads/main".into()));
 
         std::fs::remove_dir_all(repo).unwrap();
     }

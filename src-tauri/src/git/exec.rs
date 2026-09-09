@@ -13,11 +13,14 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::time::{timeout, Duration};
 
-pub(crate) const MAX_OUTPUT: usize = 4 * 1024 * 1024;
-const GIT_TIMEOUT: Duration = Duration::from_secs(10);
+// Azure DevOps clones carry thousands of remote branches, and cold-cache
+// probes on such repositories can legitimately run for tens of seconds.
+pub(crate) const MAX_OUTPUT: usize = 16 * 1024 * 1024;
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 // Fetch crosses the network; slow remotes must not trip the local probe
-// budget, and the child stays kill_on_drop so cancellation still works.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+// budget, and the child stays kill_on_drop so cancellation still works. A
+// fetch --all over thousands of remote refs takes minutes on slow links.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(300);
 
 // Test-only spawn counter: one increment per spawned git child, the
 // assertion mechanism for cache tests. While a counting window is open,
@@ -238,7 +241,7 @@ async fn run_bounded(
             reap_after_kill(&mut child).await;
             Err(CommandError::new(
                 "git_timeout",
-                "Git did not respond within its time budget.",
+                "Git took too long to respond. If this keeps happening, the repository may be busy or still being indexed; try again.",
             ))
         }
     }
@@ -336,7 +339,7 @@ pub(crate) async fn run_git_with_stdin(
             reap_after_kill(&mut child).await;
             Err(CommandError::new(
                 "git_timeout",
-                "Git did not respond within 10 seconds.",
+                "Git took too long to respond. If this keeps happening, the repository may be busy or still being indexed; try again.",
             ))
         }
     }

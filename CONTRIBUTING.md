@@ -40,7 +40,10 @@ npm run dev
 ```
 
 This starts Vite, compiles the Rust backend, and opens the Tauri window;
-it requires a display.
+it requires a display. When port 1420 is already taken (a second checkout,
+another worktree's dev session), the launcher picks the next free port and
+pins both Vite and the Tauri dev URL to it; set `WORKTREEVIEW_DEV_PORT` to
+choose the starting port yourself.
 
 For frontend-only work:
 
@@ -56,9 +59,9 @@ to the hostname Vite should accept:
 WORKTREEVIEW_DEV_HOST=worktreeview.example.com npm run dev:web
 ```
 
-Port 1420 is fixed. On Linux, `npm run dev:lab` frees a stale server and
-starts the frontend in one step. Inspect the local environment with
-`npm run tauri info`.
+Port 1420 remains the default. On Linux, `npm run dev:lab` frees a stale
+server and starts the frontend in one step. Inspect the local environment
+with `npm run tauri info`.
 
 ### Store migrations
 
@@ -70,8 +73,11 @@ schema. sqlx
 records a checksum per applied migration, so an edited file makes every
 existing store diverge on next launch, costing the user their saved repos,
 pins, and settings: the store is set aside as `worktreeview.sqlite3.bak` and
-rebuilt. Dev and installed builds share one data directory, so dev stores
-are user stores.
+rebuilt. Dev and installed builds share one data directory but keep separate
+stores, and each dev checkout gets its own store file derived from its
+target directory, so parallel worktrees with different schema versions never
+trade migration skew through one file. Set `WORKTREEVIEW_DATA_DIR` to move
+the data directory (store and endpoint registration) somewhere else.
 
 Exception, recorded 2026-09-08: the review-comments feature consolidated
 the first three migrations into a single `0001` baseline before any release

@@ -5,10 +5,11 @@ later optimization target.
 
 ## Rust side
 
-- Git output is bounded: every captured stream enforces a 4 MiB ceiling and
-  fails closed past it.
-- Every Git invocation carries a 10 second deadline; expiry kills the child
-  process rather than leaking work.
+- Git output is bounded: every captured stream enforces a 16 MiB ceiling
+  and fails closed past it.
+- Every Git invocation carries a 30 second deadline; expiry kills the child
+  process rather than leaking work. Large repositories (thousands of remote
+  branches, cold caches) legitimately need tens of seconds on some hosts.
 - No in-process Git engine: large operations stay in a child process, so
   their memory growth and crashes never land in the app.
 - Commit history is cached in SQLite keyed by resolved SHAs: a warm
@@ -30,7 +31,7 @@ later optimization target.
   review's base, target, scope, or direction changes, matching the index's
   snapshot freshness.
 - Context expansion and the full-file view fetch the file's content once
-  per file through a bounded read (the same 4 MiB ceiling) and keep a
+  per file through a bounded read (the same 16 MiB ceiling) and keep a
   smaller in-memory cache than patches. Expansion splices fetched gap
   lines into the existing hunk model, so both views flow through the same
   page-bounded rendering: a fully expanded hunk or a large file pages at

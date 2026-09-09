@@ -31,6 +31,13 @@
   path, and remove. Remove deletes the project from the app's registry only:
   the repository, worktrees, and history on disk are never touched, and the
   removal is confirmed before it runs.
+- A review's default base is the branch's fork point, not a branch tip.
+  Worktree reviews merge-base the checked-out branch against the local
+  primary branch; a remote-tracking branch merge-bases against the remote's
+  own default (`origin/HEAD`, else its main/master/develop), because the
+  local primary checkout is often weeks stale on machines that review remote
+  branches without checking them out, and a stale tip inflates the change
+  list with everything that already landed.
 - A worktree review offers three presets: Working changes pins the base to
   the checked-out branch tip so only uncommitted content shows, All changes
   reviews everything against the base with uncommitted content included, and
@@ -54,6 +61,10 @@
   worktree or branch, the history surface's start point, or the selected
   worktree in the worktree list) and stays anchored when a commit review
   opens. Picking a commit shows that commit's own diff against its parent.
+  Each row carries a corner control that re-bases the review on that commit,
+  so the last good parent visible in the list becomes the review base in one
+  click; rows stay scannable with a short author name, an ultra-compact
+  relative age, and decorations stripped to their ref names.
 
 ## Reviews as durable objects
 
