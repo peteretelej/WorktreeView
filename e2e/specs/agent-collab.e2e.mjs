@@ -164,7 +164,7 @@ describe("desktop agent comment collaboration", () => {
 
     // Attribution rides the existing author rendering: the token's agent
     // name with the agent badge, and the author filter keeps agent threads.
-    assert.equal(await (await thread.$(".comment-author")).getText(), "default");
+    assert.equal(await (await thread.$(".comment-author")).getText(), "agent");
     await waitText(".comment-thread .comment-badge", "agent", "agent badge");
     const agentFilter = await $('//div[contains(@class, "comment-filter")]/button[normalize-space()="agent"]');
     await agentFilter.click();
