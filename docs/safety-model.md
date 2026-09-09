@@ -18,6 +18,11 @@ repository cannot mutate it or execute code it defines.
   behind. The refresh is initiated by the user, or pinged by an
   authenticated agent through the endpoint's `refresh_repo` method; the
   app owns the operation in both cases and runs it on the same path.
+- Agents can also register a repository through the endpoint's `add_repo`
+  method: the same validation and store write the UI's folder dialog runs,
+  read-only over Git (it verifies the path is a work tree and stores the
+  row). Removing a repository is not exposed to agents; that stays a human
+  action in the UI.
   Repositories without a remote never spawn it.
 
 ## Spawn hygiene

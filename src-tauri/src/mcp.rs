@@ -7,7 +7,7 @@ use crate::reviews::{
     MAX_AGENT_MODEL_CHARS,
     review_identity_of_comment, set_comment_resolved_in_pool, Actor,
 };
-use crate::store::list_repo_rows_in_pool;
+use crate::store::{list_repo_rows_in_pool, open_repo_path};
 use crate::transport::{
     rpc_error, CommentChange, TransportState, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND,
     PARSE_ERROR,
@@ -166,6 +166,12 @@ struct EditOwnCommentArgs {
 #[serde(deny_unknown_fields)]
 struct DeleteOwnCommentArgs {
     comment_id: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddRepoArgs {
+    path: String,
 }
 
 #[derive(Deserialize)]
@@ -437,6 +443,14 @@ fn tool_descriptors() -> Value {
             ),
         ),
         tool(
+            "add_repo",
+            "Open a local Git repository by absolute path (idempotent if already open) so its worktrees, branches, reviews, and comments become readable. Repositories cannot be removed through this API.",
+            schema(
+                json!({ "path": path_arg("Absolute path to the Git repository or worktree folder.") }),
+                &["path"],
+            ),
+        ),
+        tool(
             "refresh_repo",
             "Ask the app to refresh one open repository's remote-tracking refs (the same bounded fetch the refresh button runs).",
             schema(
@@ -463,6 +477,10 @@ async fn handle_tools_call(
     };
     let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
     let outcome: ToolOutcome = match name {
+        "add_repo" => {
+            let args = tool_args(id, &arguments)?;
+            add_repo(state, args).await
+        }
         "list_repos" => list_repos(state).await,
         "list_review_targets" => {
             let args = tool_args(id, &arguments)?;
@@ -527,6 +545,18 @@ async fn ensure_repo_open(state: &TransportState, repo_path: &str) -> Result<(),
         ));
     }
     Ok(())
+}
+
+// The one state-writing tool agents get: registering a repository is the
+// same read-only-over-Git open the UI's folder dialog runs, and the
+// project-refreshed announce keeps the open app's sidebar current. Removal
+// stays a human action in the UI.
+async fn add_repo(state: &TransportState, args: AddRepoArgs) -> ToolOutcome {
+    let repo = open_repo_path(&args.path, &state.pool)
+        .await
+        .map_err(|error| error.message)?;
+    (state.refreshes)(repo.path());
+    payload(repo)
 }
 
 async fn list_repos(state: &TransportState) -> ToolOutcome {
@@ -770,7 +800,7 @@ mod tests {
     const OWNERSHIP_MESSAGE: &str =
         "Only the agent token that authored a comment can edit or delete it.";
     const UNKNOWN_REPO_MESSAGE: &str = "No repository with that path is open in WorktreeView.";
-    const TOOL_NAMES: [&str; 10] = [
+    const TOOL_NAMES: [&str; 11] = [
         "list_repos",
         "list_review_targets",
         "list_comments",
@@ -780,6 +810,7 @@ mod tests {
         "resolve_thread",
         "edit_own_comment",
         "delete_own_comment",
+        "add_repo",
         "refresh_repo",
     ];
 
@@ -1458,6 +1489,64 @@ mod tests {
     // announce through: the invoking renderer owns its refetch.
     // Deleting the authoring token detaches its comments (author_token_id
     // drops to null), so they stay visible but no agent can mutate them.
+    #[tokio::test]
+    async fn add_repo_opens_a_real_repository_and_lists_it_once() {
+        let pool = test_pool().await;
+        let (state, secret) = test_state(pool).await;
+        let repo_dir = test_repo("add-repo");
+
+        let created = call_tool_raw(
+            &state,
+            &secret,
+            "add_repo",
+            json!({ "path": repo_dir.to_string_lossy() }),
+        )
+        .await;
+        assert_eq!(created["result"]["isError"], false);
+
+        // Re-opening the same repository is idempotent: one row, no error.
+        let again = call_tool_raw(
+            &state,
+            &secret,
+            "add_repo",
+            json!({ "path": repo_dir.to_string_lossy() }),
+        )
+        .await;
+        assert_eq!(again["result"]["isError"], false);
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT path FROM repos ORDER BY path").fetch_all(&state.pool).await.unwrap();
+        assert_eq!(rows.len(), 1);
+
+        let listed = call_tool_raw(&state, &secret, "list_repos", json!({})).await;
+        assert_eq!(listed["result"]["isError"], false);
+        assert!(result_text(&listed).to_string().contains("add-repo"));
+        std::fs::remove_dir_all(repo_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_repo_refuses_folders_that_are_not_repositories() {
+        let pool = test_pool().await;
+        let (state, secret) = test_state(pool).await;
+        let dir = test_path("add-repo-not-git");
+        std::fs::create_dir(&dir).unwrap();
+
+        let refused = call_tool_raw(
+            &state,
+            &secret,
+            "add_repo",
+            json!({ "path": dir.to_string_lossy() }),
+        )
+        .await;
+        assert_eq!(refused["result"]["isError"], true);
+        assert!(refused["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not a Git repository"));
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT path FROM repos").fetch_all(&state.pool).await.unwrap();
+        assert!(rows.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn comment_writes_accept_a_self_reported_model_label() {
         let pool = test_pool().await;

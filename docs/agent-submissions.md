@@ -356,6 +356,7 @@ the transport layer (HTTP 401, `-32001`).
 | `resolve_thread` | `root_comment_id`, `resolved` | the updated root comment | unknown comment; resolving a reply |
 | `edit_own_comment` | `comment_id`, `body` | the updated comment | unknown comment; not your comment |
 | `delete_own_comment` | `comment_id` | `{ "deleted": true }`; a root delete also removes its replies | unknown comment; not your comment |
+| `add_repo` | `path` | the stored repo row; the open app's sidebar follows the announce | invalid path; not a Git repository |
 | `refresh_repo` | `repo_path` | `{ "ok": true }` | unknown repo; fetch failure |
 
 Reads are find-only: a review identity with no comments yet answers an
@@ -371,7 +372,9 @@ against live Git (that runs only on the human review path).
 ### Identity and ownership
 
 Every MCP call is attributed to its bearer token: created comments record
-the token's name and id. A write may also carry an optional self-reported
+the token's name and id. Registering a repository (`add_repo`) is the one
+state-writing operation agents have; removing a repository stays a
+human action in the UI. A write may also carry an optional self-reported
 `author_model` label (at most 200 characters, whitespace-trimmed) that
 renders next to the agent name, so one token can attribute comments to the
 different models it runs ("codex (GPT Luna medium)"). The label is

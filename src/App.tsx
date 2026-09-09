@@ -373,7 +373,7 @@ function App() {
   const comments = useReviewComments(commentIdentity, reviewIndex, commentFile, reversed);
   // The event listeners read the live comment layer and open repo path
   // through refs, so they subscribe once and never hold stale closures.
-  const commentsRef = useRef(comments); const activeRepoPathRef = useRef(activeRepoPath);
+  const commentsRef = useRef(comments); const activeRepoPathRef = useRef(activeRepoPath); const reposRef = useRef(repos);
 
   useEffect(() => { let mounted = true; async function load() { try { const loaded = await invoke<Repo[]>("list_repos"); if (!mounted) return; setRepos(loaded); setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? ""); setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1]))); let nextSettings = defaultSettings; try { nextSettings = await getSettings(); } catch (error) { if (mounted) setOperationError(errorMessage(error)); } if (!mounted) return; nextSettings.zoom = snapZoom(nextSettings.zoom); applyTheme(nextSettings.theme); setSettings(nextSettings); setLoading(false); for (let start = 0; start < loaded.length; start += 4) await Promise.all(loaded.slice(start, start + 4).map(async (repo) => { try { const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path }); if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item)); let listing: SurfaceListing = { gone: [], pinned: [] }; try { listing = await invoke<SurfaceListing>("list_surfaces", { path: repo.path }); } catch { listing = { gone: [], pinned: [] }; } if (mounted) setSurfaces((current) => ({ ...current, [repo.path]: listing })); } catch (error) { if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); } finally { if (mounted) setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } })); } catch (error) { if (mounted) { setLoadError(errorMessage(error)); setLoading(false); } } } void load(); return () => { mounted = false; }; }, []);
   useEffect(() => { if (!activeRepo) { setSelectedWorktreePath(""); return; } setSelectedWorktreePath((current) => activeRepo.worktrees.some((worktree) => worktree.path === current) ? current : activeRepo.worktrees[0]?.path ?? ""); }, [activeRepo]);
@@ -455,7 +455,7 @@ function App() {
     });
     return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
   }, []);
-  useEffect(() => { commentsRef.current = comments; activeRepoPathRef.current = activeRepoPath; });
+  useEffect(() => { commentsRef.current = comments; activeRepoPathRef.current = activeRepoPath; reposRef.current = repos; });
   // Agent comment changes arrive through the same endpoint; when one names
   // the loaded review, the comment layer refetches so the stream and inline
   // threads update without a reload. Changes to other reviews are ignored:
@@ -478,8 +478,23 @@ function App() {
   useEffect(() => {
     let disposed = false;
     const subscription = listen<ProjectRefresh>("project-refreshed", (event) => {
-      if (disposed || event.payload.repo_path !== activeRepoPathRef.current) return;
-      void relistProject(event.payload.repo_path);
+      if (disposed) return;
+      if (event.payload.repo_path === activeRepoPathRef.current) {
+        void relistProject(event.payload.repo_path);
+        return;
+      }
+      // An agent's add_repo announces through the same event: pull the new
+      // repository into the sidebar without disturbing the current view.
+      if (reposRef.current.some((repo) => repo.path === event.payload.repo_path)) return;
+      void (async () => {
+        try {
+          const repo = await invoke<Repo>("open_repo", { path: event.payload.repo_path });
+          setRepos((current) => current.some((item) => item.path === repo.path) ? current : [repo, ...current]);
+          const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path });
+          setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item));
+        } catch { /* best-effort follow: the store row exists, so the repo
+        // appears on the next app start even if this re-read fails */ }
+      })();
     });
     return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
   }, []);

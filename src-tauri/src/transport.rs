@@ -53,7 +53,8 @@ pub(crate) struct SubmissionArrival {
 // testable without a running app; production wires the Tauri emit.
 pub(crate) type ArrivalSink = Arc<dyn Fn(SubmissionArrival) + Send + Sync>;
 
-// Announces a completed refresh (the `project-refreshed` event); injected
+// Announces a completed refresh or, after `add_repo`, a newly registered
+// repository (the `project-refreshed` event); injected
 // like ArrivalSink so the refresh path is testable without an app.
 pub(crate) type RefreshSink = Arc<dyn Fn(&str) + Send + Sync>;
 

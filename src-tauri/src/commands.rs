@@ -159,8 +159,9 @@ pub(crate) async fn get_branch_inventory(
     branch_inventory(path).await
 }
 
-// Announces a completed refresh; production emits the `project-refreshed`
-// webview event, tests record. Injected so the shared refresh stays testable
+// Announces a completed refresh or, after `add_repo`, a newly registered
+// repository; production emits the `project-refreshed` webview event, tests
+// record. Injected so the shared refresh stays testable
 // without a running app.
 pub(crate) type RefreshSink = Arc<dyn Fn(&str) + Send + Sync>;
 

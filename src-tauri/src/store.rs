@@ -13,6 +13,13 @@ pub struct Repo {
     pinned_at: Option<i64>,
 }
 
+impl Repo {
+    // The canonical path as stored, for announce payloads keyed on it.
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
