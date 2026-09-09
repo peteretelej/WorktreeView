@@ -1391,17 +1391,33 @@ button:disabled {
 .file-row b { color: var(--ok); font-size: 10px; }
 .file-row.status-d b, .file-row.status-r b { color: var(--danger); }
 .file-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.patch-pane { min-width: 0; min-height: 0; overflow: auto; background: var(--background); }
-.patch-heading { display: flex; height: 36px; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
+.patch-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--background); }
+.patch-heading { display: flex; flex: none; height: 36px; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .patch-heading code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.patch-body { position: relative; flex: 1; min-height: 0; }
+.patch-scroll { position: absolute; inset: 0; overflow: auto; }
 .hunk-list { min-width: max-content; padding: 12px; font: 13px/1.5 var(--font-mono); }
-.hunk { margin-bottom: 12px; border: 1px solid var(--border); background: var(--code-surface); }
-.hunk-header { padding: 4px 10px; color: var(--muted); background: var(--surface-2); font-size: 11px; }
-.diff-gap { display: flex; justify-content: center; margin-bottom: 12px; border: 1px solid var(--border); border-top: 0; background: var(--surface-2); }
-.diff-gap:first-child { margin-top: 12px; border-top: 1px solid var(--border); }
-.expand-gap { display: inline-flex; gap: 5px; align-items: center; padding: 3px 12px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; }
+/* The diff is one continuous stream: slim hunk dividers and inline expand
+   rows, so expanded context joins the hunks around it without seams. */
+.hunk-header { padding: 2px 10px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--surface-2); color: var(--muted); font-size: 11px; }
+.diff-gap { display: flex; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.expand-gap { display: inline-flex; gap: 5px; align-items: center; margin-left: 8px; padding: 3px 12px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; }
+.diff-gap.slim .expand-gap { padding-top: 0; padding-bottom: 0; font-size: 10px; }
 .expand-gap:hover:not(:disabled), .expand-gap:focus-visible { color: var(--foreground); }
 .expand-gap:disabled { cursor: default; }
+/* Prev/next change navigation in the pane heading. */
+.change-nav { display: inline-flex; gap: 1px; align-items: center; }
+.change-nav .icon-button { width: 22px; height: 22px; }
+.change-nav .icon-button:disabled { opacity: .35; }
+.change-count { min-width: 44px; text-align: center; font-size: 10px; color: var(--muted); }
+/* The change strip: a thin fixed rail mapping where the changes sit in the
+   stream; ticks jump, the band shows the viewport. */
+.change-strip { position: absolute; top: 12px; bottom: 12px; right: 5px; width: 5px; border-radius: 3px; background: var(--surface-2); box-shadow: 0 0 0 1px var(--border); }
+.strip-view { position: absolute; left: 0; width: 100%; border-radius: 3px; background: var(--primary-soft); }
+.strip-tick { position: absolute; left: 0; width: 100%; height: 3px; min-height: 3px; padding: 0; border: 0; border-radius: 1px; cursor: pointer; }
+.strip-tick.added { background: var(--diff-addition-foreground); }
+.strip-tick.deleted { background: var(--diff-deletion-foreground); }
+.strip-tick:hover { filter: brightness(1.25); }
 .patch-view-toggle { display: flex; height: 22px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
 .patch-view-toggle button { padding: 0 8px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
 .patch-view-toggle button.active { background: var(--primary-soft); color: var(--foreground); }
@@ -1430,14 +1446,24 @@ button:disabled {
 .diff-toggles .icon-button { width: 24px; height: 24px; border-radius: 4px; }
 .diff-toggles .icon-button.active { color: var(--primary); background: var(--primary-soft); }
 .review-status .diff-toggles { margin-left: auto; align-self: center; }
-.split-rows { display: grid; grid-template-columns: 42px 1fr 42px 1fr; }
-.diff-line.half { grid-column: span 2; grid-template-columns: 42px 1fr; }
-.diff-line.half + .diff-line.half { border-left: 1px solid var(--border); }
 .whitespace-glyph { color: var(--muted); }
 .hunk-list.wrap-lines { min-width: 0; }
 .hunk-list.wrap-lines .diff-line { grid-template-columns: 42px 42px minmax(0, 1fr); white-space: pre-wrap; overflow-wrap: anywhere; }
-.hunk-list.wrap-lines .split-rows { grid-template-columns: 42px minmax(0, 1fr) 42px minmax(0, 1fr); }
 .hunk-list.wrap-lines .diff-line.half { grid-template-columns: 42px minmax(0, 1fr); }
+/* Windowed stream: a spacer stands in for the whole row run, and the
+   mounted window translates to its offset inside it. */
+.stream-viewport { position: relative; }
+.stream-window { position: absolute; top: 0; left: 0; right: 0; min-width: 100%; will-change: transform; }
+.stream-row.split { display: grid; grid-template-columns: 42px minmax(0, 1fr) 42px minmax(0, 1fr); }
+.diff-line.half { grid-template-columns: 42px minmax(0, 1fr); }
+.diff-line.half-left { grid-column: 1 / 3; }
+.diff-line.half-right { grid-column: 3 / 5; border-left: 1px solid var(--border); }
+.stream-row.split > .inline-comment, .stream-row.split > .comment-composer-panel.inline { grid-column: 1 / -1; }
+/* Survivors that lost a deletion carry a tick in the file view; a jump
+   flashes its landing row. */
+.diff-line.deletion-tick { box-shadow: inset 2px 0 0 var(--diff-deletion-foreground); }
+@keyframes jump-flash { from { background-color: var(--primary-soft); } to { background-color: transparent; } }
+.diff-line.jump-flash { animation: jump-flash 900ms ease-out; }
 .index-skeleton, .patch-skeleton { padding: 8px; }
 .index-skeleton i, .patch-skeleton i { display: block; height: 25px; margin-bottom: 6px; border-radius: 3px; background: var(--surface-2); opacity: .7; }
 /* A patch fetch often finishes well under 200ms (cache hits, small diffs);

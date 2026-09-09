@@ -25,6 +25,13 @@ later optimization target.
 
 - Large collections and diffs are rendered virtualized or windowed. A full
   large diff is never rendered into the DOM.
+- Both patch and full-file views render through one windowed row stream
+  (`src/stream.ts`): a pure height model holds a fixed row height per row
+  plus measured overrides (wrapped lines, comment cards), and only the
+  rows around the scroll viewport mount, padded by a fixed pixel overscan.
+  Fixed-height rows are exact from the first frame; measured rows correct
+  the model after paint while the viewport stays anchored. There is no
+  pager: scrolling moves the window instead of changing pages.
 - Selected file patches are cached in memory for the life of the review,
   keyed by the same identity the backend fetch uses. Revisiting a file
   renders from the cache with no Git spawn; the cache resets when the
@@ -34,17 +41,20 @@ later optimization target.
   per file through a bounded read (the same 16 MiB ceiling) and keep a
   smaller in-memory cache than patches. Expansion splices fetched gap
   lines into the existing hunk model, so both views flow through the same
-  page-bounded rendering: a fully expanded hunk or a large file pages at
-  the same fixed line budget, and the DOM never holds more than one page.
+  windowed stream: a fully expanded hunk or a large file just grows the
+  row run the window slides over, and the DOM never holds more than the
+  mounted window.
 - Diff highlighting never delays first paint: lines render as plain text
-  immediately, and token spans swap in for the visible hunk page once the
-  worker responds. Tokenization runs in a Web Worker, so grammar CPU can
-  never block rendering or input; per-line length and time budgets degrade
-  pathological lines to plain text instead of hanging, superseded requests
-  are discarded on file switch, and the oniguruma engine plus grammars load
-  lazily inside the worker per language. Token results cache per content
-  key in a bounded cache on the main thread, and files without a supported
-  language skip highlighting entirely.
+  immediately, and token spans swap in once the worker responds. Patch
+  hunks tokenize whole as they scroll into view; the full-file view
+  tokenizes in bounded chunks that land progressively. Tokenization runs
+  in a Web Worker, so grammar CPU can never block rendering or input;
+  per-line length and time budgets degrade pathological lines to plain
+  text instead of hanging, superseded requests are discarded on file
+  switch, and the oniguruma engine plus grammars load lazily inside the
+  worker per language. Token results cache per content key in a bounded
+  cache on the main thread, and files without a supported language skip
+  highlighting entirely.
 
 ## Desktop e2e as a floor
 

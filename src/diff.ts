@@ -142,3 +142,50 @@ export function splitFileLines(text: string): string[] {
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
   return lines;
 }
+
+// New-side spans the patch touches, merged where hunks touch, for change
+// navigation in both pane views. A deletion-only hunk (count 0) names the
+// line before its change, so its region marks that surviving line.
+export type ChangeRegion = { start: number; end: number; added: boolean };
+
+export function changeRegions(headers: string[]): ChangeRegion[] {
+  const spans = headers.map(parseHunkHeader);
+  if (spans.length === 0 || spans.some((span) => span === null)) return [];
+  const regions: ChangeRegion[] = [];
+  for (const span of spans as HunkSpan[]) {
+    const start = Math.max(1, span.newStart);
+    const end = span.newCount > 0 ? span.newStart + span.newCount - 1 : start;
+    const last = regions[regions.length - 1];
+    if (last && start <= last.end + 1) {
+      last.end = Math.max(last.end, end);
+      last.added = last.added || span.newCount > 0;
+    } else {
+      regions.push({ start, end, added: span.newCount > 0 });
+    }
+  }
+  return regions;
+}
+
+// Surviving new-side lines that carry a deletion marker in the full-file
+// view: the line each deleted run sat below (count-0 headers name that
+// line directly, so the initial anchor differs by hunk shape).
+export function deletionTicks(hunks: HunkLike[]): number[] {
+  const ticks = new Set<number>();
+  for (const hunk of hunks) {
+    const span = parseHunkHeader(hunk.header);
+    if (!span) continue;
+    let lastNew = span.newCount === 0 ? span.newStart : span.newStart - 1;
+    let deleting = false;
+    for (const line of hunk.lines) {
+      if (line.text.startsWith("-")) {
+        deleting = true;
+      } else if (line.newLine !== null) {
+        if (deleting) ticks.add(Math.max(1, lastNew));
+        deleting = false;
+        lastNew = line.newLine;
+      }
+    }
+    if (deleting) ticks.add(Math.max(1, lastNew));
+  }
+  return [...ticks].sort((a, b) => a - b);
+}

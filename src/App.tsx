@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, Fragment, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, ArrowRight, Check, ChevronDown, ChevronRight, ChevronsLeft, CircleDot, Code, Columns2, Command, Copy, CornerUpLeft, ExternalLink, FileDiff, FolderGit2, FolderOpen, GitBranch, HardDrive, Inbox, ListTree, MessageSquare, MoreVertical, Pin, PinOff, RefreshCw, Search, Settings as SettingsIcon, Space, Trash2, UnfoldVertical, WrapText, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsLeft, CircleDot, Code, Columns2, Command, Copy, CornerUpLeft, ExternalLink, FileDiff, FolderGit2, FolderOpen, GitBranch, HardDrive, Inbox, ListTree, MessageSquare, MoreVertical, Pin, PinOff, RefreshCw, Search, Settings as SettingsIcon, Space, Trash2, UnfoldVertical, WrapText, X } from "lucide-react";
 import { createNavigationHistory, sameReviewTarget, type AppLocation, type BranchInventory, type BranchSummary, type ChangedFile, type CommitDetail, type CommitInfo, type GoneSurface, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type SurfaceListing, type Worktree } from "./navigation";
 import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
 import { SettingsPage, applyTheme, defaultSettings, getSettings, persistSettings, type DiffLayout, type Settings } from "./settings";
 import { DEFAULT_ZOOM, snapZoom, stepZoom, zoomShortcut } from "./zoom";
-import { hunksWithExpandedGaps, pairHunkLines, parseHunkHeader, patchGaps, splitFileLines, type DiffLine, type PatchGap } from "./diff";
+import { changeRegions, deletionTicks, hunksWithExpandedGaps, parseHunkHeader, patchGaps, splitFileLines, type ChangeRegion, type DiffLine, type PatchGap } from "./diff";
+import { buildFileRows, buildPatchRows, computeWindow, createHeightModel, scrollTopForRow, type HeightModel, type RowSpec } from "./stream";
 import { hunkSideSources, languageForPath, splitWhitespace, tokenizeHunk, type HighlightToken, type TokenLine } from "./highlight";
 import { filterGoneSurfaces, goneSurfaceLabel, pinnedSurfaces, reviewFileRoot, surfacePinIndex, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces";
 import { CommentStream, CommentThreadView, DraftComposer, InlineCommentComposer, inlineCards, selectableRow, useReviewComments, type CommentsApi } from "./comments.tsx";
@@ -28,10 +29,6 @@ type HistoryEntry = { repoPath: string; startPointLabel: string; worktreePath?: 
 type HistoryState = HistoryEntry & { commits: CommitInfo[]; hasMore: boolean; loading: boolean; error: string };
 type WorktreeStatus = { path: string; changes: number | null };
 type ParsedHunk = { header: string; lines: DiffLine[] };
-// One render block between page breaks: a real hunk slice, or an unexpanded
-// gap's expand control rendered inline in the hunk stream.
-type RenderUnit = { header: string; lines: DiffLine[]; hunkIndex: number; gap?: PatchGap };
-type RenderedHunk = RenderUnit;
 type DiffPreferences = { layout: DiffLayout; whitespaceVisible: boolean; lineWrap: boolean; syntaxVisible: boolean };
 type OverviewTab = "worktrees" | "branches" | "remote" | "archived";
 // Mirrors the payload of the Rust `submission-received` event.
@@ -43,14 +40,21 @@ type ProjectRefresh = { repo_path: string };
 
 const WORKTREE_PAGE_SIZE = 100;
 const SEARCH_PAGE_SIZE = 50;
-const HUNKS_PAGE_SIZE = 50;
 const BRANCH_PAGE_SIZE = 50;
-const PATCH_LINE_PAGE_SIZE = 500;
 const COMMIT_PAGE_SIZE = 100;
 const PATCH_CACHE_LIMIT = 32;
 // File content serves both context expansion and the full-file view; kept
 // smaller than the patch cache since whole files outweigh patches.
 const FILE_CONTENT_CACHE_LIMIT = 8;
+// The windowed stream mounts rows around the viewport: whole rows of
+// overscan in pixels, the fixed row height every non-wrapping row paints
+// at, and the pixel lead a jump leaves above its target row.
+const STREAM_OVERSCAN = 600;
+const STREAM_ROW_HEIGHT = 20;
+const STREAM_JUMP_LEAD = 48;
+// The file view tokenizes in bounded chunks so a huge file swaps tokens in
+// progressively instead of waiting on one oversized worker round trip.
+const FILE_TOKEN_CHUNK_LINES = 1000;
 // Sidebar children stay scannable: pinned surfaces plus the most recently
 // committed worktrees; everything else lives on the project overview.
 const OVERVIEW_TABS: Array<{ id: OverviewTab; label: string; filter: string; pager: string; pageSize: number }> = [
@@ -265,33 +269,6 @@ function textSelectionRange(pane: HTMLElement | null): TextSelectionRange | null
   return { displaySide: startRow.dataset.side as DisplaySide, start: Math.min(start, end), end: Math.max(start, end), text: rangeExcerpt(range).slice(0, 2000) };
 }
 
-function paginateHunks(units: RenderUnit[]) {  const pages: RenderedHunk[][] = [];
-  let page: RenderedHunk[] = [];
-  let lineCount = 0;
-  const finishPage = () => {
-    if (page.length > 0) pages.push(page);
-    page = [];
-    lineCount = 0;
-  };
-  for (const unit of units) {
-    const lines = unit.lines;
-    if (lines.length === 0) {
-      if (page.length === HUNKS_PAGE_SIZE) finishPage();
-      page.push({ header: unit.header, lines: [], hunkIndex: unit.hunkIndex, gap: unit.gap });
-      continue;
-    }
-    for (let offset = 0; offset < lines.length;) {
-      if (page.length === HUNKS_PAGE_SIZE || lineCount === PATCH_LINE_PAGE_SIZE) finishPage();
-      const count = Math.min(lines.length - offset, PATCH_LINE_PAGE_SIZE - lineCount);
-       page.push({ header: unit.header, lines: lines.slice(offset, offset + count), hunkIndex: unit.hunkIndex, gap: unit.gap });
-      offset += count;
-      lineCount += count;
-    }
-  }
-  finishPage();
-  return pages;
-}
-
 // Renders diff line text with visible whitespace marks when enabled; when
 // disabled it returns the raw text so rendering stays byte-identical.
 // Highlighted lines render the diff marker plus token spans instead.
@@ -386,7 +363,6 @@ function App() {
   const displayBase = base || (reviewLoading && lastBaseRef.current?.repoPath === reviewLocation?.identity.repoPath ? lastBaseRef.current?.base ?? "" : "");
   const selectedFile = reviewLocation?.selectedFile ?? historyLocation?.selectedFile ?? null;
   const filePage = reviewLocation?.filePage ?? historyLocation?.filePage ?? 0;
-  const hunkPage = reviewLocation?.hunkPage ?? historyLocation?.hunkPage ?? 0;
   const activeRepo = repos.find((repo) => repo.path === activeRepoPath); const hydrating = Object.keys(hydratingRepos).length > 0; const activeRepoHydrating = activeRepo ? Boolean(hydratingRepos[activeRepo.path]) : false;
   const historyAnchor = historyAnchorOf(location, activeRepo, selectedWorktreePath); const historyAnchorKey = historyKeyOf(historyAnchor);
   // The comment layer attaches to whichever review identity is rendered:
@@ -575,7 +551,7 @@ function App() {
     patchCacheRef.current.clear();
     contentIdentityRef.current = "";
     contentCacheRef.current.clear();
-    const entry: AppLocation = { kind: "review", identity, selectedFile: null, filePage: 0, hunkPage: 0 };
+    const entry: AppLocation = { kind: "review", identity, selectedFile: null, filePage: 0 };
     const current = nav.current();
     if (current.kind === "review" && current.identity.repoPath === repoPath && sameReviewTarget(current.identity.target, target)) nav.replace(entry); else nav.push(entry);
     setRefs({ heads: [], remotes: [], tags: [], default_base: null }); setReviewIndex(null); setPatch(null); setPatchError(""); setOperationError(""); setReviewLoading(true); setPatchLoading(false); setFileContent(null); setFileContentError(""); setFileContentLoading(false);
@@ -586,7 +562,7 @@ function App() {
       refsIdentityRef.current = identity;
       const nextBase = preset?.base ?? autoReviewBase(target, inventory);
       if (!nextBase) return;
-      nav.replace({ kind: "review", identity: { ...identity, base: nextBase }, selectedFile: null, filePage: 0, hunkPage: 0 });
+      nav.replace({ kind: "review", identity: { ...identity, base: nextBase }, selectedFile: null, filePage: 0 });
       await fetchIndex(target, nextBase, nextScope, nextReversed, repoPath);
     } catch (error) {
       if (generation === indexGenerationRef.current && reviewLoadsMatch(identity)) {
@@ -685,7 +661,7 @@ function App() {
     const current = nav.current();
     if (current.kind !== "review" || !nextBase) return;
     const identity: ReviewIdentity = { ...current.identity, base: nextBase, scope: nextScope, reversed: nextReversed };
-    const entry: AppLocation = { kind: "review", identity, selectedFile: null, filePage: 0, hunkPage: 0 };
+    const entry: AppLocation = { kind: "review", identity, selectedFile: null, filePage: 0 };
     if (current.identity.base !== nextBase) nav.push(entry); else nav.replace(entry);
     void fetchIndex(identity.target, nextBase, nextScope, nextReversed, identity.repoPath);
   }
@@ -876,7 +852,7 @@ function App() {
   async function updateSettings(next: Settings) { setSettingsSaveError(""); applyTheme(next.theme); try { setSettings(await persistSettings(next)); } catch (error) { applyTheme(settings.theme); setSettingsSaveError(errorMessage(error)); } }
   function navigate(delta: number) { if (delta < 0) nav.back(); else nav.forward(); }
   function handleReviewBack() { const previous = nav.peekBack(); if (previous?.kind === "commit-history") nav.back(); else goInbox(); }
-  function selectHistoryCommit(commit: CommitInfo) { const current = nav.current(); if (current.kind !== "commit-history") return; nav.replace({ ...current, selectedCommit: commit, selectedFile: null, filePage: 0, hunkPage: 0 }); }
+  function selectHistoryCommit(commit: CommitInfo) { const current = nav.current(); if (current.kind !== "commit-history") return; nav.replace({ ...current, selectedCommit: commit, selectedFile: null, filePage: 0 }); }
   // A history row's corner button pins the review base to that commit: the
   // open review re-bases in place, and a history quick-look escalates to the
   // full review of its selected commit against the picked fork point.
@@ -885,7 +861,7 @@ function App() {
     if (current.kind === "review") changeReviewSetting(commit.sha);
     else if (current.kind === "commit-history" && current.selectedCommit) void openReview(commitTargetOf(current.selectedCommit), current.repoPath, { base: commit.sha });
   }
-  function openHistoryEntry(entry: HistoryEntry) { nav.push({ kind: "commit-history", repoPath: entry.repoPath, startPointLabel: entry.startPointLabel, startRef: entry.startRef ?? null, worktreePath: entry.worktreePath ?? null, selectedCommit: null, selectedFile: null, filePage: 0, hunkPage: 0 }); }
+  function openHistoryEntry(entry: HistoryEntry) { nav.push({ kind: "commit-history", repoPath: entry.repoPath, startPointLabel: entry.startPointLabel, startRef: entry.startRef ?? null, worktreePath: entry.worktreePath ?? null, selectedCommit: null, selectedFile: null, filePage: 0 }); }
   async function loadHistorySurface(entry: HistoryEntry) {
     const generation = ++historyGenerationRef.current;
     setHistory({ ...entry, commits: [], hasMore: false, loading: true, error: "" });
@@ -1013,7 +989,7 @@ function App() {
   // commits keeps the ref's list anchored.
   const showCommitsBar = history !== null && (historyAnchor !== null ? historyAnchorKey === historyKeyOf(history) : activeCommitSha !== null && reviewLocation !== null && history.repoPath === reviewLocation.identity.repoPath);
 
-  return <div className={`app-shell ${collapsed ? "nav-collapsed" : ""}`} aria-busy={loading || opening || hydrating}><aside className="sidebar"><div className="brand-row"><BrandMark /><span className="brand-name">WorktreeView</span></div><button className="open-repository-button" type="button" aria-label="Open repository" title="Open repository" onClick={() => void openRepository()} disabled={opening}><FolderGit2 size={14} /><span>Open repository...</span></button><div className="nav-tabs" aria-label="Workspace views"><button className="nav-tab active" type="button" aria-label="Projects" aria-current="page"><FolderGit2 size={15} /><span>Projects</span></button><button className="nav-tab" type="button" aria-label="Attention, unavailable" aria-describedby="unavailable-features" disabled><Inbox size={15} /><span>Attention</span></button></div><button className="search-trigger" type="button" aria-label="Find repositories and worktrees" onClick={(event) => openPalette(event.currentTarget)}><Search size={14} /><span>Find repositories and worktrees</span><kbd>Ctrl K</kbd></button><nav className="project-list" aria-label="Repositories"><div className="nav-section-label">Pinned</div>{pinnedRepos.length === 0 && <div className="sidebar-empty">No pinned repositories</div>}{pinnedRepos.map((repo) => <RepoNavGroup key={repo.path} repo={repo} active={repo.path === activeRepoPath} expanded={Boolean(expandedRepos[repo.path])} onToggle={() => { activateRepo(repo); void toggleRepo(repo); }} onPin={() => void togglePin(repo)} rows={sidebarRows(repo)} />)}<div className="nav-section-label">Recent</div>{recentRepos.length === 0 && <div className="sidebar-empty">No recent repositories</div>}{recentRepos.map((repo) => <RepoNavGroup key={repo.path} repo={repo} active={repo.path === activeRepoPath} expanded={Boolean(expandedRepos[repo.path])} onToggle={() => { activateRepo(repo); void toggleRepo(repo); }} onPin={() => void togglePin(repo)} rows={sidebarRows(repo)} />)}</nav>{showCommitsBar && history && <section className="commits-bar" aria-label="Commit history"><div className="commits-bar-heading"><strong>{history.startPointLabel}</strong><span className="commits-bar-actions"><button className={`icon-button ${fetchingRepos[history.repoPath] ? "spinning" : ""}`} type="button" aria-label="Refresh commit history" title="Fetch and refresh" disabled={Boolean(fetchingRepos[history.repoPath])} onClick={() => { if (history) void refreshCommits({ repoPath: history.repoPath, startPointLabel: history.startPointLabel, worktreePath: history.worktreePath ?? undefined, startRef: history.startRef ?? undefined }); }}><RefreshCw size={12} /></button></span></div>{history.error ? <div className="sidebar-empty" role="status">{history.error}</div> : history.commits.length === 0 ? <div className="sidebar-empty">{history.loading ? "Loading commits..." : "No commits"}</div> : <><div className="commit-list">{history.commits.map((commit) => { const openCommit = () => { if (historyLocation) selectHistoryCommit(commit); else void openReview(commitTargetOf(commit), history.repoPath, { base: commit.parents[0] ?? "empty-tree" }); }; return <div key={commit.sha} role="button" tabIndex={0} className={`commit-row ${activeCommitSha === commit.sha ? "selected" : ""}`} onClick={openCommit} onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openCommit(); } }}><span className="commit-subject" title={commit.subject}>{commit.subject}</span><span className="commit-meta"><code title={commit.sha}>{shortToken(commit.sha)}</code><CopyButton ghost value={commit.sha} label={`Copy commit hash ${shortToken(commit.sha)}`} />{canPickCommitBase && <button className="ghost-action" type="button" aria-label={`Use ${shortToken(commit.sha)} as review base`} title="Use as review base: review everything after this commit" onClick={(event) => { event.stopPropagation(); pickCommitBase(commit); }}><CornerUpLeft size={12} /></button>}<span title={commit.author}>{shortAuthor(commit.author)}</span><span>{compactAge(commit.date)}</span>{commit.refs.map((ref) => <span key={ref} className="commit-ref" title={ref}>{shortToken(ref)}</span>)}</span></div>; })}</div>{history.hasMore && <button type="button" className="commits-load-more" disabled={history.loading} onClick={() => void loadMoreHistory()}>{history.loading ? "Loading..." : "Load more"}</button>}</>}</section>}<div className="sidebar-footer"><button className="icon-button footer-button" type="button" aria-label="Open settings" title="Settings" onClick={openSettings}><SettingsIcon size={15} /></button><button className="icon-button footer-button" type="button" aria-label={collapsed ? "Expand project navigator" : "Collapse project navigator"} title={collapsed ? "Expand project navigator" : "Collapse project navigator"} onClick={() => setCollapsed((value) => !value)}>{collapsed ? <ChevronRight size={15} /> : <ChevronsLeft size={15} />}</button><span className="footer-note"><HardDrive size={13} />read-only / local</span></div></aside><section className="workspace"><p className="visually-hidden" id="unavailable-features">Attention is unavailable.</p><div className="live-error" role="status" aria-live="polite">{statusMessage}</div>{operationError && <div className="operation-error" role="status">{operationError}</div>}<header className="topbar"><div className="breadcrumb"><span>Repositories</span><span>/</span><strong>{breadcrumbRepo?.name ?? "No repository"}</strong>{historyLocation && <><span>/</span><strong>{historyLocation.startPointLabel}</strong></>}{reviewTarget && <><span>/</span><strong>{shortToken(reviewTarget.kind === "worktree" ? reviewTarget.worktree.branch : reviewTarget.kind === "commit" ? reviewTarget.sha : reviewTarget.name)}</strong></>}</div><div className="topbar-actions"><span className="safety-label">Read-only</span><button className="search-button" type="button" aria-label="Find repositories and worktrees" onClick={(event) => openPalette(event.currentTarget)}><Command size={14} /> <span>Search</span> <kbd>Ctrl K</kbd></button></div></header><main className="content">{reviewLocation ? goneReview ? <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} liveWorktree={activeRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={activeRepo?.worktrees} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} filePage={filePage} hunkPage={hunkPage} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFilePage={(page) => nav.replace({ ...reviewLocation, filePage: page })} onHunkPage={(page) => nav.replace({ ...reviewLocation, hunkPage: page })} onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file, hunkPage: 0 }); void selectFile(file, reviewLocation.identity); }} /> : historyLocation ? <HistoryView history={history ?? { repoPath: historyLocation.repoPath, startPointLabel: historyLocation.startPointLabel, worktreePath: historyLocation.worktreePath ?? undefined, startRef: historyLocation.startRef ?? undefined, commits: [], hasMore: false, loading: true, error: "" }} historyRefs={historyRefs} index={reviewIndex} loading={reviewLoading} selectedCommit={historyLocation.selectedCommit} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} filePage={filePage} hunkPage={hunkPage} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} onEnsureContent={() => { const selected = historyLocation.selectedCommit; if (selectedFile && selected) void ensureFileContent(selectedFile, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false }); }} onBack={goInbox} onBasePick={(value) => { const selected = historyLocation.selectedCommit; if (selected) void openReview(commitTargetOf(selected), historyLocation.repoPath, { base: value }); }} onFilePage={(page) => nav.replace({ ...historyLocation, filePage: page })} onHunkPage={(page) => nav.replace({ ...historyLocation, hunkPage: page })} onFile={(file) => { const selected = historyLocation.selectedCommit; if (selected) { nav.replace({ ...historyLocation, selectedFile: file, hunkPage: 0 }); void selectFile(file, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false }); } }} /> : <section className="inbox-pane" aria-labelledby="inbox-heading" aria-busy={loading || activeRepoHydrating}><div className="section-heading"><div className="project-heading"><h1 id="inbox-heading">{activeRepo?.name ?? "Worktrees"}</h1>{activeRepo && !activeRepoHydrating && <div className="project-meta"><span className="meta-chip" title={activeRepo.path}><span className="meta-chip-label">{activeRepo.path}</span><CopyButton value={activeRepo.path} label="Copy project path" /></span>{activeInventory?.origin_url && <span className="meta-chip" title={activeInventory.origin_url}><span className="meta-chip-label">{originSlug(activeInventory.origin_url)}</span><CopyButton value={activeInventory.origin_url} label="Copy clone URL" /></span>}{activeInventory?.default_branch && <span className="meta-chip" title="Default branch"><span className="meta-chip-label">default {shortToken(activeInventory.default_branch)}</span><CopyButton value={shortToken(activeInventory.default_branch)} label="Copy branch name" /></span>}</div>}</div>{activeRepo && <div className="heading-actions" ref={menuAnchorRef}><button className={`icon-button ${fetchingRepos[activeRepo.path] ? "spinning" : ""}`} type="button" aria-label="Refresh project" title="Fetch and refresh" disabled={Boolean(fetchingRepos[activeRepo.path])} onClick={() => void refreshProject()}><RefreshCw size={15} /></button><button className={`icon-button ${menuOpen ? "open" : ""}`} type="button" aria-label="Project actions" title="Project actions" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><MoreVertical size={15} /></button>{menuOpen && <div className="project-menu" role="menu" aria-label="Project actions"><button className="menu-item" type="button" role="menuitem" onClick={() => { setMenuOpen(false); void togglePin(activeRepo); }}>{activeRepo.pinned_at === null ? <Pin size={13} /> : <PinOff size={13} />}{activeRepo.pinned_at === null ? "Pin project" : "Unpin project"}</button><button className="menu-item" type="button" role="menuitem" onClick={() => { void copyText(activeRepo.path); setMenuOpen(false); }}><Copy size={13} />Copy path</button><div className="menu-separator" /><button className="menu-item danger" type="button" role="menuitem" onClick={() => { setMenuOpen(false); setRemoveTarget(activeRepo); }}><Trash2 size={13} />Remove from WorktreeView</button><p className="menu-note">Removes the project from this app only. Your repository, worktrees, and history on disk are never touched.</p></div>}</div>}</div>{loading ? <Empty icon={<CircleDot size={24} />} title="Loading repositories..." detail="Reading saved repositories." /> : loadError ? <Empty icon={<CircleDot size={24} />} title="Repositories could not be loaded" detail={loadError} /> : !activeRepo ? <Empty icon={<FolderGit2 size={24} />} title="No repositories" detail="Open a local Git folder to begin." action={<button className="secondary-button" type="button" onClick={() => void openRepository()} disabled={opening}>Open repository...</button>} /> : activeRepoHydrating ? <Empty icon={<CircleDot size={24} />} title="Loading worktrees..." detail="Reading live worktree identity." /> : repoErrors[activeRepo.path] ? <Empty icon={<CircleDot size={24} />} title="Worktrees unavailable" detail={repoErrors[activeRepo.path]} /> : activeRepo.worktrees.length === 0 ? <Empty icon={<CircleDot size={24} />} title="No worktrees" detail="This repository has no linked worktrees." /> : <><div className="overview-filter"><div className="overview-tabs" role="tablist" aria-label="Project inventory">{OVERVIEW_TABS.map((tab) => <button key={tab.id} role="tab" type="button" aria-selected={overviewTab === tab.id} className={`overview-tab ${overviewTab === tab.id ? "active" : ""}`} onClick={() => { setOverviewTab(tab.id); setOverviewPage(0); }}>{tab.label}<span className="tab-count">{overviewTabCount(tab.id)}</span></button>)}</div><div className="overview-filter-input"><Search size={12} /><input type="text" aria-label={activeTab.filter} placeholder={activeTab.filter} value={overviewQuery} onChange={(event) => { setOverviewQuery(event.currentTarget.value); setOverviewPage(0); }} /></div></div>{overviewTab === "worktrees" && <><div className="table-header" aria-hidden="true"><span>Worktree</span><span>Status</span><span>Last commit</span></div><div className="worktree-list">{overviewSlice(filteredWorktrees).map((worktree) => {
+  return <div className={`app-shell ${collapsed ? "nav-collapsed" : ""}`} aria-busy={loading || opening || hydrating}><aside className="sidebar"><div className="brand-row"><BrandMark /><span className="brand-name">WorktreeView</span></div><button className="open-repository-button" type="button" aria-label="Open repository" title="Open repository" onClick={() => void openRepository()} disabled={opening}><FolderGit2 size={14} /><span>Open repository...</span></button><div className="nav-tabs" aria-label="Workspace views"><button className="nav-tab active" type="button" aria-label="Projects" aria-current="page"><FolderGit2 size={15} /><span>Projects</span></button><button className="nav-tab" type="button" aria-label="Attention, unavailable" aria-describedby="unavailable-features" disabled><Inbox size={15} /><span>Attention</span></button></div><button className="search-trigger" type="button" aria-label="Find repositories and worktrees" onClick={(event) => openPalette(event.currentTarget)}><Search size={14} /><span>Find repositories and worktrees</span><kbd>Ctrl K</kbd></button><nav className="project-list" aria-label="Repositories"><div className="nav-section-label">Pinned</div>{pinnedRepos.length === 0 && <div className="sidebar-empty">No pinned repositories</div>}{pinnedRepos.map((repo) => <RepoNavGroup key={repo.path} repo={repo} active={repo.path === activeRepoPath} expanded={Boolean(expandedRepos[repo.path])} onToggle={() => { activateRepo(repo); void toggleRepo(repo); }} onPin={() => void togglePin(repo)} rows={sidebarRows(repo)} />)}<div className="nav-section-label">Recent</div>{recentRepos.length === 0 && <div className="sidebar-empty">No recent repositories</div>}{recentRepos.map((repo) => <RepoNavGroup key={repo.path} repo={repo} active={repo.path === activeRepoPath} expanded={Boolean(expandedRepos[repo.path])} onToggle={() => { activateRepo(repo); void toggleRepo(repo); }} onPin={() => void togglePin(repo)} rows={sidebarRows(repo)} />)}</nav>{showCommitsBar && history && <section className="commits-bar" aria-label="Commit history"><div className="commits-bar-heading"><strong>{history.startPointLabel}</strong><span className="commits-bar-actions"><button className={`icon-button ${fetchingRepos[history.repoPath] ? "spinning" : ""}`} type="button" aria-label="Refresh commit history" title="Fetch and refresh" disabled={Boolean(fetchingRepos[history.repoPath])} onClick={() => { if (history) void refreshCommits({ repoPath: history.repoPath, startPointLabel: history.startPointLabel, worktreePath: history.worktreePath ?? undefined, startRef: history.startRef ?? undefined }); }}><RefreshCw size={12} /></button></span></div>{history.error ? <div className="sidebar-empty" role="status">{history.error}</div> : history.commits.length === 0 ? <div className="sidebar-empty">{history.loading ? "Loading commits..." : "No commits"}</div> : <><div className="commit-list">{history.commits.map((commit) => { const openCommit = () => { if (historyLocation) selectHistoryCommit(commit); else void openReview(commitTargetOf(commit), history.repoPath, { base: commit.parents[0] ?? "empty-tree" }); }; return <div key={commit.sha} role="button" tabIndex={0} className={`commit-row ${activeCommitSha === commit.sha ? "selected" : ""}`} onClick={openCommit} onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openCommit(); } }}><span className="commit-subject" title={commit.subject}>{commit.subject}</span><span className="commit-meta"><code title={commit.sha}>{shortToken(commit.sha)}</code><CopyButton ghost value={commit.sha} label={`Copy commit hash ${shortToken(commit.sha)}`} />{canPickCommitBase && <button className="ghost-action" type="button" aria-label={`Use ${shortToken(commit.sha)} as review base`} title="Use as review base: review everything after this commit" onClick={(event) => { event.stopPropagation(); pickCommitBase(commit); }}><CornerUpLeft size={12} /></button>}<span title={commit.author}>{shortAuthor(commit.author)}</span><span>{compactAge(commit.date)}</span>{commit.refs.map((ref) => <span key={ref} className="commit-ref" title={ref}>{shortToken(ref)}</span>)}</span></div>; })}</div>{history.hasMore && <button type="button" className="commits-load-more" disabled={history.loading} onClick={() => void loadMoreHistory()}>{history.loading ? "Loading..." : "Load more"}</button>}</>}</section>}<div className="sidebar-footer"><button className="icon-button footer-button" type="button" aria-label="Open settings" title="Settings" onClick={openSettings}><SettingsIcon size={15} /></button><button className="icon-button footer-button" type="button" aria-label={collapsed ? "Expand project navigator" : "Collapse project navigator"} title={collapsed ? "Expand project navigator" : "Collapse project navigator"} onClick={() => setCollapsed((value) => !value)}>{collapsed ? <ChevronRight size={15} /> : <ChevronsLeft size={15} />}</button><span className="footer-note"><HardDrive size={13} />read-only / local</span></div></aside><section className="workspace"><p className="visually-hidden" id="unavailable-features">Attention is unavailable.</p><div className="live-error" role="status" aria-live="polite">{statusMessage}</div>{operationError && <div className="operation-error" role="status">{operationError}</div>}<header className="topbar"><div className="breadcrumb"><span>Repositories</span><span>/</span><strong>{breadcrumbRepo?.name ?? "No repository"}</strong>{historyLocation && <><span>/</span><strong>{historyLocation.startPointLabel}</strong></>}{reviewTarget && <><span>/</span><strong>{shortToken(reviewTarget.kind === "worktree" ? reviewTarget.worktree.branch : reviewTarget.kind === "commit" ? reviewTarget.sha : reviewTarget.name)}</strong></>}</div><div className="topbar-actions"><span className="safety-label">Read-only</span><button className="search-button" type="button" aria-label="Find repositories and worktrees" onClick={(event) => openPalette(event.currentTarget)}><Command size={14} /> <span>Search</span> <kbd>Ctrl K</kbd></button></div></header><main className="content">{reviewLocation ? goneReview ? <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} liveWorktree={activeRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={activeRepo?.worktrees} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} filePage={filePage} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFilePage={(page) => nav.replace({ ...reviewLocation, filePage: page })}onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file }); void selectFile(file, reviewLocation.identity); }} /> : historyLocation ? <HistoryView history={history ?? { repoPath: historyLocation.repoPath, startPointLabel: historyLocation.startPointLabel, worktreePath: historyLocation.worktreePath ?? undefined, startRef: historyLocation.startRef ?? undefined, commits: [], hasMore: false, loading: true, error: "" }} historyRefs={historyRefs} index={reviewIndex} loading={reviewLoading} selectedCommit={historyLocation.selectedCommit} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} filePage={filePage} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} onEnsureContent={() => { const selected = historyLocation.selectedCommit; if (selectedFile && selected) void ensureFileContent(selectedFile, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false }); }} onBack={goInbox} onBasePick={(value) => { const selected = historyLocation.selectedCommit; if (selected) void openReview(commitTargetOf(selected), historyLocation.repoPath, { base: value }); }} onFilePage={(page) => nav.replace({ ...historyLocation, filePage: page })}onFile={(file) => { const selected = historyLocation.selectedCommit; if (selected) { nav.replace({ ...historyLocation, selectedFile: file }); void selectFile(file, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false }); } }} /> : <section className="inbox-pane" aria-labelledby="inbox-heading" aria-busy={loading || activeRepoHydrating}><div className="section-heading"><div className="project-heading"><h1 id="inbox-heading">{activeRepo?.name ?? "Worktrees"}</h1>{activeRepo && !activeRepoHydrating && <div className="project-meta"><span className="meta-chip" title={activeRepo.path}><span className="meta-chip-label">{activeRepo.path}</span><CopyButton value={activeRepo.path} label="Copy project path" /></span>{activeInventory?.origin_url && <span className="meta-chip" title={activeInventory.origin_url}><span className="meta-chip-label">{originSlug(activeInventory.origin_url)}</span><CopyButton value={activeInventory.origin_url} label="Copy clone URL" /></span>}{activeInventory?.default_branch && <span className="meta-chip" title="Default branch"><span className="meta-chip-label">default {shortToken(activeInventory.default_branch)}</span><CopyButton value={shortToken(activeInventory.default_branch)} label="Copy branch name" /></span>}</div>}</div>{activeRepo && <div className="heading-actions" ref={menuAnchorRef}><button className={`icon-button ${fetchingRepos[activeRepo.path] ? "spinning" : ""}`} type="button" aria-label="Refresh project" title="Fetch and refresh" disabled={Boolean(fetchingRepos[activeRepo.path])} onClick={() => void refreshProject()}><RefreshCw size={15} /></button><button className={`icon-button ${menuOpen ? "open" : ""}`} type="button" aria-label="Project actions" title="Project actions" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><MoreVertical size={15} /></button>{menuOpen && <div className="project-menu" role="menu" aria-label="Project actions"><button className="menu-item" type="button" role="menuitem" onClick={() => { setMenuOpen(false); void togglePin(activeRepo); }}>{activeRepo.pinned_at === null ? <Pin size={13} /> : <PinOff size={13} />}{activeRepo.pinned_at === null ? "Pin project" : "Unpin project"}</button><button className="menu-item" type="button" role="menuitem" onClick={() => { void copyText(activeRepo.path); setMenuOpen(false); }}><Copy size={13} />Copy path</button><div className="menu-separator" /><button className="menu-item danger" type="button" role="menuitem" onClick={() => { setMenuOpen(false); setRemoveTarget(activeRepo); }}><Trash2 size={13} />Remove from WorktreeView</button><p className="menu-note">Removes the project from this app only. Your repository, worktrees, and history on disk are never touched.</p></div>}</div>}</div>{loading ? <Empty icon={<CircleDot size={24} />} title="Loading repositories..." detail="Reading saved repositories." /> : loadError ? <Empty icon={<CircleDot size={24} />} title="Repositories could not be loaded" detail={loadError} /> : !activeRepo ? <Empty icon={<FolderGit2 size={24} />} title="No repositories" detail="Open a local Git folder to begin." action={<button className="secondary-button" type="button" onClick={() => void openRepository()} disabled={opening}>Open repository...</button>} /> : activeRepoHydrating ? <Empty icon={<CircleDot size={24} />} title="Loading worktrees..." detail="Reading live worktree identity." /> : repoErrors[activeRepo.path] ? <Empty icon={<CircleDot size={24} />} title="Worktrees unavailable" detail={repoErrors[activeRepo.path]} /> : activeRepo.worktrees.length === 0 ? <Empty icon={<CircleDot size={24} />} title="No worktrees" detail="This repository has no linked worktrees." /> : <><div className="overview-filter"><div className="overview-tabs" role="tablist" aria-label="Project inventory">{OVERVIEW_TABS.map((tab) => <button key={tab.id} role="tab" type="button" aria-selected={overviewTab === tab.id} className={`overview-tab ${overviewTab === tab.id ? "active" : ""}`} onClick={() => { setOverviewTab(tab.id); setOverviewPage(0); }}>{tab.label}<span className="tab-count">{overviewTabCount(tab.id)}</span></button>)}</div><div className="overview-filter-input"><Search size={12} /><input type="text" aria-label={activeTab.filter} placeholder={activeTab.filter} value={overviewQuery} onChange={(event) => { setOverviewQuery(event.currentTarget.value); setOverviewPage(0); }} /></div></div>{overviewTab === "worktrees" && <><div className="table-header" aria-hidden="true"><span>Worktree</span><span>Status</span><span>Last commit</span></div><div className="worktree-list">{overviewSlice(filteredWorktrees).map((worktree) => {
           const changes = statusByPath[worktree.path];
           const selected = worktree.path === selectedWorktreePath;
           const detached = !worktree.branch.startsWith("refs/heads/");
@@ -1105,7 +1081,7 @@ function CommitSummary({ repoPath, sha, fallbackSubject, meta }: { repoPath: str
   </>;
 }
 
-function ReviewView({ repoPath, liveWorktree, worktrees, target, refs, base, scope, reversed, index, loading, selectedFile, patch, patchError, patchLoading, filePage, hunkPage, diffPrefs, diffToggles, comments, content, contentLoading, contentError, onEnsureContent, canBack, canForward, onHistoryBack, onHistoryForward, onBack, onBaseChange, onTargetChange, onPreset, onReverse, onFilePage, onHunkPage, onFile }: { repoPath: string; liveWorktree?: Worktree; worktrees?: Worktree[]; target: ReviewTarget; refs: RefInventory; base: string; scope: ReviewScope; reversed: boolean; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; filePage: number; hunkPage: number; diffPrefs: DiffPreferences; diffToggles: React.ReactNode; comments: CommentsApi; content: FileContent | null; contentLoading: boolean; contentError: string; onEnsureContent: () => void; canBack: boolean; canForward: boolean; onHistoryBack: () => void; onHistoryForward: () => void; onBack: () => void; onBaseChange: (value: string) => void; onTargetChange: (target: ReviewTarget) => void; onPreset: (preset: WorktreeReviewPreset) => void; onReverse: () => void; onFilePage: (page: number) => void; onHunkPage: (page: number) => void; onFile: (file: ChangedFile) => void }) {
+function ReviewView({ repoPath, liveWorktree, worktrees, target, refs, base, scope, reversed, index, loading, selectedFile, patch, patchError, patchLoading, filePage, diffPrefs, diffToggles, comments, content, contentLoading, contentError, onEnsureContent, canBack, canForward, onHistoryBack, onHistoryForward, onBack, onBaseChange, onTargetChange, onPreset, onReverse, onFilePage, onFile }: { repoPath: string; liveWorktree?: Worktree; worktrees?: Worktree[]; target: ReviewTarget; refs: RefInventory; base: string; scope: ReviewScope; reversed: boolean; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; filePage: number; diffPrefs: DiffPreferences; diffToggles: React.ReactNode; comments: CommentsApi; content: FileContent | null; contentLoading: boolean; contentError: string; onEnsureContent: () => void; canBack: boolean; canForward: boolean; onHistoryBack: () => void; onHistoryForward: () => void; onBack: () => void; onBaseChange: (value: string) => void; onTargetChange: (target: ReviewTarget) => void; onPreset: (preset: WorktreeReviewPreset) => void; onReverse: () => void; onFilePage: (page: number) => void; onFile: (file: ChangedFile) => void }) {
   const targetName = target.kind === "worktree" ? target.worktree.branch : target.kind === "commit" ? target.sha : target.name;
   const allRefs = [...refs.heads, ...refs.remotes, ...refs.tags];
   const targetRefs = allRefs.filter((ref) => ref !== liveWorktree?.branch);
@@ -1123,7 +1099,7 @@ function ReviewView({ repoPath, liveWorktree, worktrees, target, refs, base, sco
     </header>
     {!base && !loading ? <Empty icon={<GitBranch size={24} />} title="Choose a base branch to review" detail="This review has no default base." action={<RefPicker id="prompt-review-base" label="Choose base" repoPath={repoPath} refs={allRefs} value={base} exclude={target.kind === "worktree" ? [] : [targetName]} onChange={onBaseChange} />} /> : <div className="review-body comments-visible">
       <FileIndexPane base={base} index={index} loading={loading} selectedFile={selectedFile} filePage={filePage} onFilePage={onFilePage} onFile={onFile} />
-      <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} hunkPage={hunkPage} diffPrefs={diffPrefs} reversed={reversed} comments={comments} onHunkPage={onHunkPage} onDiskWorktree={reviewFileRoot(target, selectedFile, worktrees, repoPath)} content={content} contentLoading={contentLoading} contentError={contentError} onEnsureContent={onEnsureContent} />
+      <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} diffPrefs={diffPrefs} reversed={reversed} comments={comments} onDiskWorktree={reviewFileRoot(target, selectedFile, worktrees, repoPath)} content={content} contentLoading={contentLoading} contentError={contentError} onEnsureContent={onEnsureContent} />
       <CommentStream comments={comments} reversed={reversed} strip={<ReviewsStrip reviewKey={comments.key} />} />
     </div>}
   </section>;
@@ -1137,7 +1113,7 @@ function FileIndexPane({ base, index, loading, selectedFile, filePage, onFilePag
   return <aside className="file-index" aria-label="Changed files"><div className="pane-heading"><strong>Changed files</strong><span>{files.length}</span></div>{loading ? <div className="index-skeleton">{Array.from({ length: 7 }, (_, i) => <i key={i} />)}</div> : index?.error ? <Empty icon={<CircleDot size={20} />} title="Review unavailable" detail={index.error} /> : files.length === 0 ? <Empty icon={<CircleDot size={20} />} title={`No changes vs ${shortToken(base)}`} detail="Try a different base branch." /> : <><div className="file-list" role="listbox" aria-label="Changed files">{visibleFiles.map((file) => <button key={file.path} type="button" role="option" aria-selected={selectedFile?.path === file.path} className={`file-row status-${file.status.toLowerCase()} ${selectedFile?.path === file.path ? "selected" : ""}`} title={file.path} onClick={() => onFile(file)} onKeyDown={(event) => { const current = visibleFiles.findIndex((item) => item.path === file.path); const next = event.key === "ArrowDown" ? current + 1 : event.key === "ArrowUp" ? current - 1 : -1; if (next >= 0 && next < visibleFiles.length) { event.preventDefault(); onFile(visibleFiles[next]); (event.currentTarget.parentElement?.children[next] as HTMLElement)?.focus(); } }}><b>{file.status}</b><span>{file.path}</span></button>)}</div>{pages > 1 && <Pager label="Changed file pages" page={page} pages={pages} total={files.length} size={WORKTREE_PAGE_SIZE} onPage={onFilePage} />}</>}</aside>;
 }
 
-function PatchPane({ selectedFile, patch, patchError, patchLoading, hunkPage, diffPrefs, reversed, comments, onHunkPage, onDiskWorktree, content, contentLoading, contentError, onEnsureContent }: { selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; hunkPage: number; diffPrefs: DiffPreferences; reversed: boolean; comments: CommentsApi; onHunkPage: (page: number) => void; onDiskWorktree?: string | null; content: FileContent | null; contentLoading: boolean; contentError: string; onEnsureContent: () => void }) {
+function PatchPane({ selectedFile, patch, patchError, patchLoading, diffPrefs, reversed, comments, onDiskWorktree, content, contentLoading, contentError, onEnsureContent }: { selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; diffPrefs: DiffPreferences; reversed: boolean; comments: CommentsApi; onDiskWorktree?: string | null; content: FileContent | null; contentLoading: boolean; contentError: string; onEnsureContent: () => void }) {
   const [openError, setOpenError] = useState("");
   useEffect(() => setOpenError(""), [selectedFile?.path]);
   const openOnDisk = (reveal: boolean) => {
@@ -1164,47 +1140,198 @@ function PatchPane({ selectedFile, patch, patchError, patchLoading, hunkPage, di
   // the patch's new side. Both live in the same pane, so switching never
   // leaves the review, the file list, or the comment stream.
   const [patchView, setPatchView] = useState<"diff" | "file">("diff");
-  const [filePage, setFilePage] = useState(0);
   // Expanded gaps persist per file; content arrives asynchronously, so a gap
   // stays on its expand control until the lines are actually in hand.
   const [expandedGaps, setExpandedGaps] = useState<Set<string>>(new Set());
   const contentLines = useMemo(() => content && !content.binary ? splitFileLines(content.text) : null, [content]);
   const gaps = useMemo(() => patchGaps(hunks.map((hunk) => hunk.header), contentLines?.length ?? null), [hunks, contentLines]);
-  const { displayUnits, expandedHunkLines } = useMemo(() => {
-    const expandedHunks = hunksWithExpandedGaps(hunks, gaps, expandedGaps, contentLines);
-    const units: RenderUnit[] = [];
-    expandedHunks.forEach((hunk, index) => {
-      const leading = index === 0 ? gaps.find((gap) => gap.before) : undefined;
-      if (leading && (!expandedGaps.has(leading.id) || contentLines === null)) units.push({ header: "", lines: [], hunkIndex: 0, gap: leading });
-      units.push({ header: hunk.header, lines: hunk.lines, hunkIndex: index });
-      for (const gap of gaps) {
-        if (gap.before || gap.hostHunk !== index) continue;
-        if (expandedGaps.has(gap.id) && contentLines !== null) continue;
-        units.push({ header: "", lines: [], hunkIndex: index, gap });
-      }
-    });
-    return { displayUnits: units, expandedHunkLines: expandedHunks.map((hunk) => hunk.lines) };
-  }, [hunks, gaps, expandedGaps, contentLines]);
-  const patchPages = paginateHunks(displayUnits);
-  const patchPage = Math.min(hunkPage, Math.max(0, patchPages.length - 1));
-  const visibleHunks = patchPages[patchPage] ?? [];
-  // Lines the patch adds on the new side, for the file view's highlights.
+  const split = diffPrefs.layout === "split";
+  const whitespace = diffPrefs.whitespaceVisible;
+  const commentsActive = comments.key !== null;
+  const fileMode = patchView === "file";
+  const expandedHunks = useMemo(() => hunksWithExpandedGaps(hunks, gaps, expandedGaps, contentLines), [hunks, gaps, expandedGaps, contentLines]);
+  // One continuous row stream serves both modes: patch rows, or the whole
+  // new-side file with the patch's changes marked on it. Wrap is in the
+  // dependencies so toggling it rebuilds the height model: measured
+  // heights from the previous mode must not survive the switch.
+  const rows = useMemo(() => fileMode ? buildFileRows(contentLines ?? []) : buildPatchRows(expandedHunks, gaps, expandedGaps, contentLines, split), [fileMode, expandedHunks, gaps, expandedGaps, contentLines, split, diffPrefs.lineWrap]);
+  // Lines the patch adds, and the surviving lines that lost a deletion,
+  // mark the full-file view so changes stay visible there.
   const addedNewLines = useMemo(() => {
     const added = new Set<number>();
     for (const hunk of hunks) for (const line of hunk.lines) if (line.newLine !== null && line.text.startsWith("+")) added.add(line.newLine);
     return added;
   }, [hunks]);
-  const filePages = contentLines === null ? 1 : Math.max(1, Math.ceil(contentLines.length / PATCH_LINE_PAGE_SIZE));
-  const filePageSafe = Math.min(filePage, filePages - 1);
-  const filePageLines = contentLines === null ? [] : contentLines.slice(filePageSafe * PATCH_LINE_PAGE_SIZE, (filePageSafe + 1) * PATCH_LINE_PAGE_SIZE);
+  const deletionLines = useMemo(() => new Set(deletionTicks(hunks)), [hunks]);
+  // Change regions drive prev/next jumps and the change map strip in both
+  // modes; region rows locate them in the row stream.
+  const regions = useMemo(() => changeRegions(hunks.map((hunk) => hunk.header)), [hunks]);
+  const regionRows = useMemo(() => {
+    // New-side line numbers locate regions in the stream; split rows carry
+    // theirs on the new half.
+    const lineToRow = new Map<number, number>();
+    rows.forEach((row, index) => {
+      const number = row.kind === "line" ? row.line.newLine : row.kind === "split" ? row.next?.newLine ?? null : null;
+      if (number !== null && !lineToRow.has(number)) lineToRow.set(number, index);
+    });
+    return regions.map((region) => {
+      const exact = lineToRow.get(region.start);
+      if (exact !== undefined) return exact;
+      for (let index = 0; index < rows.length; index += 1) {
+        const row = rows[index];
+        const number = row.kind === "line" ? row.line.newLine : row.kind === "split" ? row.next?.newLine ?? null : null;
+        if (number !== null && number >= region.start) return index;
+      }
+      return null;
+    });
+  }, [regions, rows]);
+
+  // Windowed rendering: only rows around the scroll viewport mount, so a
+  // huge diff or file never grows the DOM past the window.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const streamRef = useRef<HTMLDivElement | null>(null);
+  const [scrollState, setScrollState] = useState({ top: 0, viewport: 0 });
+  const model = useMemo(() => createHeightModel(rows.length, STREAM_ROW_HEIGHT), [rows]);
+  const modelRef = useRef(model);
+  modelRef.current = model;
+  const rowWindow = computeWindow(model, scrollState.top, scrollState.viewport, STREAM_OVERSCAN);
+  const scrollFrame = useRef(0);
+  useEffect(() => () => cancelAnimationFrame(scrollFrame.current), []);
+  const onScroll = () => {
+    if (scrollFrame.current) return;
+    scrollFrame.current = requestAnimationFrame(() => {
+      scrollFrame.current = 0;
+      const el = scrollRef.current;
+      if (el) setScrollState({ top: el.scrollTop, viewport: el.clientHeight });
+    });
+  };
+  // Track viewport resizes without waiting for a scroll event; the scroll
+  // element remounts when the pane's body state changes, so it re-observes
+  // whatever element is current.
+  const viewportObserverRef = useRef<ResizeObserver | null>(null);
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const el = scrollRef.current;
+      if (el) setScrollState((current) => ({ ...current, viewport: el.clientHeight }));
+    });
+    viewportObserverRef.current = observer;
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    const observer = viewportObserverRef.current;
+    const el = scrollRef.current;
+    if (!observer || !el) return;
+    observer.observe(el);
+  });
+  // A new row stream (expand, wrap toggle) keeps its first visible row
+  // anchored; a new file or a mode switch starts at the top.
+  const anchorRef = useRef<{ file: string; view: string; model: HeightModel; top: number } | null>(null);
+  useEffect(() => {
+    const previous = anchorRef.current;
+    const el = scrollRef.current;
+    anchorRef.current = { file: selectedFile?.path ?? "", view: patchView, model, top: el?.scrollTop ?? 0 };
+    if (!el || !previous) return;
+    if (previous.file !== (selectedFile?.path ?? "") || previous.view !== patchView) {
+      el.scrollTop = 0;
+      setScrollState({ top: 0, viewport: el.clientHeight });
+      return;
+    }
+    const top = model.offset(previous.model.indexAt(previous.top));
+    if (Math.abs(el.scrollTop - top) > 0.5) {
+      el.scrollTop = top;
+      setScrollState({ top, viewport: el.clientHeight });
+    }
+  }, [model, patchView, selectedFile?.path]);
+  // Mounted rows report real heights (wrapped lines, comment cards); the
+  // model corrects its estimates and the viewport stays put while rows
+  // above it settle.
+  const measureRef = useRef<(entries: ResizeObserverEntry[]) => void>(() => { });
+  const [, bumpMeasure] = useReducer((version: number) => version + 1, 0);
+  measureRef.current = (entries) => {
+    const activeModel = modelRef.current;
+    const el = scrollRef.current;
+    const anchor = el ? activeModel.indexAt(el.scrollTop) : 0;
+    const anchorBefore = activeModel.offset(anchor);
+    let changed = false;
+    for (const entry of entries) {
+      const index = Number((entry.target as HTMLElement).dataset.index);
+      if (!Number.isFinite(index)) continue;
+      const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.target.getBoundingClientRect().height;
+      if (activeModel.measure(index, height)) changed = true;
+    }
+    if (!changed) return;
+    if (el) {
+      const shift = activeModel.offset(anchor) - anchorBefore;
+      if (Math.abs(shift) > 0.01) el.scrollTop += shift;
+    }
+    bumpMeasure();
+  };
+  const observerRef = useRef<ResizeObserver | null>(null);
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => measureRef.current(entries));
+    observerRef.current = observer;
+    return () => { observer.disconnect(); observerRef.current = null; };
+  }, []);
+  useEffect(() => {
+    const observer = observerRef.current;
+    const root = streamRef.current;
+    if (!observer || !root) return;
+    root.querySelectorAll<HTMLElement>("[data-index]").forEach((row) => observer.observe(row));
+  });
+
+  // Change navigation: prev/next jumps relative to the viewport top, a
+  // position counter, and a flash that marks where a jump landed.
+  const [flashLine, setFlashLine] = useState<number | null>(null);
+  const flashTimer = useRef(0);
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
+  const firstVisibleLine = () => {
+    const el = scrollRef.current;
+    if (!el) return null;
+    const index = modelRef.current.indexAt(el.scrollTop);
+    for (let cursor = index; cursor < rows.length; cursor += 1) {
+      const row = rows[cursor];
+      // Split rows navigate by their new half; deletion-only halves have no
+      // new-side number, so the scan continues past them.
+      const number = row.kind === "line" ? row.line.newLine : row.kind === "split" ? row.next?.newLine ?? null : null;
+      if (number !== null) return number;
+    }
+    return null;
+  };
+  const atLine = firstVisibleLine();
+  let currentRegion = -1;
+  for (let index = 0; index < regions.length; index += 1) {
+    if (atLine !== null && regions[index].start <= atLine) currentRegion = index;
+    else break;
+  }
+  const jumpToRow = (rowIndex: number, line: number) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const top = scrollTopForRow(modelRef.current, rowIndex, STREAM_JUMP_LEAD);
+    el.scrollTop = top;
+    setScrollState((current) => ({ ...current, top }));
+    setFlashLine(line);
+    clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => setFlashLine(null), 900);
+  };
+  const jump = (direction: 1 | -1) => {
+    if (atLine === null || regions.length === 0) return;
+    let target: ChangeRegion | undefined;
+    if (direction === 1) target = regions.find((region) => region.start > atLine);
+    else for (let index = regions.length - 1; index >= 0; index -= 1) { if (regions[index].start < atLine) { target = regions[index]; break; } }
+    if (!target) return;
+    const rowIndex = regionRows[regions.indexOf(target)];
+    if (rowIndex === null || rowIndex === undefined) return;
+    jumpToRow(rowIndex, target.start);
+  };
+  const canJump = (direction: 1 | -1) => atLine !== null && regions.some((region) => direction === 1 ? region.start > atLine : region.start < atLine);
+
   function expandGap(gap: PatchGap) {
     onEnsureContent();
     setExpandedGaps((current) => { const next = new Set(current); next.add(gap.id); return next; });
   }
-  const split = diffPrefs.layout === "split";
-  const whitespace = diffPrefs.whitespaceVisible;
-  const commentsActive = comments.key !== null;
-  useEffect(() => { setSelection(null); setTextSelection(null); setGutterChip(null); setComposeTarget(null); setPatchView("diff"); setFilePage(0); setExpandedGaps(new Set()); }, [selectedFile?.path]);
+  useEffect(() => { setSelection(null); setTextSelection(null); setGutterChip(null); setComposeTarget(null); setPatchView("diff"); setExpandedGaps(new Set()); }, [selectedFile?.path]);
   useEffect(() => {
     function read() {
       const next = textSelectionRange(paneRef.current);
@@ -1287,88 +1414,155 @@ function PatchPane({ selectedFile, patch, patchError, patchLoading, hunkPage, di
     return "";
   };
   // Highlighting is progressive: lines paint as plain text immediately, and
-  // token spans swap in once their whole hunk has been tokenized in the
-  // worker (one hunk spans page slices coherently). Tokenization runs off
-  // the UI thread, so it can never block rendering or input. A null map
-  // (unsupported language, failed tokenization) costs nothing.
+  // token spans swap in once their hunk has been tokenized in the worker.
+  // Hunks tokenize as they scroll into view; tokenization runs off the UI
+  // thread, so it can never block rendering or input.
   const lang = diffPrefs.syntaxVisible && patch && !patch.binary && selectedFile ? languageForPath(selectedFile.path) : null;
   const [tokenMap, setTokenMap] = useState<Map<DiffLine, TokenLine> | null>(null);
+  const tokenizedHunksRef = useRef(new Set<string>());
   useEffect(() => {
-    if (!lang) {
-      setTokenMap(null);
-      return;
+    tokenizedHunksRef.current = new Set();
+    setTokenMap(null);
+  }, [patch, lang]);
+  const visibleHunkIndexes = useMemo(() => {
+    const indexes = new Set<number>();
+    for (let index = rowWindow.start; index < rowWindow.end; index += 1) {
+      const row = rows[index];
+      if (row && row.kind !== "gap") indexes.add(row.hunkIndex);
     }
+    return indexes;
+  }, [rows, rowWindow.start, rowWindow.end]);
+  useEffect(() => {
+    if (fileMode || !lang || !patch) return;
     let cancelled = false;
     void (async () => {
-      const map = new Map<DiffLine, TokenLine>();
-      const tokenized = new Set<number>();
-      for (const slice of visibleHunks) {
-        if (slice.lines.length === 0 || tokenized.has(slice.hunkIndex)) continue;
-        tokenized.add(slice.hunkIndex);
-        // Whole hunks tokenize even when a page holds only part of one, so
-        // grammar state stays coherent across pages; expanded gap lines are
-        // part of their host hunk by the time this runs.
-        const lines = expandedHunkLines[slice.hunkIndex];
-        if (!lines) continue;
+      for (const hunkIndex of visibleHunkIndexes) {
+        const lines = expandedHunks[hunkIndex]?.lines;
+        if (!lines || lines.length === 0) continue;
+        // Expanding a gap changes its host hunk's length; tokenize it again.
+        const key = `${hunkIndex}:${lines.length}`;
+        if (tokenizedHunksRef.current.has(key)) continue;
         const tokens = await tokenizeHunk(lines, lang, () => cancelled);
         if (cancelled) return;
+        // Mark only once the tokens landed: a cancelled round trip must be
+        // retried by a later pass, not remembered as done.
+        tokenizedHunksRef.current.add(key);
         if (!tokens) continue;
-        const sources = hunkSideSources(lines);
-        sources.old.forEach((line, index) => map.set(line, tokens.old[index] ?? []));
-        sources.new.forEach((line, index) => map.set(line, tokens.new[index] ?? []));
+        setTokenMap((current) => {
+          const next = new Map(current ?? []);
+          const sources = hunkSideSources(lines);
+          sources.old.forEach((line, index) => next.set(line, tokens.old[index] ?? []));
+          sources.new.forEach((line, index) => next.set(line, tokens.new[index] ?? []));
+          return next;
+        });
       }
-      if (!cancelled) setTokenMap(map);
     })();
     return () => { cancelled = true; };
-  }, [patch, patchPage, lang, expandedHunkLines]);
+  }, [fileMode, lang, patch, visibleHunkIndexes, expandedHunks]);
   const tokensOf = (line: DiffLine) => tokenMap?.get(line);
-  // The file view tokenizes one page at a time as plain lines; tokens.new
-  // zips back onto the page's rows.
-  const [fileTokens, setFileTokens] = useState<TokenLine[] | null>(null);
+  // The file view tokenizes in bounded chunks; a chunk's rows swap from
+  // plain text to token spans once its worker round trip lands.
+  const [fileTokenChunks, setFileTokenChunks] = useState<Map<number, TokenLine[]>>(new Map());
+  const requestedChunksRef = useRef(new Set<number>());
   useEffect(() => {
-    if (patchView !== "file" || !lang || contentLines === null) {
-      setFileTokens(null);
-      return;
-    }
+    requestedChunksRef.current = new Set();
+    setFileTokenChunks(new Map());
+  }, [contentLines, lang]);
+  useEffect(() => {
+    if (!fileMode || !lang || contentLines === null) return;
     let cancelled = false;
     void (async () => {
-      const tokens = await tokenizeHunk(filePageLines.map((line) => ({ text: ` ${line}` })), lang, () => cancelled);
-      if (!cancelled) setFileTokens(tokens ? tokens.new : null);
+      for (let start = 0; start < contentLines.length; start += FILE_TOKEN_CHUNK_LINES) {
+        const chunk = start / FILE_TOKEN_CHUNK_LINES;
+        if (requestedChunksRef.current.has(chunk)) continue;
+        const slice = contentLines.slice(start, start + FILE_TOKEN_CHUNK_LINES);
+        const tokens = await tokenizeHunk(slice.map((text) => ({ text: ` ${text}` })), lang, () => cancelled);
+        if (cancelled) return;
+        requestedChunksRef.current.add(chunk);
+        if (tokens) setFileTokenChunks((current) => new Map(current).set(chunk, tokens.new));
+      }
     })();
     return () => { cancelled = true; };
-  }, [patchView, lang, contentLines, filePageSafe]);
-  return <section ref={paneRef} className="patch-pane" aria-label="File patch">{selectedFile && <div className="patch-heading"><code title={selectedFile.path}>{selectedFile.path}</code><span className="patch-heading-meta"><span>{selectedFile.status}</span><div className="patch-view-toggle" role="group" aria-label="Patch or full file view"><button type="button" className={patchView === "diff" ? "active" : ""} aria-pressed={patchView === "diff"} title="Diff view" onClick={() => setPatchView("diff")}>Diff</button><button type="button" className={patchView === "file" ? "active" : ""} aria-pressed={patchView === "file"} title="Full file view" onClick={() => { setPatchView("file"); onEnsureContent(); }}>File</button></div>{onDiskWorktree && <><button className="icon-button" type="button" aria-label="Open file" title="Open file" onClick={() => openOnDisk(false)}><ExternalLink size={13} /></button><button className="icon-button" type="button" aria-label="Reveal in file explorer" title="Reveal in file explorer" onClick={() => openOnDisk(true)}><FolderOpen size={13} /></button></>}{comments.key && <button className="icon-button" type="button" aria-label="Comment on file" title="Comment on file" onClick={() => comments.openFileComposer(selectedFile.path)}><MessageSquare size={13} /></button>}</span></div>}{openError && <p className="patch-open-error" role="status">{openError}</p>}{comments.composer?.kind === "file" && selectedFile && comments.composer.filePath === selectedFile.path && <div className="comment-composer-panel"><p className="eyebrow">Comment on {selectedFile.path}</p><DraftComposer placeholder={`Comment on ${selectedFile.path}`} submitLabel="Comment" onSubmit={({ body, severity }) => { void comments.create({ body, severity, file_path: selectedFile.path, side: null, start_line: null, end_line: null, lines: [] }).then(comments.closeComposer); }} onCancel={comments.closeComposer} /></div>}{patchLoading ? <div className="patch-skeleton" aria-label="Loading patch"><i /><i /><i /><i /></div> : patchError ? <Empty icon={<FileDiff size={24} />} title="Patch not rendered" detail={patchError} /> : !selectedFile ? <Empty icon={<FileDiff size={24} />} title="Select a changed file" detail="The patch is rendered one file at a time." /> : patch?.binary ? <Empty icon={<FileDiff size={24} />} title="Binary file changed" detail={selectedFile.path} /> : patch?.text === "" ? <Empty icon={<CircleDot size={24} />} title="No changes in this file" detail="The selected file has no renderable patch." /> : patchPages.length === 0 ? <pre className="patch-metadata"><code>{patch?.text}</code></pre> : patchView === "file" ? <FileView content={content} contentLoading={contentLoading} contentError={contentError} rows={filePageLines} firstLine={filePageSafe * PATCH_LINE_PAGE_SIZE + 1} page={filePageSafe} pages={filePages} total={contentLines === null ? 0 : contentLines.length} tokens={fileTokens} whitespace={whitespace} wrap={diffPrefs.lineWrap} added={addedNewLines} onPage={setFilePage} /> : <><div className={`hunk-list ${split ? "split-layout" : ""} ${diffPrefs.lineWrap ? "wrap-lines" : ""}`}>{visibleHunks.map((unit, unitIndex) => { if (unit.gap) { const gap = unit.gap; return <ExpandGapRow key={`gap-${gap.id}`} gap={gap} pending={expandedGaps.has(gap.id) && contentLines === null && contentLoading} error={contentLines === null && contentError !== ""} onExpand={() => expandGap(gap)} />; } return <div className="hunk" key={`${unit.header}-${unitIndex}`}><div className="hunk-header">{unit.header}</div>{split ? <div className="split-rows">{pairHunkLines(unit.lines).map((row, rowIndex) => <Fragment key={`${row.old?.oldLine}-${row.new?.newLine}-${rowIndex}`}>{row.old ? <DiffHalf side="LEFT" gutter={row.old.oldLine} text={row.old.text} whitespace={whitespace} tokens={tokensOf(row.old)} commentsActive={commentsActive} commentable={!row.old.expanded} selected={selectedClass("LEFT", row.old.oldLine)} chip={commentsActive ? chipFor("LEFT", row.old.oldLine) : null} onRowClick={rowClick} onGutterDown={beginGutterDrag} onEnter={extendDrag} /> : <div className="diff-line half" />}{inlineAfter("LEFT", row.old?.oldLine ?? null)}{row.new ? <DiffHalf side="RIGHT" gutter={row.new.newLine} text={row.new.text} whitespace={whitespace} tokens={tokensOf(row.new)} commentsActive={commentsActive} commentable={!row.new.expanded} selected={selectedClass("RIGHT", row.new.newLine)} chip={commentsActive ? chipFor("RIGHT", row.new.newLine) : null} onRowClick={rowClick} onGutterDown={beginGutterDrag} onEnter={extendDrag} /> : <div className="diff-line half" />}{inlineAfter("RIGHT", row.new?.newLine ?? null)}</Fragment>)}</div> : unit.lines.map((line, lineIndex) => { const anchor = commentsActive ? selectableRow(line) : null; const target = anchor !== null && !line.expanded ? anchor : null; return <Fragment key={`${line.oldLine}-${line.newLine}-${lineIndex}`}><div className={`diff-line ${line.text.startsWith("+") ? "addition" : line.text.startsWith("-") ? "deletion" : ""}${target ? " commentable" : ""}${anchor ? selectedClass(anchor.side, anchor.number) : ""}`} data-side={target?.side} data-line={target?.number} onClick={target ? (event) => rowClick(target.side, target.number, event.shiftKey) : undefined} onMouseEnter={target ? () => extendDrag(target.side, target.number) : undefined}><span className="line-number" onMouseDown={target ? (event) => { event.preventDefault(); beginGutterDrag(target.side, target.number); } : undefined}>{line.oldLine ?? ""}</span><span className="line-number" onMouseDown={target ? (event) => { event.preventDefault(); beginGutterDrag(target.side, target.number); } : undefined}>{line.newLine ?? ""}</span><code>{diffLineContent(line.text, whitespace, tokensOf(line))}</code>{target && chipFor(target.side, target.number)}</div>{anchor && inlineAfter(anchor.side, anchor.number)}</Fragment>; })}</div>; })}</div>{patchPages.length > 1 && <Pager label="Patch pages" page={patchPage} pages={patchPages.length} total={patchPages.length} size={1} pageLabel onPage={onHunkPage} />}</>}</section>;
+  }, [fileMode, lang, contentLines]);
+  const fileTokenOf = (lineNumber: number) => fileTokenChunks.get(Math.floor((lineNumber - 1) / FILE_TOKEN_CHUNK_LINES))?.[(lineNumber - 1) % FILE_TOKEN_CHUNK_LINES];
+  const renderRow = (row: RowSpec, index: number): React.ReactNode => {
+    if (row.kind === "header") return <div key={`h${index}`} className="hunk-header" data-index={index}>{row.header}</div>;
+    if (row.kind === "gap") {
+      const pending = expandedGaps.has(row.gap.id) && contentLines === null && contentLoading;
+      const error = contentLines === null && contentError !== "";
+      return <div key={`g${index}`} className={`diff-gap${row.slim ? " slim" : ""}`} data-index={index}><ExpandGapRow gap={row.gap} slim={row.slim} pending={pending} error={error} onExpand={() => expandGap(row.gap)} /></div>;
+    }
+    if (row.kind === "split") {
+      return <div key={`s${index}`} className="stream-row split" data-index={index}>
+        {row.old ? <DiffHalf placement="left" side="LEFT" gutter={row.old.oldLine} text={row.old.text} whitespace={whitespace} tokens={tokensOf(row.old)} commentsActive={commentsActive} commentable={!row.old.expanded} selected={selectedClass("LEFT", row.old.oldLine)} chip={commentsActive ? chipFor("LEFT", row.old.oldLine) : null} onRowClick={rowClick} onGutterDown={beginGutterDrag} onEnter={extendDrag} /> : <div className="diff-line half half-left" />}
+        {inlineAfter("LEFT", row.old?.oldLine ?? null)}
+        {row.next ? <DiffHalf placement="right" side="RIGHT" gutter={row.next.newLine} text={row.next.text} whitespace={whitespace} tokens={tokensOf(row.next)} commentsActive={commentsActive} commentable={!row.next.expanded} selected={selectedClass("RIGHT", row.next.newLine)} chip={commentsActive ? chipFor("RIGHT", row.next.newLine) : null} onRowClick={rowClick} onGutterDown={beginGutterDrag} onEnter={extendDrag} /> : <div className="diff-line half half-right" />}
+        {inlineAfter("RIGHT", row.next?.newLine ?? null)}
+      </div>;
+    }
+    const line = row.line;
+    const fileTokens = fileMode && line.newLine !== null ? fileTokenOf(line.newLine) : undefined;
+    const flash = line.newLine !== null && flashLine === line.newLine;
+    const anchor = commentsActive && !fileMode ? selectableRow(line) : null;
+    const target = anchor !== null && !line.expanded ? anchor : null;
+    const lineClasses = ["diff-line",
+      line.text.startsWith("+") ? "addition" : "",
+      line.text.startsWith("-") ? "deletion" : "",
+      fileMode && line.newLine !== null && addedNewLines.has(line.newLine) ? "addition" : "",
+      fileMode && line.newLine !== null && deletionLines.has(line.newLine) ? "deletion-tick" : "",
+      flash ? "jump-flash" : "",
+      target ? " commentable" : "",
+      anchor ? selectedClass(anchor.side, anchor.number) : ""].join(" ");
+    return <div key={`l${index}`} className="stream-row" data-index={index}>
+      <div className={lineClasses} data-side={target?.side} data-line={target?.number} onClick={target ? (event) => rowClick(target.side, target.number, event.shiftKey) : undefined} onMouseEnter={target ? () => extendDrag(target.side, target.number) : undefined}>
+        <span className="line-number" onMouseDown={target ? (event) => { event.preventDefault(); beginGutterDrag(target.side, target.number); } : undefined}>{line.oldLine ?? ""}</span>
+        <span className="line-number" onMouseDown={target ? (event) => { event.preventDefault(); beginGutterDrag(target.side, target.number); } : undefined}>{line.newLine ?? ""}</span>
+        <code>{diffLineContent(line.text, whitespace, fileTokens ?? tokensOf(line))}</code>
+        {target && chipFor(target.side, target.number)}
+      </div>
+      {anchor && inlineAfter(anchor.side, anchor.number)}
+    </div>;
+  };
+  const stripTicks = regions.flatMap((region, index) => {
+    const row = regionRows[index];
+    if (row === null || row === undefined || model.total() === 0) return [];
+    return [{ key: `${region.start}:${region.end}`, top: model.offset(row) / model.total(), added: region.added, title: `Change at line ${region.start}`, row, line: region.start }];
+  });
+  const streamPane = <div ref={scrollRef} onScroll={onScroll} className="patch-scroll"><div ref={streamRef} className={`hunk-list ${fileMode ? "file-view" : ""} ${split ? "split-layout" : ""} ${diffPrefs.lineWrap ? "wrap-lines" : ""}`}><div className="stream-viewport" style={{ height: model.total() }}><div className="stream-window" style={{ transform: `translateY(${model.offset(rowWindow.start)}px)` }}>{rows.slice(rowWindow.start, rowWindow.end).map((row, offset) => renderRow(row, rowWindow.start + offset))}</div></div></div></div>;
+  return <section ref={paneRef} className="patch-pane" aria-label="File patch">{selectedFile && <div className="patch-heading"><code title={selectedFile.path}>{selectedFile.path}</code><span className="patch-heading-meta"><span>{selectedFile.status}</span><div className="patch-view-toggle" role="group" aria-label="Patch or full file view"><button type="button" className={patchView === "diff" ? "active" : ""} aria-pressed={patchView === "diff"} title="Diff view" onClick={() => setPatchView("diff")}>Diff</button><button type="button" className={patchView === "file" ? "active" : ""} aria-pressed={patchView === "file"} title="Full file view" onClick={() => { setPatchView("file"); onEnsureContent(); }}>File</button></div>{regions.length > 0 && <div className="change-nav"><button type="button" className="icon-button" aria-label="Previous change" title="Previous change" disabled={!canJump(-1)} onClick={() => jump(-1)}><ChevronUp size={12} /></button><span className="change-count" title="Change under the viewport">{Math.min(Math.max(currentRegion + 1, 1), regions.length)} / {regions.length}</span><button type="button" className="icon-button" aria-label="Next change" title="Next change" disabled={!canJump(1)} onClick={() => jump(1)}><ChevronDown size={12} /></button></div>}{onDiskWorktree && <><button className="icon-button" type="button" aria-label="Open file" title="Open file" onClick={() => openOnDisk(false)}><ExternalLink size={13} /></button><button className="icon-button" type="button" aria-label="Reveal in file explorer" title="Reveal in file explorer" onClick={() => openOnDisk(true)}><FolderOpen size={13} /></button></>}{comments.key && <button className="icon-button" type="button" aria-label="Comment on file" title="Comment on file" onClick={() => comments.openFileComposer(selectedFile.path)}><MessageSquare size={13} /></button>}</span></div>}{openError && <p className="patch-open-error" role="status">{openError}</p>}{comments.composer?.kind === "file" && selectedFile && comments.composer.filePath === selectedFile.path && <div className="comment-composer-panel"><p className="eyebrow">Comment on {selectedFile.path}</p><DraftComposer placeholder={`Comment on ${selectedFile.path}`} submitLabel="Comment" onSubmit={({ body, severity }) => { void comments.create({ body, severity, file_path: selectedFile.path, side: null, start_line: null, end_line: null, lines: [] }).then(comments.closeComposer); }} onCancel={comments.closeComposer} /></div>}<div className="patch-body">{patchLoading ? <div className="patch-skeleton" aria-label="Loading patch"><i /><i /><i /><i /></div> : patchError ? <Empty icon={<FileDiff size={24} />} title="Patch not rendered" detail={patchError} /> : !selectedFile ? <Empty icon={<FileDiff size={24} />} title="Select a changed file" detail="The patch is rendered one file at a time." /> : patch?.binary ? <Empty icon={<FileDiff size={24} />} title="Binary file changed" detail={selectedFile.path} /> : patch?.text === "" ? <Empty icon={<CircleDot size={24} />} title="No changes in this file" detail="The selected file has no renderable patch." /> : fileMode ? contentLoading ? <div className="patch-skeleton" aria-label="Loading file"><i /><i /><i /><i /></div> : contentError ? <Empty icon={<FileDiff size={24} />} title="File content unavailable" detail={contentError} /> : !content || content.binary ? <Empty icon={<FileDiff size={24} />} title="Binary file" detail="The full file view is unavailable for binary content." /> : rows.length === 0 ? <Empty icon={<CircleDot size={24} />} title="No file on this side" detail="The file does not exist on this side of the diff." /> : streamPane : hunks.length === 0 ? <pre className="patch-metadata"><code>{patch?.text}</code></pre> : streamPane}{streamReady() && stripTicks.length > 0 && <ChangeStrip totalHeight={model.total()} viewportTop={scrollState.top} viewportHeight={scrollState.viewport} ticks={stripTicks} onJump={jumpToRow} />}</div></section>;
+
+  // The stream renders only when a file, patch, or file content is actually
+  // present; every other body state above replaces it wholesale.
+  function streamReady() {
+    return Boolean(selectedFile) && !patchLoading && !patchError && !patch?.binary && patch?.text !== "" && (fileMode ? !contentLoading && !contentError && content !== null && !content.binary && rows.length > 0 : hunks.length > 0);
+  }
 }
 
-// One hunk gap's inline expand control. While its lines are still loading it
-// shows progress; a failed content read offers a retry through the same
-// click that requested the content.
-function ExpandGapRow({ gap, pending, error, onExpand }: { gap: PatchGap; pending: boolean; error: boolean; onExpand: () => void }) {
+// One hunk gap's inline expand control, joined into the stream. Small gaps
+// collapse to a slim one-line row; while lines are loading it shows
+// progress, and a failed content read retries through the same click.
+function ExpandGapRow({ gap, slim, pending, error, onExpand }: { gap: PatchGap; slim: boolean; pending: boolean; error: boolean; onExpand: () => void }) {
   const label = `Expand ${gap.lines} hidden line${gap.lines === 1 ? "" : "s"}`;
-  return <div className="diff-gap"><button className="expand-gap" type="button" disabled={pending} aria-label={label} title={error ? "File content is unavailable" : label} onClick={onExpand}>{pending ? "Loading hidden lines…" : error ? "Hidden lines unavailable, click to retry" : <><UnfoldVertical size={12} />{label}</>}</button></div>;
+  return <button className={`expand-gap${slim ? " slim" : ""}`} type="button" disabled={pending} aria-label={label} title={error ? "File content is unavailable" : label} onClick={onExpand}>{pending ? "Loading hidden lines…" : error ? "Hidden lines unavailable, click to retry" : <><UnfoldVertical size={slim ? 10 : 12} />{label}</>}</button>;
 }
 
-// The full-file body of the patch pane: the file as it exists on the patch's
-// new side, paged like a patch, with the patch's added lines highlighted.
-// Read-only by design; comments stay anchored in the diff view.
-function FileView({ content, contentLoading, contentError, rows, firstLine, page, pages, total, tokens, whitespace, wrap, added, onPage }: { content: FileContent | null; contentLoading: boolean; contentError: string; rows: string[]; firstLine: number; page: number; pages: number; total: number; tokens: TokenLine[] | null; whitespace: boolean; wrap: boolean; added: Set<number>; onPage: (page: number) => void }) {
-  if (contentLoading) return <div className="patch-skeleton" aria-label="Loading file"><i /><i /><i /><i /></div>;
-  if (contentError) return <Empty icon={<FileDiff size={24} />} title="File content unavailable" detail={contentError} />;
-  if (!content || content.binary) return <Empty icon={<FileDiff size={24} />} title="Binary file" detail="The full file view is unavailable for binary content." />;
-  if (rows.length === 0) return <Empty icon={<CircleDot size={24} />} title="No file on this side" detail="The file does not exist on this side of the diff." />;
-  return <><div className={`file-view hunk-list ${wrap ? "wrap-lines" : ""}`}>{rows.map((row, index) => {
-    const lineNumber = firstLine + index;
-    const rowTokens = tokens?.[index];
-    return <div key={lineNumber} className={`diff-line ${added.has(lineNumber) ? "addition" : ""}`}><span className="line-number">{lineNumber}</span><code>{rowTokens && rowTokens.length > 0 ? tokenLineNodes(rowTokens, whitespace) : diffLineContent(row, whitespace)}</code></div>;
-  })}</div>{pages > 1 && <Pager label="File pages" page={page} pages={pages} total={total} size={PATCH_LINE_PAGE_SIZE} onPage={onPage} />}</>;
+// A thin fixed overlay mapping where the patch's changes sit in the
+// stream; one click jumps to a change. Ticks keep the change strip cheap:
+// plain positioned buttons, no canvas.
+function ChangeStrip({ totalHeight, viewportTop, viewportHeight, ticks, onJump }: { totalHeight: number; viewportTop: number; viewportHeight: number; ticks: Array<{ key: string; top: number; added: boolean; title: string; row: number; line: number }>; onJump: (row: number, line: number) => void }) {
+  if (totalHeight <= 0) return null;
+  return <div className="change-strip" role="group" aria-label="Change map">
+    <div className="strip-view" style={{ top: `${Math.min(100, (viewportTop / totalHeight) * 100)}%`, height: `${Math.min(100 - Math.min(100, (viewportTop / totalHeight) * 100), (viewportHeight / totalHeight) * 100)}%` }} />
+    {ticks.map((tick) => <button key={tick.key} type="button" className={`strip-tick ${tick.added ? "added" : "deleted"}`} style={{ top: `${tick.top * 100}%` }} title={tick.title} aria-label={`Jump to change at line ${tick.line}`} onClick={() => onJump(tick.row, tick.line)} />)}
+  </div>;
 }
 
-function DiffHalf({ side, gutter, text, whitespace, tokens, commentsActive, commentable = true, selected, chip, onRowClick, onGutterDown, onEnter }: { side: DisplaySide; gutter: number | null; text: string; whitespace: boolean; tokens?: TokenLine; commentsActive: boolean; commentable?: boolean; selected: string; chip: React.ReactNode; onRowClick: (side: DisplaySide, number: number, extend: boolean) => void; onGutterDown: (side: DisplaySide, number: number) => void; onEnter: (side: DisplaySide, number: number) => void }) {
+function DiffHalf({ placement, side, gutter, text, whitespace, tokens, commentsActive, commentable = true, selected, chip, onRowClick, onGutterDown, onEnter }: { placement: "left" | "right"; side: DisplaySide; gutter: number | null; text: string; whitespace: boolean; tokens?: TokenLine; commentsActive: boolean; commentable?: boolean; selected: string; chip: React.ReactNode; onRowClick: (side: DisplaySide, number: number, extend: boolean) => void; onGutterDown: (side: DisplaySide, number: number) => void; onEnter: (side: DisplaySide, number: number) => void }) {
   // Expanded context rows keep their comment cards visible but accept no new
   // anchors: the comment layer validates against patch lines, which do not
   // include expanded rows.
   const target = commentsActive && gutter !== null && commentable;
-  return <div className={`diff-line half ${text.startsWith("+") ? "addition" : text.startsWith("-") ? "deletion" : ""}${target ? " commentable" : ""}${selected}`} data-side={target ? side : undefined} data-line={target ? gutter : undefined} onClick={target ? (event) => onRowClick(side, gutter, event.shiftKey) : undefined} onMouseEnter={target ? () => onEnter(side, gutter) : undefined}><span className="line-number" onMouseDown={target ? (event) => { event.preventDefault(); onGutterDown(side, gutter); } : undefined}>{gutter ?? ""}</span><code>{diffLineContent(text, whitespace, tokens)}</code>{chip}</div>;
+  return <div className={`diff-line half half-${placement} ${text.startsWith("+") ? "addition" : text.startsWith("-") ? "deletion" : ""}${target ? " commentable" : ""}${selected}`} data-side={target ? side : undefined} data-line={target ? gutter : undefined} onClick={target ? (event) => onRowClick(side, gutter, event.shiftKey) : undefined} onMouseEnter={target ? () => onEnter(side, gutter) : undefined}><span className="line-number" onMouseDown={target ? (event) => { event.preventDefault(); onGutterDown(side, gutter); } : undefined}>{gutter ?? ""}</span><code>{diffLineContent(text, whitespace, tokens)}</code>{chip}</div>;
 }
 
 function DiffToggles({ settings, onChange }: { settings: Settings; onChange: (next: Settings) => void }) {
@@ -1381,7 +1575,7 @@ function DiffToggles({ settings, onChange }: { settings: Settings; onChange: (ne
 }
 
 
-function HistoryView({ history, historyRefs, index, loading, selectedCommit, selectedFile, patch, patchError, patchLoading, filePage, hunkPage, diffPrefs, diffToggles, comments, content, contentLoading, contentError, onEnsureContent, onBack, onBasePick, onFilePage, onHunkPage, onFile }: { history: HistoryState; historyRefs: RefInventory; index: ReviewIndex | null; loading: boolean; selectedCommit: CommitInfo | null; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; filePage: number; hunkPage: number; diffPrefs: DiffPreferences; diffToggles: React.ReactNode; comments: CommentsApi; content: FileContent | null; contentLoading: boolean; contentError: string; onEnsureContent: () => void; onBack: () => void; onBasePick: (base: string) => void; onFilePage: (page: number) => void; onHunkPage: (page: number) => void; onFile: (file: ChangedFile) => void }) {
+function HistoryView({ history, historyRefs, index, loading, selectedCommit, selectedFile, patch, patchError, patchLoading, filePage, diffPrefs, diffToggles, comments, content, contentLoading, contentError, onEnsureContent, onBack, onBasePick, onFilePage, onFile }: { history: HistoryState; historyRefs: RefInventory; index: ReviewIndex | null; loading: boolean; selectedCommit: CommitInfo | null; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; filePage: number; diffPrefs: DiffPreferences; diffToggles: React.ReactNode; comments: CommentsApi; content: FileContent | null; contentLoading: boolean; contentError: string; onEnsureContent: () => void; onBack: () => void; onBasePick: (base: string) => void; onFilePage: (page: number) => void; onFile: (file: ChangedFile) => void }) {
   const selected = selectedCommit;
   const allRefs = [...historyRefs.heads, ...historyRefs.remotes, ...historyRefs.tags];
   if (!selected) {
@@ -1401,7 +1595,7 @@ function HistoryView({ history, historyRefs, index, loading, selectedCommit, sel
     </header>
     <div className="review-body comments-visible">
       <FileIndexPane base={quickBase} index={index} loading={loading} selectedFile={selectedFile} filePage={filePage} onFilePage={onFilePage} onFile={onFile} />
-      <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} hunkPage={hunkPage} diffPrefs={diffPrefs} reversed={false} comments={comments} onHunkPage={onHunkPage} onDiskWorktree={history.worktreePath ?? history.repoPath} content={content} contentLoading={contentLoading} contentError={contentError} onEnsureContent={onEnsureContent} />
+      <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} diffPrefs={diffPrefs} reversed={false} comments={comments} onDiskWorktree={history.worktreePath ?? history.repoPath} content={content} contentLoading={contentLoading} contentError={contentError} onEnsureContent={onEnsureContent} />
       <CommentStream comments={comments} />
     </div>
   </section>;

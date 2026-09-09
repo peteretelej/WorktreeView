@@ -361,7 +361,7 @@ describe("bundled desktop lifecycle", () => {
 
     const largeFile = await $('//button[contains(@class, "file-row")][.//span[normalize-space()="large-hunk.txt"]]');
     await largeFile.click();
-    await browser.waitUntil(async () => (await $$(".diff-line")).length === 500);
+    await browser.waitUntil(async () => await browser.execute(() => document.querySelector(".patch-heading code")?.textContent) === "large-hunk.txt");
     await browser.execute(() => {
       const button = Array.from(document.querySelectorAll(".file-row")).find((row) => row.textContent?.includes("large-hunk.txt"));
       if (button instanceof HTMLElement) button.focus();
@@ -375,23 +375,22 @@ describe("bundled desktop lifecycle", () => {
     await browser.waitUntil(async () => await browser.execute(() => document.activeElement?.querySelector("span")?.textContent) === "large-hunk.txt");
     await expect(largeFile).toHaveAttribute("aria-selected", "true");
     await browser.waitUntil(async () => await browser.execute(() => document.querySelector(".patch-heading code")?.textContent) === "large-hunk.txt");
-    await browser.waitUntil(async () => (await $$(".diff-line")).length === 500);
-    await expect($('[aria-label="Patch pages"]')).toHaveText(expect.stringContaining("Page 1 of 3"));
-    let largeGutters = await browser.execute(() => Array.from(document.querySelectorAll(".diff-line"), (line) =>
+    // The windowed stream keeps the DOM bounded: the 1200-line patch mounts
+    // only the rows around the viewport, and scrolling slides the window.
+    const streamGutters = () => browser.execute(() => Array.from(document.querySelectorAll(".diff-line"), (line) =>
       Array.from(line.querySelectorAll(".line-number"), (gutter) => gutter.textContent?.trim() ?? "")));
+    await browser.waitUntil(async () => (await $$(".diff-line")).length > 0);
+    const mountedBefore = await browser.execute(() => document.querySelectorAll(".diff-line").length);
+    assert.ok(mountedBefore < 1200, `expected a bounded stream window, mounted ${mountedBefore}`);
+    let largeGutters = await streamGutters();
     assert.deepEqual(largeGutters[0], ["", "1"]);
-    assert.deepEqual(largeGutters.at(-1), ["", "500"]);
-    await $('//div[@aria-label="Patch pages"]//button[normalize-space()="Next"]').click();
-    await expect($('[aria-label="Patch pages"]')).toHaveText(expect.stringContaining("Page 2 of 3"));
-    largeGutters = await browser.execute(() => Array.from(document.querySelectorAll(".diff-line"), (line) =>
-      Array.from(line.querySelectorAll(".line-number"), (gutter) => gutter.textContent?.trim() ?? "")));
-    assert.deepEqual(largeGutters[0], ["", "501"]);
-    assert.deepEqual(largeGutters.at(-1), ["", "1000"]);
-    await $('//div[@aria-label="Patch pages"]//button[normalize-space()="Next"]').click();
-    await expect($('[aria-label="Patch pages"]')).toHaveText(expect.stringContaining("Page 3 of 3"));
-    largeGutters = await browser.execute(() => Array.from(document.querySelectorAll(".diff-line"), (line) =>
-      Array.from(line.querySelectorAll(".line-number"), (gutter) => gutter.textContent?.trim() ?? "")));
-    assert.deepEqual(largeGutters.at(-1), ["", "1200"]);
+    await browser.execute(() => { const scroll = document.querySelector(".patch-scroll"); if (scroll) scroll.scrollTop = scroll.scrollHeight; });
+    await browser.waitUntil(async () => {
+      const gutters = await streamGutters();
+      return gutters.at(-1)?.[1] === "1200";
+    });
+    const mountedAfter = await browser.execute(() => document.querySelectorAll(".diff-line").length);
+    assert.ok(mountedAfter < 1200, `expected a bounded stream window after scrolling, mounted ${mountedAfter}`);
 
     await browser.executeAsync((done) => {
       Array.from(document.querySelectorAll(".file-row")).find((row) => row.textContent?.includes("large-hunk.txt"))?.click();

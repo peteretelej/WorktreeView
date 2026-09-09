@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hunksWithExpandedGaps, pairHunkLines, parseHunkHeader, patchGaps, splitFileLines, type DiffLine, type HunkLike } from "./diff.ts";
+import { changeRegions, deletionTicks, hunksWithExpandedGaps, pairHunkLines, parseHunkHeader, patchGaps, splitFileLines, type DiffLine, type HunkLike } from "./diff.ts";
 
 function line(text: string, oldLine: number | null = null, newLine: number | null = null): DiffLine {
   return { text, oldLine, newLine };
@@ -163,4 +163,47 @@ test("file lines drop the phantom trailing entry a final newline produces", () =
   assert.deepEqual(splitFileLines("a\nb"), ["a", "b"]);
   assert.deepEqual(splitFileLines("a\n\n"), ["a", ""]);
   assert.deepEqual(splitFileLines(""), []);
+});
+
+test("change regions merge touching hunks and mark addition presence", () => {
+  const headers = ["@@ -1,3 +1,4 @@", "@@ -5,2 +5,2 @@", "@@ -20,1 +22,1 @@"];
+  assert.deepEqual(changeRegions(headers), [
+    { start: 1, end: 6, added: true },
+    { start: 22, end: 22, added: true },
+  ]);
+});
+
+test("a deletion-only hunk marks the surviving line before the change", () => {
+  assert.deepEqual(changeRegions(["@@ -4,2 +3,0 @@"]), [{ start: 3, end: 3, added: false }]);
+  assert.deepEqual(changeRegions(["@@ -1,3 +0,0 @@"]), [{ start: 1, end: 1, added: false }]);
+});
+
+test("change regions stay empty for malformed or absent headers", () => {
+  assert.deepEqual(changeRegions([]), []);
+  assert.deepEqual(changeRegions(["not a header"]), []);
+});
+
+test("deletion ticks anchor to the surviving line below each deleted run", () => {
+  const hunks: HunkLike[] = [
+    {
+      header: "@@ -5,4 +6,4 @@",
+      lines: [
+        line(" a", 5, 6),
+        line("-old1", 6),
+        line("-old2", 7),
+        line("+new", null, 7),
+        line(" b", 8, 8),
+      ],
+    },
+  ];
+  assert.deepEqual(deletionTicks(hunks), [6]);
+});
+
+test("deletion runs at hunk start, end, and count-0 hunks all anchor", () => {
+  const hunks: HunkLike[] = [
+    { header: "@@ -3,2 +4,2 @@", lines: [line("-top", 3), line(" ctx", 4, 4)] },
+    { header: "@@ -10,2 +12,1 @@", lines: [line(" ctx", 10, 12), line("-end", 11)] },
+    { header: "@@ -20,3 +21,0 @@", lines: [line("-gone", 20), line("-gone2", 21), line("-gone3", 22)] },
+  ];
+  assert.deepEqual(deletionTicks(hunks), [3, 12, 21]);
 });
