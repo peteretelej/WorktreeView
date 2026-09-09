@@ -173,12 +173,14 @@ function CommentCard({ comment, status, reversed = false, actions }: { comment: 
       {state === "moved" && <span className="comment-badge comment-state-badge">moved</span>}
       {state === "outdated" && <span className="comment-badge comment-state-badge">outdated</span>}
       {comment.resolved_at !== null && <span className="comment-badge comment-resolved-badge">resolved</span>}
-      <span className="comment-time" title={new Date(comment.created_at).toLocaleString()}>{new Date(comment.created_at).toLocaleDateString()}</span>
       <button className="comment-copy" type="button" aria-label="Copy comment as markdown" title="Copy as markdown" onClick={() => copy(formatCommentForCopy(comment, reversed))}>{<CopyMark copied={copied} />}</button>
     </header>
     <CommentBody text={comment.body} />
     {state === "outdated" && comment.snippet && <pre className="comment-snippet"><code>{comment.snippet}</code></pre>}
-    {actions}
+    <div className="comment-foot">
+      {actions}
+      <span className="comment-time" title={new Date(comment.created_at).toLocaleString()}>{new Date(comment.created_at).toLocaleDateString()}</span>
+    </div>
   </article>;
 }
 

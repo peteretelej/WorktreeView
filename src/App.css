@@ -1614,6 +1614,9 @@ button:disabled {
 .comment-body a { color: var(--primary); }
 .comment-snippet { margin: 7px 0 0; padding: 6px 8px; overflow-x: auto; border: 1px dashed var(--border); border-radius: 4px; background: var(--code-surface); color: var(--muted); font: 11px/1.5 var(--font-mono); }
 .comment-actions { display: flex; align-items: center; gap: 10px; margin-top: 7px; }
+.comment-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 7px; }
+.comment-foot .comment-actions { margin-top: 0; }
+.comment-foot .comment-time { margin-left: auto; }
 .comment-actions button { padding: 2px 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 10.5px; }
 .comment-actions button:hover { color: var(--foreground); }
 .comment-anchor { display: inline-flex; gap: 6px; margin-right: auto; min-width: 0; overflow: hidden; color: var(--muted); font-size: 10px; }
