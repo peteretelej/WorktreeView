@@ -89,15 +89,16 @@ normalized domain data through narrow, typed Tauri commands.
   `post_review` and `refresh_repo` delegate to the shared implementations
   (`ingest_submission_in_pool`, `refresh_repo`) with the authenticated
   actor; after a successful ingest the endpoint pushes a
-  `submission-received` event, and after a successful refresh (including
+  `submission-received` event, after a successful refresh (including
   the no-remote no-op, which the shared path announces) a
-  `project-refreshed` event, both via injected sinks so the handler
-  matrix is testable without an app; the webview never listens on a
-  socket. On a successful bind the startup path provisions the per-boot
-  default token and writes the discovery file; exit shutdown is
-  best-effort and removes the file only when still owned. A stale
-  discovery file may be left behind; clients tolerate that by re-reading
-  the file when their token is refused.
+  `project-refreshed` event, and after each successful agent comment
+  mutation on the MCP face a `comment-changed` event, all via injected
+  sinks so the handler matrix is testable without an app; the webview
+  never listens on a socket. On a successful bind the startup path
+  provisions the per-boot default token and writes the discovery file;
+  exit shutdown is best-effort and removes the file only when still
+  owned. A stale discovery file may be left behind; clients tolerate
+  that by re-reading the file when their token is refused.
 - `cache.rs`: SQLite-backed history cache for commit pages and ancestry
   marks, keyed by resolved SHAs.
 - `retrospection.rs`: records reviewed worktree and branch identities
@@ -122,7 +123,11 @@ locale to C. The full rationale is in the repo `AGENTS.md`.
 ## Frontend (`src/`)
 
 A flat React + Vite app: `App.tsx` (shell, project overview, review views,
-and the agent submission arrival cue), `settings.tsx`,
+the agent submission arrival cue, and the endpoint event listeners:
+`submission-received` queues the arrival cue, `comment-changed` refetches
+the loaded review's comments when the change names it, and
+`project-refreshed` re-lists the open repository's surfaces),
+`settings.tsx`,
 `diff.ts` (diff presentation helpers),
 `highlight.ts` (progressive diff token highlighting over Shiki),
 `navigation.ts` (back and forward review history), `reviewPresets.ts`

@@ -45,6 +45,7 @@ export type CommentsApi = {
   openComposer(kind: "review"): void;
   openFileComposer(filePath: string): void;
   closeComposer(): void;
+  refresh(): Promise<void>;
   create(draft: CommentDraft): Promise<void>;
   reply(parentId: number, body: string): Promise<void>;
   setResolved(commentId: number, resolved: boolean): Promise<void>;
@@ -113,6 +114,7 @@ export function useReviewComments(identity: ReviewIdentity | null, index: Review
     openComposer(kind: "review") { setComposer({ kind }); },
     openFileComposer(filePath: string) { setComposer({ kind: "file", filePath }); },
     closeComposer() { setComposer(null); },
+    async refresh() { if (key) await refresh(key); },
     async create(draft: CommentDraft) {
       if (!key) return;
       await invoke("create_comment", { repoPath: key.repoPath, baseSha: key.baseSha, targetKey: key.targetKey, targetKind: key.targetKind, draft });

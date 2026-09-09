@@ -4,11 +4,12 @@ use crate::overview::branch_inventory;
 use crate::reviews::{
     create_unbound_comment_in_pool, delete_comment_in_pool, edit_comment_in_pool,
     list_comments_in_pool, list_submissions_in_pool, reply_comment_in_pool,
-    set_comment_resolved_in_pool, Actor,
+    review_identity_of_comment, set_comment_resolved_in_pool, Actor,
 };
 use crate::store::list_repo_rows_in_pool;
 use crate::transport::{
-    rpc_error, TransportState, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
+    rpc_error, CommentChange, TransportState, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND,
+    PARSE_ERROR,
 };
 use crate::CommandError;
 use axum::http::StatusCode;
@@ -530,6 +531,29 @@ async fn list_submissions(state: &TransportState, args: ReviewIdentityArgs) -> T
     payload(submissions)
 }
 
+// One announcement per successful agent comment mutation: the review
+// identity joins from the store, so the reply/resolve/edit handlers need
+// only the mutated comment's id. A failed read only skips the event; the
+// mutation itself already succeeded.
+async fn announce_comment_change(
+    state: &TransportState,
+    comment_id: i64,
+    action: &'static str,
+    agent_name: &str,
+) {
+    if let Ok(Some(review)) = review_identity_of_comment(&state.pool, comment_id).await {
+        (state.comment_changes)(CommentChange {
+            repo_path: review.repo_path,
+            base_sha: review.base_sha,
+            target_key: review.target_key,
+            target_kind: review.target_kind,
+            comment_id,
+            action,
+            agent_name: agent_name.to_string(),
+        });
+    }
+}
+
 async fn create_comment(
     state: &TransportState,
     args: CreateCommentArgs,
@@ -554,6 +578,15 @@ async fn create_comment(
     )
     .await
     .map_err(|error| error.message)?;
+    (state.comment_changes)(CommentChange {
+        repo_path: args.repo_path,
+        base_sha: args.base_sha,
+        target_key: args.target_key,
+        target_kind: args.target_kind,
+        comment_id: comment.id(),
+        action: "created",
+        agent_name: identity.name.clone(),
+    });
     payload(comment)
 }
 
@@ -571,6 +604,7 @@ async fn reply_comment(
     )
     .await
     .map_err(|error| error.message)?;
+    announce_comment_change(state, comment.id(), "replied", &identity.name).await;
     payload(comment)
 }
 
@@ -587,6 +621,13 @@ async fn resolve_thread(
     )
     .await
     .map_err(|error| error.message)?;
+    announce_comment_change(
+        state,
+        comment.id(),
+        if args.resolved { "resolved" } else { "unresolved" },
+        &identity.name,
+    )
+    .await;
     payload(comment)
 }
 
@@ -603,6 +644,7 @@ async fn edit_own_comment(
     )
     .await
     .map_err(|error| error.message)?;
+    announce_comment_change(state, comment.id(), "edited", &identity.name).await;
     payload(comment)
 }
 
@@ -611,9 +653,26 @@ async fn delete_own_comment(
     args: DeleteOwnCommentArgs,
     identity: &AgentIdentity,
 ) -> ToolOutcome {
+    // The row is gone after the delete, so the announcement's review
+    // identity is read first and the event fires only on success.
+    let review = review_identity_of_comment(&state.pool, args.comment_id)
+        .await
+        .ok()
+        .flatten();
     delete_comment_in_pool(&state.pool, args.comment_id, &Actor::Agent(identity.clone()))
         .await
         .map_err(|error| error.message)?;
+    if let Some(review) = review {
+        (state.comment_changes)(CommentChange {
+            repo_path: review.repo_path,
+            base_sha: review.base_sha,
+            target_key: review.target_key,
+            target_kind: review.target_kind,
+            comment_id: args.comment_id,
+            action: "deleted",
+            agent_name: identity.name.clone(),
+        });
+    }
     payload(json!({ "deleted": true }))
 }
 
@@ -633,8 +692,8 @@ mod tests {
     use crate::agents::create_agent_token_in_pool;
     use crate::testutil::{seed_repo, test_pool, test_path, test_repo};
     use crate::transport::{
-        discovery_path, handle, start, ListenerConfig, ListenerStatus, McpStatusHandle,
-        RefreshSink, UNAUTHORIZED,
+        discovery_path, handle, start, CommentChange, CommentSink, ListenerConfig, ListenerStatus,
+        McpStatusHandle, RefreshSink, UNAUTHORIZED,
     };
     use axum::body::{to_bytes, Body};
     use axum::extract::State;
@@ -659,6 +718,19 @@ mod tests {
 
     fn noop_refreshes() -> RefreshSink {
         Arc::new(|_| {})
+    }
+
+    fn noop_comment_changes() -> CommentSink {
+        Arc::new(|_| {})
+    }
+
+    fn recording_comment_changes() -> (CommentSink, Arc<Mutex<Vec<CommentChange>>>) {
+        let received: Arc<Mutex<Vec<CommentChange>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received);
+        (
+            Arc::new(move |change| sink.lock().unwrap().push(change)),
+            received,
+        )
     }
 
     fn recording_refreshes() -> (RefreshSink, Arc<Mutex<Vec<String>>>) {
@@ -691,6 +763,7 @@ mod tests {
             pool,
             arrivals: Arc::new(|_| {}),
             refreshes: noop_refreshes(),
+            comment_changes: noop_comment_changes(),
             status: dummy_status(),
         };
         (state, secret)
@@ -1099,6 +1172,7 @@ mod tests {
             pool,
             arrivals: Arc::new(|_| {}),
             refreshes,
+            comment_changes: noop_comment_changes(),
             status: dummy_status(),
         };
         let payload = call_tool_raw(
@@ -1128,6 +1202,144 @@ mod tests {
             UNKNOWN_REPO_MESSAGE
         );
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    // Every successful agent comment mutation announces exactly one
+    // comment-change event carrying the review identity, the mutated
+    // comment, the action, and the token's agent name.
+    #[tokio::test]
+    async fn agent_comment_mutations_announce_once_with_the_right_payload() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let (changes, announced) = recording_comment_changes();
+        let secret = create_agent_token_in_pool(&pool, "mcp-agent")
+            .await
+            .unwrap()
+            .secret;
+        let state = TransportState {
+            pool: pool.clone(),
+            arrivals: Arc::new(|_| {}),
+            refreshes: noop_refreshes(),
+            comment_changes: changes,
+            status: dummy_status(),
+        };
+        let created = call_tool_raw(
+            &state,
+            &secret,
+            "create_comment",
+            json!({
+                "repo_path": "/demo",
+                "base_sha": "base",
+                "target_key": "/demo",
+                "target_kind": "worktree",
+                "body": "root comment",
+            }),
+        )
+        .await;
+        assert_eq!(created["result"]["isError"], false);
+        let root_id = result_text(&created)["id"].as_i64().unwrap();
+
+        let reply =
+            call_tool_raw(&state, &secret, "reply_comment", json!({ "parent_comment_id": root_id, "body": "a reply" }))
+                .await;
+        assert_eq!(reply["result"]["isError"], false);
+        let reply_id = result_text(&reply)["id"].as_i64().unwrap();
+        let resolved = call_tool_raw(
+            &state,
+            &secret,
+            "resolve_thread",
+            json!({ "root_comment_id": root_id, "resolved": true }),
+        )
+        .await;
+        assert_eq!(resolved["result"]["isError"], false);
+        let unresolved = call_tool_raw(
+            &state,
+            &secret,
+            "resolve_thread",
+            json!({ "root_comment_id": root_id, "resolved": false }),
+        )
+        .await;
+        assert_eq!(unresolved["result"]["isError"], false);
+        let edited = call_tool_raw(
+            &state,
+            &secret,
+            "edit_own_comment",
+            json!({ "comment_id": root_id, "body": "edited body" }),
+        )
+        .await;
+        assert_eq!(edited["result"]["isError"], false);
+        let deleted = call_tool_raw(
+            &state,
+            &secret,
+            "delete_own_comment",
+            json!({ "comment_id": reply_id }),
+        )
+        .await;
+        assert_eq!(deleted["result"]["isError"], false);
+
+        let events = announced.lock().unwrap();
+        let actions: Vec<&str> = events.iter().map(|change| change.action).collect();
+        assert_eq!(
+            actions,
+            ["created", "replied", "resolved", "unresolved", "edited", "deleted"]
+        );
+        for change in events.iter() {
+            assert_eq!(change.repo_path, "/demo");
+            assert_eq!(change.base_sha, "base");
+            assert_eq!(change.target_key, "/demo");
+            assert_eq!(change.target_kind, "worktree");
+            assert_eq!(change.agent_name, "mcp-agent");
+        }
+        assert_eq!(events[0].comment_id, root_id);
+        assert_eq!(events[1].comment_id, reply_id);
+        assert_eq!(events[2].comment_id, root_id);
+        assert_eq!(events[3].comment_id, root_id);
+        assert_eq!(events[4].comment_id, root_id);
+        assert_eq!(events[5].comment_id, reply_id);
+    }
+
+    // Failed mutations announce nothing, and the human IPC path (the shared
+    // implementations the commands call with Actor::Human) has no sink to
+    // announce through: the invoking renderer owns its refetch.
+    #[tokio::test]
+    async fn failed_tool_mutations_and_human_mutations_stay_silent() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let (changes, announced) = recording_comment_changes();
+        let secret = create_agent_token_in_pool(&pool, "mcp-agent")
+            .await
+            .unwrap()
+            .secret;
+        let state = TransportState {
+            pool: pool.clone(),
+            arrivals: Arc::new(|_| {}),
+            refreshes: noop_refreshes(),
+            comment_changes: changes,
+            status: dummy_status(),
+        };
+        let root_id = seed_review_with_comment(&pool, &state, &secret).await;
+        announced.lock().unwrap().clear();
+
+        let other = create_agent_token_in_pool(&pool, "other-agent").await.unwrap();
+        let foreign = call_tool_raw(
+            &state,
+            &other.secret,
+            "edit_own_comment",
+            json!({ "comment_id": root_id, "body": "hijack" }),
+        )
+        .await;
+        assert_eq!(foreign["result"]["isError"], true);
+
+        // The human path: the shared implementations as the IPC commands
+        // call them, with no event of any kind.
+        crate::reviews::reply_comment_in_pool(&pool, root_id, "human reply", None, &Actor::Human)
+            .await
+            .unwrap();
+        crate::reviews::set_comment_resolved_in_pool(&pool, root_id, true, &Actor::Human)
+            .await
+            .unwrap();
+
+        assert_eq!(announced.lock().unwrap().len(), 0);
     }
 
     fn free_port() -> u16 {
@@ -1189,6 +1401,7 @@ mod tests {
             &dir,
             Arc::new(|_| {}),
             noop_refreshes(),
+            noop_comment_changes(),
             ListenerConfig { enabled: true, address: "127.0.0.1".into(), port: free_port() },
         )
         .await
@@ -1245,6 +1458,7 @@ mod tests {
             &dir,
             Arc::new(|_| {}),
             refreshes,
+            noop_comment_changes(),
             ListenerConfig { enabled: true, address: "127.0.0.1".into(), port: free_port() },
         )
         .await

@@ -19,7 +19,7 @@
 !src-tauri/icons/
 !src-tauri/icons/**
 !src-tauri/migrations/
-!src-tauri/migrations/0001_repos.sql
+!src-tauri/migrations/**
 !src-tauri/src/
 !src-tauri/src/main.rs
 !src-tauri/src/lib.rs

@@ -36,6 +36,10 @@ type DiffPreferences = { layout: DiffLayout; whitespaceVisible: boolean; lineWra
 type OverviewTab = "worktrees" | "branches" | "remote" | "archived";
 // Mirrors the payload of the Rust `submission-received` event.
 type SubmissionArrival = { repo_path: string; base_sha: string; target_key: string; target_kind: "worktree" | "head"; submission_id: number; agent_name: string };
+// Mirrors the payload of the Rust `comment-changed` event.
+type CommentChange = { repo_path: string; base_sha: string; target_key: string; target_kind: "worktree" | "head"; comment_id: number; action: "created" | "replied" | "resolved" | "unresolved" | "edited" | "deleted"; agent_name: string };
+// Mirrors the payload of the Rust `project-refreshed` event.
+type ProjectRefresh = { repo_path: string };
 
 const WORKTREE_PAGE_SIZE = 100;
 const SEARCH_PAGE_SIZE = 50;
@@ -391,6 +395,9 @@ function App() {
   const commentPatchLines = useMemo(() => (patch && !patch.binary ? parseHunks(patch.text).flatMap((hunk) => hunk.lines) : []), [patch]);
   const commentFile = selectedFile && patch && !patch.binary ? { path: selectedFile.path, lines: commentPatchLines } : null;
   const comments = useReviewComments(commentIdentity, reviewIndex, commentFile, reversed);
+  // The event listeners read the live comment layer and open repo path
+  // through refs, so they subscribe once and never hold stale closures.
+  const commentsRef = useRef(comments); const activeRepoPathRef = useRef(activeRepoPath);
 
   useEffect(() => { let mounted = true; async function load() { try { const loaded = await invoke<Repo[]>("list_repos"); if (!mounted) return; setRepos(loaded); setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? ""); setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1]))); let nextSettings = defaultSettings; try { nextSettings = await getSettings(); } catch (error) { if (mounted) setOperationError(errorMessage(error)); } if (!mounted) return; nextSettings.zoom = snapZoom(nextSettings.zoom); applyTheme(nextSettings.theme); setSettings(nextSettings); setLoading(false); for (let start = 0; start < loaded.length; start += 4) await Promise.all(loaded.slice(start, start + 4).map(async (repo) => { try { const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path }); if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item)); let listing: SurfaceListing = { gone: [], pinned: [] }; try { listing = await invoke<SurfaceListing>("list_surfaces", { path: repo.path }); } catch { listing = { gone: [], pinned: [] }; } if (mounted) setSurfaces((current) => ({ ...current, [repo.path]: listing })); } catch (error) { if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); } finally { if (mounted) setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } })); } catch (error) { if (mounted) { setLoadError(errorMessage(error)); setLoading(false); } } } void load(); return () => { mounted = false; }; }, []);
   useEffect(() => { if (!activeRepo) { setSelectedWorktreePath(""); return; } setSelectedWorktreePath((current) => activeRepo.worktrees.some((worktree) => worktree.path === current) ? current : activeRepo.worktrees[0]?.path ?? ""); }, [activeRepo]);
@@ -469,6 +476,34 @@ function App() {
     let disposed = false;
     const subscription = listen<SubmissionArrival>("submission-received", (event) => {
       if (!disposed) setArrivals((current) => [...current, event.payload]);
+    });
+    return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
+  }, []);
+  useEffect(() => { commentsRef.current = comments; activeRepoPathRef.current = activeRepoPath; });
+  // Agent comment changes arrive through the same endpoint; when one names
+  // the loaded review, the comment layer refetches so the stream and inline
+  // threads update without a reload. Changes to other reviews are ignored:
+  // a review's data is fetched fresh when it opens.
+  useEffect(() => {
+    let disposed = false;
+    const subscription = listen<CommentChange>("comment-changed", (event) => {
+      if (disposed) return;
+      const key = commentsRef.current.key;
+      const change = event.payload;
+      if (!key || key.repoPath !== change.repo_path || key.baseSha !== change.base_sha || key.targetKey !== change.target_key || key.targetKind !== change.target_kind) return;
+      void commentsRef.current.refresh();
+    });
+    return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
+  }, []);
+  // A completed refresh ping re-lists the open repository's surfaces, so an
+  // agent's push-then-ping becomes visible without a manual refresh. The
+  // ping already ran the fetch, so this is only the local re-reads; the
+  // user is never navigated anywhere.
+  useEffect(() => {
+    let disposed = false;
+    const subscription = listen<ProjectRefresh>("project-refreshed", (event) => {
+      if (disposed || event.payload.repo_path !== activeRepoPathRef.current) return;
+      void relistProject(event.payload.repo_path);
     });
     return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
   }, []);
@@ -781,16 +816,23 @@ function App() {
       setFetchingRepos((current) => { const next = { ...current }; delete next[repoPath]; return next; });
     }
   }
+  // The local half of a refresh: re-read the worktree list, surfaces, and
+  // status counts. The refresh action runs it after its fetch; the
+  // project-refreshed listener runs it alone because the agent's ping
+  // already performed the fetch.
+  async function relistProject(repoPath: string) {
+    try {
+      const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repoPath });
+      setRepos((current) => current.map((item) => item.path === repoPath ? { ...item, worktrees } : item));
+    } catch (error) { setRepoErrors((current) => ({ ...current, [repoPath]: errorMessage(error) })); }
+    void refreshSurfaces(repoPath);
+    setStatusNonce((nonce) => nonce + 1);
+  }
   async function refreshProject() {
     const repo = activeRepo;
     if (!repo) return;
     await fetchProjectRemotes(repo.path);
-    try {
-      const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path });
-      setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item));
-    } catch (error) { setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); }
-    void refreshSurfaces(repo.path);
-    setStatusNonce((nonce) => nonce + 1);
+    await relistProject(repo.path);
   }
   async function refreshCommits(entry: HistoryEntry) {
     await fetchProjectRemotes(entry.repoPath);

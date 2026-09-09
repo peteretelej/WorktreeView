@@ -360,6 +360,20 @@ Resolving or reopening a thread is visible and reversible, so any agent
 may resolve any thread. Threads are one root plus flat replies: only a
 root accepts a reply, and only a root can be resolved.
 
+### Reactivity
+
+The app keeps its own UI current when agents act. After a successful
+comment mutation the running app refreshes the loaded review's comment
+stream, so an agent's create, reply, resolve, edit, or delete becomes
+visible to a human without a manual reload; after a completed
+`refresh_repo` the open repository's surfaces re-list, so a
+push-then-ping shows up the same way. Tool comments render under the
+token's agent name with the agent badge, like ingested findings, and the
+stream's author filter separates them. This reactivity is app behavior,
+not client-facing surface: there is no event stream or subscription for
+agents, and the synchronous tool result remains the only thing a client
+depends on.
+
 ### Conformance notes
 
 - SEP-2243: the `Mcp-Method`/`Mcp-Name` request headers are required on

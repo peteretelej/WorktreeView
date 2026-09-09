@@ -392,6 +392,10 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
             serde_json::json!({ "repo_path": repo_path }),
         );
     });
+    let comment_app_handle = app.handle().clone();
+    let comment_changes: transport::CommentSink = Arc::new(move |change| {
+        let _ = comment_app_handle.emit("comment-changed", change);
+    });
     let config = transport::ListenerConfig {
         enabled: settings.mcp_enabled,
         address: settings.mcp_listen_address.clone(),
@@ -405,6 +409,7 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
         &data_dir,
         arrivals,
         Arc::clone(&refreshes),
+        comment_changes,
         config,
     ))
     .map_err(|error| format!("Could not start the agent endpoint: {error}"))?;

@@ -28,7 +28,9 @@ COPY src ./src
 COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs src-tauri/tauri.conf.json ./src-tauri/
 COPY src-tauri/capabilities ./src-tauri/capabilities
 COPY src-tauri/icons ./src-tauri/icons
-COPY src-tauri/migrations/0001_init.sql ./src-tauri/migrations/0001_init.sql
+# The whole migrations directory: sqlx::migrate! embeds every .sql it
+# finds, so a build must never pin an explicit migration file list.
+COPY src-tauri/migrations/ ./src-tauri/migrations/
 COPY src-tauri/src/ ./src-tauri/src/
 COPY e2e ./e2e
 

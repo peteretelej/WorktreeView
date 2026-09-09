@@ -57,6 +57,25 @@ pub(crate) type ArrivalSink = Arc<dyn Fn(SubmissionArrival) + Send + Sync>;
 // like ArrivalSink so the refresh path is testable without an app.
 pub(crate) type RefreshSink = Arc<dyn Fn(&str) + Send + Sync>;
 
+// Webview notification pushed after a successful agent comment mutation on
+// the MCP face. Human IPC mutations announce nothing: the invoking renderer
+// owns its refetch, and a submission's arrival keeps announcing itself
+// through `submission-received`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct CommentChange {
+    pub(crate) repo_path: String,
+    pub(crate) base_sha: String,
+    pub(crate) target_key: String,
+    pub(crate) target_kind: String,
+    pub(crate) comment_id: i64,
+    pub(crate) action: &'static str,
+    pub(crate) agent_name: String,
+}
+
+// Announces a comment change (the `comment-changed` event); injected like
+// ArrivalSink so the tool handlers are testable without an app.
+pub(crate) type CommentSink = Arc<dyn Fn(CommentChange) + Send + Sync>;
+
 // Shared, live view of the listener for the Settings MCP section. The
 // startup path writes it and the get_mcp_status command reads it.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -93,12 +112,13 @@ pub(crate) struct ListenerConfig {
 
 #[derive(Clone)]
 pub(crate) struct TransportState {
-    // The MCP face shares the pool and the refresh sink; auth has already
+    // The MCP face shares the pool and the event sinks; auth has already
     // resolved the identity by the time it sees the state. All fields are
     // crate-visible so handler tests in sibling modules can build a state.
     pub(crate) pool: SqlitePool,
     pub(crate) arrivals: ArrivalSink,
     pub(crate) refreshes: RefreshSink,
+    pub(crate) comment_changes: CommentSink,
     pub(crate) status: McpStatusHandle,
 }
 
@@ -554,6 +574,7 @@ pub(crate) async fn start(
     data_dir: &Path,
     arrivals: ArrivalSink,
     refreshes: RefreshSink,
+    comment_changes: CommentSink,
     config: ListenerConfig,
 ) -> Result<McpStart, String> {
     let status = McpStatusHandle(Arc::new(Mutex::new(ListenerStatus {
@@ -563,7 +584,7 @@ pub(crate) async fn start(
         port: config.port,
         error: None,
     })));
-    let state = TransportState { pool, arrivals, refreshes, status: status.clone() };
+    let state = TransportState { pool, arrivals, refreshes, comment_changes, status: status.clone() };
     if !config.enabled {
         return Ok(McpStart { status, handle: None });
     }
@@ -647,6 +668,10 @@ mod tests {
         Arc::new(|_| {})
     }
 
+    fn noop_comment_changes() -> CommentSink {
+        Arc::new(|_| {})
+    }
+
     fn dummy_status() -> McpStatusHandle {
         McpStatusHandle(Arc::new(Mutex::new(ListenerStatus {
             enabled: true,
@@ -670,6 +695,7 @@ mod tests {
             pool,
             arrivals,
             refreshes: noop_refreshes(),
+            comment_changes: noop_comment_changes(),
             status: dummy_status(),
         };
         (state, secret)
@@ -976,9 +1002,16 @@ mod tests {
         let dir = crate::testutil::test_path("transport-start-configured");
         std::fs::create_dir_all(&dir).unwrap();
         let port = free_port();
-        let mcp = start(pool.clone(), &dir, Arc::new(|_| {}), noop_refreshes(), test_config(port))
-            .await
-            .unwrap();
+        let mcp = start(
+            pool.clone(),
+            &dir,
+            Arc::new(|_| {}),
+            noop_refreshes(),
+            noop_comment_changes(),
+            test_config(port),
+        )
+        .await
+        .unwrap();
         assert!(mcp.handle.is_some());
         let status = mcp.status.lock_status().clone();
         assert!(status.running);
@@ -1012,9 +1045,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let occupier = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = occupier.local_addr().unwrap().port();
-        let mcp = start(pool.clone(), &dir, Arc::new(|_| {}), noop_refreshes(), test_config(port))
-            .await
-            .unwrap();
+        let mcp = start(
+            pool.clone(),
+            &dir,
+            Arc::new(|_| {}),
+            noop_refreshes(),
+            noop_comment_changes(),
+            test_config(port),
+        )
+        .await
+        .unwrap();
         assert!(mcp.handle.is_none());
         let status = mcp.status.lock_status().clone();
         assert!(!status.running);
@@ -1040,6 +1080,7 @@ mod tests {
             &dir,
             Arc::new(|_| {}),
             noop_refreshes(),
+            noop_comment_changes(),
             ListenerConfig { enabled: false, address: "127.0.0.1".into(), port: free_port() },
         )
         .await
@@ -1096,7 +1137,7 @@ mod tests {
         let (arrivals, received) = recording_sink();
         let dir = crate::testutil::test_path("transport-socket");
         std::fs::create_dir_all(&dir).unwrap();
-        let mcp = start(pool, &dir, arrivals, noop_refreshes(), test_config(0))
+        let mcp = start(pool, &dir, arrivals, noop_refreshes(), noop_comment_changes(), test_config(0))
             .await
             .unwrap();
         let discovery: EndpointDiscovery =
@@ -1128,9 +1169,16 @@ mod tests {
         let (refreshes, announced) = recording_refreshes();
         let dir = crate::testutil::test_path("transport-socket-refresh-dir");
         std::fs::create_dir_all(&dir).unwrap();
-        let mcp = start(pool, &dir, Arc::new(|_| {}), refreshes, test_config(0))
-            .await
-            .unwrap();
+        let mcp = start(
+            pool,
+            &dir,
+            Arc::new(|_| {}),
+            refreshes,
+            noop_comment_changes(),
+            test_config(0),
+        )
+        .await
+        .unwrap();
         let discovery: EndpointDiscovery =
             serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
 

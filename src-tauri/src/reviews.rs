@@ -56,6 +56,14 @@ pub struct Comment {
     created_at: i64,
 }
 
+impl Comment {
+    // Read access for the transport's comment-change event; comment
+    // semantics stay behind the store layer.
+    pub(crate) fn id(&self) -> i64 {
+        self.id
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CommentDraft {
     body: String,
@@ -367,6 +375,36 @@ async fn comment_owner_token(pool: &SqlitePool, comment_id: i64) -> Result<Optio
         .bind(comment_id)
         .fetch_one(pool)
         .await
+}
+
+// The review identity behind a comment, for the transport's comment-change
+// event: the tool handlers know only a comment id. A delete reads it before
+// the row goes, so the join must not outlive the comment.
+pub(crate) struct ReviewIdentity {
+    pub(crate) repo_path: String,
+    pub(crate) base_sha: String,
+    pub(crate) target_key: String,
+    pub(crate) target_kind: String,
+}
+
+pub(crate) async fn review_identity_of_comment(
+    pool: &SqlitePool,
+    comment_id: i64,
+) -> Result<Option<ReviewIdentity>, sqlx::Error> {
+    let row: Option<(String, String, String, String)> = sqlx::query_as(
+        "SELECT reviews.repo_path, reviews.base_sha, reviews.target_key, reviews.target_kind \
+         FROM comments JOIN reviews ON reviews.id = comments.review_id \
+         WHERE comments.id = ?",
+    )
+    .bind(comment_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(repo_path, base_sha, target_key, target_kind)| ReviewIdentity {
+        repo_path,
+        base_sha,
+        target_key,
+        target_kind,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
