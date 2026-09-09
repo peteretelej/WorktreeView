@@ -247,15 +247,16 @@ The same listener serves a stateless MCP (Model Context Protocol) face at
 implementation the raw face uses. Authentication is the same single
 listener evaluation (same bearer tokens, same discovery file, same
 `401`/`-32001` shape); there is no second auth layer. The face implements
-the stateless subset of the MCP `2026-07-28` revision. Its validation is
-structural only (live endpoint checks); validation against real coding
-agents is pending.
+the stateless subset of the MCP `2026-07-28` revision plus the
+legacy-client shim described under Stateless shape. It is validated
+end-to-end with Codex 0.130; OpenCode 1.1.34 connects through the same
+shim (its revision predates per-request `_meta` versions).
 
 ### Stateless shape
 
-There is no `initialize` handshake and no session: this revision removed
-both, and every request is independent. Except for `server/discover`,
-every request carries its protocol version in its params `_meta`:
+There is no session: every request is independent and nothing is stored
+between requests. Tools requests carry their protocol version in params
+`_meta`:
 
 ```json
 {
@@ -268,11 +269,24 @@ every request carries its protocol version in its params `_meta`:
 }
 ```
 
-The face supports `2026-07-28`. A request carrying any other version is
-refused with `-32022`; a request without the field is refused with
-`-32600`. Responses are JSON; the face offers no SSE stream and nothing
-subscribes (`GET /mcp` answers `405`). Batching is not implemented: a
-batch request (a JSON array body) answers with a single `-32600`.
+The face supports `2026-07-28`. A request carrying any other explicit
+version is refused with `-32022`; a missing `_meta` field is accepted and
+treated as `2026-07-28` (clients on older revisions never send it).
+Responses are JSON; the face offers no SSE stream and nothing subscribes
+(`GET /mcp` answers `405`). Batching is not implemented: a batch request
+(a JSON array body) answers with a single `-32600`.
+
+Clients on pre-`2026-07-28` revisions negotiate a session at connect
+time; the face answers the handshake statelessly so they can proceed:
+
+- `initialize` answers
+  `{ "protocolVersion", "capabilities": { "tools": {} }, "serverInfo" }`.
+  A requested `params.protocolVersion` naming a known revision
+  (`2024-11-05`, `2025-03-26`, `2025-06-18`, `2026-07-28`) is echoed; an
+  absent or unknown one gets `2026-07-28`. No session id is issued.
+- `ping` answers the standard empty result `{}`.
+- Any notification (a request without an `id`) answers HTTP `202` with an
+  empty body and no JSON-RPC response.
 
 ### server/discover
 
@@ -382,6 +396,11 @@ depends on.
   This face routes from the JSON body and neither requires nor validates
   them; revisit only if a real client or intermediary is shown to require
   validation.
+- The `initialize`/`ping`/notification answers exist only to let
+  pre-2026-07-28 clients connect. The face still holds no sessions and
+  issues no `Mcp-Session-Id`: a legacy client must tolerate stateless
+  per-request connections and must not require an SSE stream (`GET`
+  answers `405`).
 - Connections are served one at a time and each connection is one request
   with a bounded 30 s stall window: concurrent agent calls queue behind
   each other. Agents doing parallel work should tolerate the latency.

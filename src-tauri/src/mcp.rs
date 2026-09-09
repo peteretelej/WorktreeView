@@ -18,12 +18,15 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;
 
-// The one protocol revision this face speaks, read from every request's
-// `_meta["io.modelcontextprotocol/protocolVersion"]` (the 2026-07-28
-// revision removed the initialize handshake: every request carries its
-// version instead).
+// The one protocol revision this face speaks. Tools requests carry it in
+// `_meta["io.modelcontextprotocol/protocolVersion"]`; a missing one is
+// treated as this revision.
 const PROTOCOL_VERSION: &str = "2026-07-28";
 const PROTOCOL_VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
+// Revisions an `initialize` client may name; a named one is echoed back,
+// anything else gets the supported revision.
+const KNOWN_PROTOCOL_VERSIONS: [&str; 4] =
+    ["2024-11-05", "2025-03-26", "2025-06-18", PROTOCOL_VERSION];
 // The spec's unsupported-version error.
 const UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
 // The tool set is static per boot, so a generous private cache hint is
@@ -186,6 +189,8 @@ pub(crate) async fn serve(
             "Batch requests are not supported; send one request at a time.",
         );
     }
+    // The id presence is read before the parsed body moves into the request.
+    let has_id = parsed.get("id").is_some();
     let request: IncomingRequest = match serde_json::from_value(parsed) {
         Ok(request) => request,
         Err(_) => {
@@ -205,10 +210,15 @@ pub(crate) async fn serve(
             "The request is not JSON-RPC 2.0.",
         );
     }
+    // A notification (no id member) expects no JSON-RPC answer: 202 with an
+    // empty body acknowledges receipt without inventing a response id.
+    if !has_id {
+        return StatusCode::ACCEPTED.into_response();
+    }
     // The discovery probe needs no protocol version: negotiating one is its
-    // purpose. Unknown and removed methods are refused before the version
-    // check, so a bare notification gets -32601, not a missing-version
-    // error; only the real tool methods must carry a supported version.
+    // purpose. Unknown and removed methods are refused before any version
+    // check; only the real tool methods consult the version, and a missing
+    // one counts as the supported revision.
     match request.method.as_str() {
         "server/discover" => {
             return rpc_result(
@@ -220,6 +230,24 @@ pub(crate) async fn serve(
                 }),
             );
         }
+        // Clients on pre-2026-07-28 revisions refuse to proceed without a
+        // successful handshake, so the face answers one: echo a revision the
+        // client named, default to the supported one, and store nothing.
+        "initialize" => {
+            let version = match request.params.get("protocolVersion").and_then(Value::as_str) {
+                Some(version) if KNOWN_PROTOCOL_VERSIONS.contains(&version) => version,
+                _ => PROTOCOL_VERSION,
+            };
+            return rpc_result(
+                &request.id,
+                json!({
+                    "protocolVersion": version,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": server_info(),
+                }),
+            );
+        }
+        "ping" => return rpc_result(&request.id, json!({})),
         "tools/list" | "tools/call" => {
             if let Err(response) = check_protocol_version(&request.id, &request.params) {
                 return response;
@@ -230,7 +258,7 @@ pub(crate) async fn serve(
                 &request.id,
                 StatusCode::OK,
                 METHOD_NOT_FOUND,
-                "Unknown method; the MCP face accepts server/discover, tools/list, and tools/call.",
+                "Unknown method; the MCP face accepts server/discover, initialize, ping, tools/list, and tools/call.",
             );
         }
     }
@@ -243,17 +271,15 @@ pub(crate) async fn serve(
     }
 }
 
+// Clients predating the per-request `_meta` version omit it entirely, so a
+// missing version counts as the supported revision; an explicit version
+// must name it exactly.
 fn check_protocol_version(id: &Value, params: &Value) -> Result<(), Response> {
-    let version = params
+    match params
         .get("_meta")
-        .and_then(|meta| meta.get(PROTOCOL_VERSION_KEY));
-    match version {
-        None => Err(rpc_error(
-            id,
-            StatusCode::OK,
-            INVALID_REQUEST,
-            "The request is missing _meta.\"io.modelcontextprotocol/protocolVersion\".",
-        )),
+        .and_then(|meta| meta.get(PROTOCOL_VERSION_KEY))
+    {
+        None => Ok(()),
         Some(version) if version.as_str() == Some(PROTOCOL_VERSION) => Ok(()),
         Some(_) => Err(rpc_error(
             id,
@@ -791,11 +817,13 @@ mod tests {
         mcp_body(json!(1), "tools/call", call_params(name, arguments))
     }
 
-    async fn post_mcp(
+    // A raw variant for responses that are not JSON (the 202 notification
+    // acknowledgment answers an empty body).
+    async fn post_mcp_bytes(
         state: &TransportState,
         token: Option<&str>,
         body: &str,
-    ) -> (StatusCode, Value) {
+    ) -> (StatusCode, Vec<u8>) {
         let mut builder = Request::builder().method("POST").uri("/mcp");
         if let Some(token) = token {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
@@ -805,7 +833,16 @@ mod tests {
         let response = handle(State(state.clone()), request).await;
         let status = response.status();
         let payload = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-        (status, serde_json::from_slice(&payload).unwrap())
+        (status, payload.to_vec())
+    }
+
+    async fn post_mcp(
+        state: &TransportState,
+        token: Option<&str>,
+        body: &str,
+    ) -> (StatusCode, Value) {
+        let (status, bytes) = post_mcp_bytes(state, token, body).await;
+        (status, serde_json::from_slice(&bytes).unwrap())
     }
 
     async fn call_tool_raw(
@@ -890,22 +927,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protocol_version_is_required_and_enforced() {
+    async fn missing_meta_version_defaults_and_explicit_versions_are_enforced() {
         let pool = test_pool().await;
         let (state, secret) = test_state(pool).await;
-        // Missing _meta version: an invalid request.
+        // A missing _meta version counts as the supported revision.
         let (_, payload) = post_mcp(
             &state,
             Some(&secret),
             &mcp_body(json!(1), "tools/list", json!({})),
         )
         .await;
-        assert_eq!(payload["error"]["code"], INVALID_REQUEST);
-        // An unsupported version carries its own error.
+        assert!(payload["result"]["tools"].is_array());
         let (_, payload) = post_mcp(
             &state,
             Some(&secret),
-            &mcp_body(json!(2), "tools/list", meta("2025-06-18")),
+            &mcp_body(json!(2), "tools/call", json!({ "name": "list_repos" })),
+        )
+        .await;
+        assert_eq!(payload["result"]["isError"], false);
+        // An explicit version must name the supported revision: even a known
+        // legacy revision is refused on tools requests.
+        let (_, payload) = post_mcp(
+            &state,
+            Some(&secret),
+            &mcp_body(json!(3), "tools/list", meta("2025-06-18")),
         )
         .await;
         assert_eq!(payload["error"]["code"], UNSUPPORTED_PROTOCOL_VERSION);
@@ -914,7 +959,7 @@ mod tests {
         let (_, payload) = post_mcp(
             &state,
             Some(&secret),
-            &mcp_body(json!(3), "tools/list", meta(PROTOCOL_VERSION)),
+            &mcp_body(json!(4), "tools/list", meta(PROTOCOL_VERSION)),
         )
         .await;
         assert!(payload["result"]["tools"].is_array());
@@ -949,10 +994,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_removed_methods_and_batches_are_refused() {
+    async fn unknown_methods_and_batches_are_still_refused() {
         let pool = test_pool().await;
         let (state, secret) = test_state(pool).await;
-        for method in ["initialize", "notifications/initialized", "ping", "resources/list"] {
+        for method in ["resources/list", "prompts/list", "completion/complete"] {
             let (_, payload) = post_mcp(
                 &state,
                 Some(&secret),
@@ -961,14 +1006,6 @@ mod tests {
             .await;
             assert_eq!(payload["error"]["code"], METHOD_NOT_FOUND, "{method}");
         }
-        // Notifications arrive without an id and still answer -32601.
-        let (_, payload) = post_mcp(
-            &state,
-            Some(&secret),
-            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-        )
-        .await;
-        assert_eq!(payload["error"]["code"], METHOD_NOT_FOUND);
         // Batching is out of scope: one request, one error.
         let (_, payload) = post_mcp(
             &state,
@@ -978,6 +1015,76 @@ mod tests {
         .await;
         assert_eq!(payload["error"]["code"], INVALID_REQUEST);
         assert_eq!(payload["id"], Value::Null);
+    }
+
+    // Clients on pre-2026-07-28 revisions cannot connect without a
+    // successful initialize: the face answers one, echoing a revision the
+    // client named, still without storing any session state.
+    #[tokio::test]
+    async fn initialize_echoes_known_revisions_and_defaults_the_rest() {
+        let pool = test_pool().await;
+        let (state, secret) = test_state(pool).await;
+        for version in KNOWN_PROTOCOL_VERSIONS {
+            let (_, payload) = post_mcp(
+                &state,
+                Some(&secret),
+                &mcp_body(json!(1), "initialize", json!({ "protocolVersion": version })),
+            )
+            .await;
+            assert_eq!(payload["result"]["protocolVersion"], json!(version), "{version}");
+            assert_eq!(payload["result"]["serverInfo"]["name"], "worktreeview");
+            assert_eq!(
+                payload["result"]["serverInfo"]["version"],
+                env!("CARGO_PKG_VERSION")
+            );
+            assert!(payload["result"]["capabilities"]["tools"].is_object());
+        }
+        for version in ["1999-01-01", "0000-not-a-revision"] {
+            let (_, payload) = post_mcp(
+                &state,
+                Some(&secret),
+                &mcp_body(json!(2), "initialize", json!({ "protocolVersion": version })),
+            )
+            .await;
+            assert_eq!(
+                payload["result"]["protocolVersion"],
+                json!(PROTOCOL_VERSION),
+                "{version}"
+            );
+        }
+        // An absent version gets the supported revision too.
+        let (_, payload) = post_mcp(
+            &state,
+            Some(&secret),
+            &mcp_body(json!(3), "initialize", json!({})),
+        )
+        .await;
+        assert_eq!(payload["result"]["protocolVersion"], json!(PROTOCOL_VERSION));
+    }
+
+    #[tokio::test]
+    async fn ping_answers_the_standard_empty_result() {
+        let pool = test_pool().await;
+        let (state, secret) = test_state(pool).await;
+        let (status, payload) =
+            post_mcp(&state, Some(&secret), &mcp_body(json!(7), "ping", json!({}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["id"], 7);
+        assert_eq!(payload["result"], json!({}));
+    }
+
+    // Any request without an id is a notification: 202 with an empty body,
+    // never a JSON-RPC error, whatever the method.
+    #[tokio::test]
+    async fn notifications_answer_202_with_an_empty_body() {
+        let pool = test_pool().await;
+        let (state, secret) = test_state(pool).await;
+        for method in ["notifications/initialized", "notifications/cancelled"] {
+            let body = format!(r#"{{"jsonrpc":"2.0","method":"{method}"}}"#);
+            let (status, bytes) = post_mcp_bytes(&state, Some(&secret), &body).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{method}");
+            assert!(bytes.is_empty(), "{method}");
+        }
     }
 
     #[tokio::test]
