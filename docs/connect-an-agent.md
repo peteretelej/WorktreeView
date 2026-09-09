@@ -38,3 +38,19 @@ Deleting a token in Settings refuses it immediately; comments it
 authored remain visible as history and can no longer be mutated by any
 agent. The protocol details for both faces, including error semantics
 and size caps, are in [agent-submissions.md](agent-submissions.md).
+
+## The agent skill
+
+The repo ships an installable skill that teaches agents all of the above
+plus the day-to-day workflow (adding projects, refreshing, reading reviews,
+posting and responding to comments) so the setup steps become a checklist
+instead of prose. It follows the Agent Skills standard:
+
+```sh
+npx skills add peteretelej/WorktreeView
+```
+
+or copy the folder manually into your agents' skills directory
+(for example `~/.agents/skills/worktreeview/`) from
+`skills/worktreeview/` in this repository. The MCP endpoint remains fully
+usable without the skill; it only removes the guesswork.
