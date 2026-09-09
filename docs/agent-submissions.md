@@ -281,9 +281,10 @@ time; the face answers the handshake statelessly so they can proceed:
 
 - `initialize` answers
   `{ "protocolVersion", "capabilities": { "tools": {} }, "serverInfo" }`.
-  A requested `params.protocolVersion` naming a known revision
-  (`2024-11-05`, `2025-03-26`, `2025-06-18`, `2026-07-28`) is echoed; an
-  absent or unknown one gets `2026-07-28`. No session id is issued.
+  A requested `params.protocolVersion` that is a well-formed revision
+  string (for example `2024-11-05`, `2025-06-18`, or `2025-11-25`) is
+  echoed; an absent or malformed one gets `2026-07-28`. No session id is
+  issued.
 - `ping` answers the standard empty result `{}`.
 - Any notification (a request without an `id`) answers HTTP `202` with an
   empty body and no JSON-RPC response.
