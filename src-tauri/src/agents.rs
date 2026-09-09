@@ -6,7 +6,7 @@ use sqlx::{Row, SqlitePool};
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const MAX_TOKEN_NAME_CHARS: usize = 200;
-const DEFAULT_TOKEN_NAME: &str = "default";
+const DEFAULT_TOKEN_NAME: &str = "agent";
 
 // The authenticated caller resolved from a bearer secret: only the token row
 // id and its display name leave this module, never the hash or secret.
