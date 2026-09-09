@@ -4,6 +4,7 @@ use crate::overview::branch_inventory;
 use crate::reviews::{
     create_unbound_comment_in_pool, delete_comment_in_pool, edit_comment_in_pool,
     list_comments_in_pool, list_submissions_in_pool, reply_comment_in_pool,
+    MAX_AGENT_MODEL_CHARS,
     review_identity_of_comment, set_comment_resolved_in_pool, Actor,
 };
 use crate::store::list_repo_rows_in_pool;
@@ -132,6 +133,7 @@ struct CreateCommentArgs {
     target_kind: String,
     body: String,
     severity: Option<String>,
+    author_model: Option<String>,
     file_path: Option<String>,
     side: Option<String>,
     start_line: Option<u32>,
@@ -143,6 +145,7 @@ struct CreateCommentArgs {
 struct ReplyCommentArgs {
     parent_comment_id: i64,
     body: String,
+    author_model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -361,6 +364,11 @@ fn tool_descriptors() -> Value {
                     "target_kind": { "type": "string", "enum": ["worktree", "head"] },
                     "body": { "type": "string", "description": "Non-empty comment body." },
                     "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+                    "author_model": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "description": "Optional self-reported model label shown next to your agent name, e.g. \"GPT Luna medium\".",
+                    },
                     "file_path": {
                         "type": "string",
                         "description": "Repo-relative file path; omit for a review-level comment.",
@@ -386,6 +394,11 @@ fn tool_descriptors() -> Value {
                         "description": "The thread's root comment id.",
                     },
                     "body": { "type": "string", "description": "Non-empty reply body." },
+                    "author_model": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "description": "Optional self-reported model label shown next to your agent name.",
+                    },
                 }),
                 &["parent_comment_id", "body"],
             ),
@@ -597,6 +610,7 @@ async fn create_comment(
     ensure_repo_open(state, &args.repo_path)
         .await
         .map_err(|error| error.message)?;
+    let author_model = normalize_model_label(args.author_model.as_deref())?;
     let comment = create_unbound_comment_in_pool(
         &state.pool,
         &args.repo_path,
@@ -610,6 +624,7 @@ async fn create_comment(
         args.start_line,
         args.end_line,
         &Actor::Agent(identity.clone()),
+        author_model.as_deref(),
     )
     .await
     .map_err(|error| error.message)?;
@@ -630,17 +645,34 @@ async fn reply_comment(
     args: ReplyCommentArgs,
     identity: &AgentIdentity,
 ) -> ToolOutcome {
+    let author_model = normalize_model_label(args.author_model.as_deref())?;
     let comment = reply_comment_in_pool(
         &state.pool,
         args.parent_comment_id,
         &args.body,
         None,
         &Actor::Agent(identity.clone()),
+        author_model.as_deref(),
     )
     .await
     .map_err(|error| error.message)?;
     announce_comment_change(state, comment.id(), "replied", &identity.name).await;
     payload(comment)
+}
+
+// The model label is self-reported and display-only: it renders next to
+// the token's name and never affects ownership or authentication.
+fn normalize_model_label(raw: Option<&str>) -> Result<Option<String>, String> {
+    match raw.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(label) if label.chars().count() <= MAX_AGENT_MODEL_CHARS => {
+            Ok(Some(label.to_string()))
+        }
+        Some(_) => Err(format!(
+            "The author_model label exceeds {} characters.",
+            MAX_AGENT_MODEL_CHARS
+        )),
+    }
 }
 
 async fn resolve_thread(
@@ -1427,6 +1459,66 @@ mod tests {
     // Deleting the authoring token detaches its comments (author_token_id
     // drops to null), so they stay visible but no agent can mutate them.
     #[tokio::test]
+    async fn comment_writes_accept_a_self_reported_model_label() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let (state, secret) = test_state(pool.clone()).await;
+        let root_id = seed_review_with_comment(&pool, &state, &secret).await;
+
+        let created = call_tool_raw(
+            &state,
+            &secret,
+            "reply_comment",
+            json!({ "parent_comment_id": root_id, "body": "from the frontier model", "author_model": "  GPT Luna medium  " }),
+        )
+        .await;
+        assert_eq!(created["result"]["isError"], false);
+        let reply: serde_json::Value = result_text(&created);
+        assert_eq!(reply["author_model"], json!("GPT Luna medium"));
+
+        let listed = call_tool_raw(
+            &state,
+            &secret,
+            "list_comments",
+            json!({ "repo_path": "/demo", "base_sha": "base", "target_key": "/demo", "target_kind": "worktree" }),
+        )
+        .await;
+        let comments: serde_json::Value = result_text(&listed);
+        let labeled = comments
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|comment| comment["id"] == reply["id"])
+            .unwrap();
+        assert_eq!(labeled["author_name"], json!("mcp-agent"));
+        assert_eq!(labeled["author_model"], json!("GPT Luna medium"));
+
+        // A blank label is stored as absent; over-long labels are shape errors.
+        let blank = call_tool_raw(
+            &state,
+            &secret,
+            "reply_comment",
+            json!({ "parent_comment_id": root_id, "body": "no label", "author_model": "   " }),
+        )
+        .await;
+        assert_eq!(blank["result"]["isError"], false);
+        let no_label: serde_json::Value = result_text(&blank);
+        assert_eq!(no_label["author_model"], serde_json::Value::Null);
+        let long = call_tool_raw(
+            &state,
+            &secret,
+            "reply_comment",
+            json!({ "parent_comment_id": root_id, "body": "too long", "author_model": "x".repeat(201) }),
+        )
+        .await;
+        assert_eq!(long["result"]["isError"], true);
+        assert!(long["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("exceeds 200 characters"));
+    }
+
+    #[tokio::test]
     async fn deleting_the_authoring_token_leaves_its_comments_unowned() {
         let pool = test_pool().await;
         seed_repo(&pool, "/demo").await;
@@ -1499,7 +1591,7 @@ mod tests {
 
         // The human path: the shared implementations as the IPC commands
         // call them, with no event of any kind.
-        crate::reviews::reply_comment_in_pool(&pool, root_id, "human reply", None, &Actor::Human)
+        crate::reviews::reply_comment_in_pool(&pool, root_id, "human reply", None, &Actor::Human, None)
             .await
             .unwrap();
         crate::reviews::set_comment_resolved_in_pool(&pool, root_id, true, &Actor::Human)

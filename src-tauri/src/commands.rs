@@ -433,6 +433,7 @@ pub(crate) async fn create_comment(
         &target_kind,
         &draft,
         &Actor::Human,
+        None,
     )
     .await
 }
@@ -466,7 +467,7 @@ pub(crate) async fn reply_comment(
     severity: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Comment, CommandError> {
-    reply_comment_in_pool(&state.pool, parent_id, &body, severity, &Actor::Human).await
+    reply_comment_in_pool(&state.pool, parent_id, &body, severity, &Actor::Human, None).await
 }
 
 #[tauri::command]

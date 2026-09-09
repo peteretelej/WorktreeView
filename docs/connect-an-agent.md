@@ -24,7 +24,9 @@ across restarts; the file is rewritten each boot.
    deleted independently.
 2. Point the client's MCP server entry at
    `http://127.0.0.1:<port>/mcp` with the header
-   `Authorization: Bearer <secret>`. Clients that speak the stateless
+   `Authorization: Bearer <secret>`. Comment writes accept an optional
+   self-reported `author_model` label ("GPT Luna medium") shown next to
+   the agent name, so one token can distinguish the models it runs. Clients that speak the stateless
    2026-07-28 MCP revision connect directly; older revisions connect
    through the stateless handshake answer (see the conformance notes in
    [agent-submissions.md](agent-submissions.md)).

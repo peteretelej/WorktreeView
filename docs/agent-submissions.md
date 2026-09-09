@@ -351,8 +351,8 @@ the transport layer (HTTP 401, `-32001`).
 | `list_review_targets` | `repo_path` | `worktrees` (`path`, `branch`, `head`), `branches` and `remote_branches` (`ref_name`, `head`, `author`, `subject`, `commit_date`, `upstream`, `ahead`, `behind`) | unknown repo |
 | `list_comments` | `repo_path`, `base_sha`, `target_key`, `target_kind` | array of stored comments with anchor fields as stored | - |
 | `list_submissions` | `repo_path`, `base_sha`, `target_key`, `target_kind` | array of stored submissions with typed `sections` | - |
-| `create_comment` | `repo_path`, `base_sha`, `target_key`, `target_kind`, `body`; optional `severity` (`P0`-`P3`), `file_path`, `side` (`LEFT`/`RIGHT`), `start_line`, `end_line` | the stored comment | unknown repo; shape violations (empty body, bad severity, malformed anchor) |
-| `reply_comment` | `parent_comment_id`, `body` | the stored reply | unknown comment; replying to a reply |
+| `create_comment` | `repo_path`, `base_sha`, `target_key`, `target_kind`, `body`; optional `severity` (`P0`-`P3`), `author_model`, `file_path`, `side` (`LEFT`/`RIGHT`), `start_line`, `end_line` | the stored comment | unknown repo; shape violations (empty body, bad severity, malformed anchor) |
+| `reply_comment` | `parent_comment_id`, `body`; optional `author_model` | the stored reply | unknown comment; replying to a reply |
 | `resolve_thread` | `root_comment_id`, `resolved` | the updated root comment | unknown comment; resolving a reply |
 | `edit_own_comment` | `comment_id`, `body` | the updated comment | unknown comment; not your comment |
 | `delete_own_comment` | `comment_id` | `{ "deleted": true }`; a root delete also removes its replies | unknown comment; not your comment |
@@ -371,7 +371,11 @@ against live Git (that runs only on the human review path).
 ### Identity and ownership
 
 Every MCP call is attributed to its bearer token: created comments record
-the token's name and id. An agent edits and deletes only comments authored
+the token's name and id. A write may also carry an optional self-reported
+`author_model` label (at most 200 characters, whitespace-trimmed) that
+renders next to the agent name, so one token can attribute comments to the
+different models it runs ("codex (GPT Luna medium)"). The label is
+display-only: it is never authenticated and never affects ownership. An agent edits and deletes only comments authored
 through its own token; human comments and legacy comments with no owning
 token are never agent-mutable. The refusal is an `isError` result carrying
 "Only the agent token that authored a comment can edit or delete it."

@@ -1030,7 +1030,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(default_row, ("default".into(), true));
+        assert_eq!(default_row, ("agent".into(), true));
         mcp.handle.unwrap().shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }
