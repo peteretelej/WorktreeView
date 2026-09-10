@@ -43,6 +43,7 @@ jobs:
 
       - name: Set app version from tag
         timeout-minutes: 2
+        shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
           VERSION="$version" node -e '
