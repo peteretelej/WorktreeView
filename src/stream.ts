@@ -9,6 +9,32 @@ import { pairHunkLines, type DiffLine, type HunkLike, type PatchGap } from "./di
 // control; taller gaps keep the regular control.
 export const SLIM_GAP_MAX_LINES = 3;
 
+// Past this many rows the pane declines to render and shows a notice with
+// open-externally actions: a bounded freeze guard for pathological files,
+// not a memory optimization.
+export const MAX_RENDERED_ROWS = 50_000;
+
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+  ico: "image/x-icon",
+  avif: "image/avif",
+  svg: "image/svg+xml",
+};
+
+// The MIME type for renderable image assets, or null when the path is not
+// one; used to preview images the diff cannot show.
+export function imageMimeForPath(path: string): string | null {
+  const name = path.split(/[\/]/).pop() ?? "";
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return null;
+  return IMAGE_MIME_BY_EXTENSION[name.slice(dot + 1).toLowerCase()] ?? null;
+}
+
 export type HeaderRow = { kind: "header"; header: string; hunkIndex: number };
 export type LineRow = { kind: "line"; line: DiffLine; hunkIndex: number };
 export type SplitRow = { kind: "split"; old: DiffLine | null; next: DiffLine | null; hunkIndex: number };
@@ -18,13 +44,17 @@ export type RowSpec = HeaderRow | LineRow | SplitRow | GapRow;
 // Flattens a patch into one continuous row stream. `expandedHunks` is the
 // patch after hunksWithExpandedGaps, so expanded gap lines already sit in
 // their host hunks; unexpanded gaps render inline (a leading gap ahead of
-// the first header, between/trailing gaps after their host hunk).
+// the first header, between/trailing gaps after their host hunk). A hunk
+// header only marks a seam: once the gap above a hunk is expanded the
+// content joins seamlessly and the header would read as a leftover gap.
 export function buildPatchRows(expandedHunks: HunkLike[], gaps: PatchGap[], expanded: ReadonlySet<string>, contentLines: string[] | null, split: boolean): RowSpec[] {
   const rows: RowSpec[] = [];
   expandedHunks.forEach((hunk, index) => {
     const leading = index === 0 ? gaps.find((gap) => gap.before) : undefined;
     if (leading && (!expanded.has(leading.id) || contentLines === null)) rows.push({ kind: "gap", gap: leading, slim: leading.lines <= SLIM_GAP_MAX_LINES });
-    rows.push({ kind: "header", header: hunk.header, hunkIndex: index });
+    const seamAbove = index === 0 ? leading : gaps.find((gap) => !gap.before && gap.hostHunk === index - 1);
+    const joinedAbove = seamAbove !== undefined && expanded.has(seamAbove.id) && contentLines !== null;
+    if (!joinedAbove) rows.push({ kind: "header", header: hunk.header, hunkIndex: index });
     if (split) {
       for (const pair of pairHunkLines(hunk.lines)) rows.push({ kind: "split", old: pair.old, next: pair.new, hunkIndex: index });
     } else {
@@ -44,89 +74,4 @@ export function buildPatchRows(expandedHunks: HunkLike[], gaps: PatchGap[], expa
 // lookup rides the same path as patch lines.
 export function buildFileRows(contentLines: string[]): RowSpec[] {
   return contentLines.map((text, index) => ({ kind: "line" as const, line: { text: ` ${text}`, oldLine: null, newLine: index + 1 }, hunkIndex: 0 }));
-}
-
-// Heights of the rows mounted in a window are measured after paint;
-// unmounted rows ride the default estimate. Fixed-height rows (the
-// default wrap-off case) never measure, so their model is exact from the
-// first frame. Offsets come from a prefix-sum array rebuilt lazily: rows
-// mutate rarely (measure, reset, resize) and offsets are queried on every
-// scroll frame.
-export type HeightModel = {
-  count: number;
-  /** Records a measured height; returns true when it changed the model. */
-  measure(index: number, height: number): boolean;
-  reset(): void;
-  offset(index: number): number;
-  total(): number;
-  indexAt(offset: number): number;
-};
-
-export function createHeightModel(count: number, defaultHeight: number): HeightModel {
-  const measured = new Map<number, number>();
-  let prefix = buildPrefix();
-  let dirty = false;
-
-  function buildPrefix(): Float64Array {
-    const sums = new Float64Array(count + 1);
-    for (let index = 0; index < count; index += 1) sums[index + 1] = sums[index] + (measured.get(index) ?? defaultHeight);
-    return sums;
-  }
-  function ensurePrefix() {
-    if (dirty) {
-      prefix = buildPrefix();
-      dirty = false;
-    }
-  }
-
-  return {
-    count,
-    measure(index, height) {
-      const rounded = Math.max(1, Math.round(height * 100) / 100);
-      const previous = measured.get(index);
-      if (previous !== undefined && Math.abs(previous - rounded) < 0.5) return false;
-      measured.set(index, rounded);
-      dirty = true;
-      return true;
-    },
-    reset() {
-      measured.clear();
-      dirty = true;
-    },
-    offset(index) {
-      ensurePrefix();
-      return prefix[Math.max(0, Math.min(index, count))];
-    },
-    total() {
-      ensurePrefix();
-      return prefix[count];
-    },
-    indexAt(offset) {
-      ensurePrefix();
-      let low = 0;
-      let high = count;
-      while (low + 1 < high) {
-        const mid = (low + high) >> 1;
-        if (prefix[mid] <= offset) low = mid;
-        else high = mid;
-      }
-      return low;
-    },
-  };
-}
-
-// The mounted row range for a scroll position, padded by whole rows of
-// overscan on both sides.
-export type RowWindow = { start: number; end: number };
-
-export function computeWindow(model: HeightModel, scrollTop: number, viewportHeight: number, overscan: number): RowWindow {
-  if (model.count === 0) return { start: 0, end: 0 };
-  const top = Math.max(0, scrollTop - overscan);
-  const bottom = scrollTop + viewportHeight + overscan;
-  return { start: model.indexAt(top), end: Math.min(model.count, model.indexAt(bottom) + 1) };
-}
-
-// Where to scroll so `index` sits `lead` pixels below the viewport top.
-export function scrollTopForRow(model: HeightModel, index: number, lead: number): number {
-  return Math.max(0, model.offset(Math.max(0, Math.min(index, model.count - 1))) - lead);
 }

@@ -17,7 +17,8 @@ use commands::{
     fetch_project, get_branch_inventory, get_mcp_status, get_settings, list_agent_tokens,
     list_comments, list_commits, list_refs, list_repos, list_review_changes, list_submissions,
     list_surfaces, list_worktree_status, list_worktrees, match_comment_anchors, open_repo,
-    open_review_file, read_review_file, read_review_patch, remove_repo, reply_comment,
+    open_review_file, read_review_file, read_review_file_bytes, read_review_patch,
+    remove_repo, reply_comment,
     delete_agent_token, set_comment_resolved, set_repo_pinned, set_settings, set_surface_pinned,
 };
 use serde::Serialize;
@@ -265,7 +266,7 @@ pub fn run() {
             list_review_changes,
             list_surfaces,
             read_review_patch,
-            read_review_file,
+            read_review_file, read_review_file_bytes,
             open_review_file,
             get_settings,
             set_settings,

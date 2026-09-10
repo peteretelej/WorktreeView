@@ -23,3 +23,6 @@ artifacts/tauri-e2e/
 *.njsproj
 *.sln
 *.sw?
+
+# throwaway desktop-e2e fixture repos
+.e2e-fixture/

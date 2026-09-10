@@ -8,8 +8,9 @@ use crate::git::{
 };
 use crate::overview::{branch_inventory, BranchInventory};
 use crate::review::{
-    commit_detail, commit_page, refs_inventory, review_changes, review_file_content, review_patch,
-    CommitDetail, FileContent, FilePatch, RefInventory, ReviewIndex,
+    commit_detail, commit_page, refs_inventory, review_changes, review_file_bytes,
+    review_file_content, review_patch, CommitDetail, FileContent, FilePatch, RefInventory,
+    ReviewIndex,
 };
 use crate::retrospection::{list_surfaces_in_pool, set_surface_pinned_in_pool, SurfaceListing};
 use crate::reviews::{
@@ -359,6 +360,32 @@ pub(crate) async fn read_review_file(
         untracked,
     )
     .await
+}
+
+// The reviewed file's raw bytes on the patch's new side: renderable assets
+// (images) need them without the binary check or UTF-8 decode. Same review
+// identity arguments as the text read.
+#[tauri::command]
+pub(crate) async fn read_review_file_bytes(
+    path: String,
+    base: String,
+    head_ref: Option<String>,
+    committed_only: bool,
+    reversed: bool,
+    file: String,
+    untracked: bool,
+) -> Result<tauri::ipc::Response, CommandError> {
+    let bytes = review_file_bytes(
+        path,
+        base,
+        head_ref,
+        committed_only,
+        reversed,
+        file,
+        untracked,
+    )
+    .await?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 // One commit's identity by rev (abbreviated hashes included): the ref picker's

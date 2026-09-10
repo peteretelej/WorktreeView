@@ -38,10 +38,18 @@ receives normalized domain data through narrow Tauri commands.
 
 ## Performance
 
-Very large repositories and diffs are a hard requirement. Bound process output
-and support cancellation in Rust. Use virtualized or windowed rendering for
-large frontend collections and diffs; do not render a full large diff into the
-DOM.
+Very large repositories and diffs must open and stay usable. On the Rust
+side that means bounded, cancellable Git work (output ceilings, deadlines,
+no in-process Git). On the webview side, stability of the reading
+experience outranks DOM size: render diffs and files whole in native flow
+and let the browser scroll them. The accepted cost of large files is
+open-time CPU and RAM scaling with size, bounded by the 16 MiB output
+ceiling. Do not add virtualization, windowing, measurement, or scroll
+compensation machinery: it requires a measured, reproducible problem on a
+shipping engine (WebView2), user sign-off, and platform features (CSS)
+preferred over custom scroll code. When a performance wish arrives without
+an accepted cost, clarify the cost budget and the non-negotiables before
+choosing a mechanism.
 
 ## Docs
 

@@ -263,13 +263,16 @@ describe("bundled desktop lifecycle", () => {
   it("opens a worktree review and changes scope and base", async () => {
     const repository = path.join(fixtureRoot, "review-repository");
     createRepository(repository);
-    writeFileSync(path.join(repository, "README.md"), "main\n");
+    // README carries a shared filler body so the worktree's scattered edits
+    // diff as nine separate change regions for the navigation assertions.
+    const mainReadmeLines = ["main", "", ...Array.from({ length: 192 }, (_, index) => `filler-${index + 3}`)];
+    writeFileSync(path.join(repository, "README.md"), mainReadmeLines.join("\n") + "\n");
     writeFileSync(path.join(repository, ".gitignore"), "ignored.txt\n");
     git(["add", "README.md", ".gitignore"], repository);
     git(["-c", "user.name=WorktreeView E2E", "-c", "user.email=e2e@example.invalid", "commit", "-q", "-m", "main file"], repository);
     git(["checkout", "-q", "-b", "feature"], repository);
     writeFileSync(path.join(repository, "feature.txt"), "feature committed\n");
-    writeFileSync(path.join(repository, "large-hunk.txt"), Array.from({ length: 1200 }, (_, index) => `large line ${index + 1}`).join("\n") + "\n");
+    writeFileSync(path.join(repository, "large-hunk.txt"), Array.from({ length: 6000 }, (_, index) => `large line ${index + 1}`).join("\n") + "\n");
     git(["add", "feature.txt", "large-hunk.txt"], repository);
     git(["-c", "user.name=WorktreeView E2E", "-c", "user.email=e2e@example.invalid", "commit", "-q", "-m", "feature"], repository);
     git(["checkout", "-q", "main"], repository);
@@ -281,9 +284,23 @@ describe("bundled desktop lifecycle", () => {
     for (let index = 1; index <= 120; index += 1) git(["branch", `review-base-${String(index).padStart(3, "0")}`], repository);
     const worktree = path.join(fixtureRoot, "review-feature");
     git(["worktree", "add", "-q", worktree, "feature"], repository);
-    writeFileSync(path.join(worktree, "README.md"), "main\nuncommitted\n");
+    // Nine pure insertions (line 2, then every 24th line) into the shared
+    // filler body: nine separate change regions for the navigation steps.
+    const insertionLines = new Set([2, 26, 50, 74, 98, 122, 146, 170, 194]);
+    const worktreeReadmeLines = [];
+    let source = 0;
+    for (let line = 1; line <= 194; line += 1) {
+      if (insertionLines.has(line)) worktreeReadmeLines.push(line === 2 ? "uncommitted" : `scattered-${line}`);
+      else if (source < mainReadmeLines.length) worktreeReadmeLines.push(mainReadmeLines[source++]);
+    }
+    while (source < mainReadmeLines.length) worktreeReadmeLines.push(mainReadmeLines[source++]);
+    writeFileSync(path.join(worktree, "README.md"), worktreeReadmeLines.join("\n") + "\n");
     writeFileSync(path.join(worktree, "untracked.txt"), "untracked\n");
     writeFileSync(path.join(worktree, "ignored.txt"), "must not appear\n");
+    // A renderable image asset and a file past the render cap, both
+    // untracked so the review counts stay untouched.
+    writeFileSync(path.join(worktree, "zz-tiny.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"));
+    writeFileSync(path.join(worktree, "zz-capped.txt"), Array.from({ length: 51000 }, (_, index) => `cap line ${index + 1}`).join("\n") + "\n");
     const switchRepository = path.join(fixtureRoot, "review-switch-repository");
     createRepository(switchRepository);
     select(repository);
@@ -292,9 +309,9 @@ describe("bundled desktop lifecycle", () => {
     await expect(featureRow).toBeDisplayed();
     await featureRow.$(".branch-title").click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
-    await expect($(".review-counts")).toHaveText("4 files, +1202 -0");
+    await expect($(".review-counts")).toHaveText("6 files, +6010 -0");
     const initialFiles = await browser.execute(() => Array.from(document.querySelectorAll(".file-row span"), (file) => file.textContent ?? ""));
-    assert.deepEqual(initialFiles.sort(), ["README.md", "feature.txt", "large-hunk.txt", "untracked.txt"].sort());
+    assert.deepEqual(initialFiles.sort(), ["README.md", "feature.txt", "large-hunk.txt", "untracked.txt", "zz-capped.txt", "zz-tiny.png"].sort());
     assert.equal(await $("span=ignored.txt").isExisting(), false);
 
     select(switchRepository);
@@ -309,7 +326,7 @@ describe("bundled desktop lifecycle", () => {
     await worktreePaletteResult.click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await expect($(".review-heading h1")).toHaveText("feature");
-    await expect($(".review-counts")).toHaveText("4 files, +1202 -0");
+    await expect($(".review-counts")).toHaveText("6 files, +6010 -0");
 
     await $('button[aria-label="Find repositories and worktrees"]').click();
     await $(".palette-input-row input").setValue("review-switch-repository");
@@ -326,7 +343,7 @@ describe("bundled desktop lifecycle", () => {
     await expect(reopenedWorktreePaletteResult).toBeDisplayed();
     await reopenedWorktreePaletteResult.click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
-    await expect($(".review-counts")).toHaveText("4 files, +1202 -0");
+    await expect($(".review-counts")).toHaveText("6 files, +6010 -0");
 
     const baseSearch = await $('input[aria-controls="review-base-options"]');
     await baseSearch.click();
@@ -345,19 +362,19 @@ describe("bundled desktop lifecycle", () => {
     assert.equal(await $("span=README.md").isExisting(), false);
     await expect($("span=feature.txt")).toBeDisplayed();
     await expect($("span=large-hunk.txt")).toBeDisplayed();
-    await expect($(".review-counts")).toHaveText("2 files, +1201 -0");
+    await expect($(".review-counts")).toHaveText("2 files, +6001 -0");
     await $('button=All changes').click();
     await expect($("span=untracked.txt")).toBeDisplayed();
     await expect($("span=README.md")).toBeDisplayed();
     assert.equal(await $("span=ignored.txt").isExisting(), false);
-    await expect($(".review-counts")).toHaveText("4 files, +1202 -0");
+    await expect($(".review-counts")).toHaveText("6 files, +6010 -0");
     const trackedFile = await $('//button[contains(@class, "file-row")][.//span[normalize-space()="README.md"]]');
     await expect(trackedFile).toBeDisplayed();
     await trackedFile.click();
     await expect($('//code[contains(., "uncommitted")]')).toBeDisplayed();
     const readmeGutters = await browser.execute(() => Array.from(document.querySelectorAll(".diff-line"), (line) =>
       Array.from(line.querySelectorAll(".line-number"), (gutter) => gutter.textContent?.trim() ?? "")));
-    assert.deepEqual(readmeGutters, [["1", "1"], ["", "2"]]);
+    assert.deepEqual(readmeGutters.slice(0, 2), [["1", "1"], ["", "2"]]);
 
     const largeFile = await $('//button[contains(@class, "file-row")][.//span[normalize-space()="large-hunk.txt"]]');
     await largeFile.click();
@@ -375,22 +392,91 @@ describe("bundled desktop lifecycle", () => {
     await browser.waitUntil(async () => await browser.execute(() => document.activeElement?.querySelector("span")?.textContent) === "large-hunk.txt");
     await expect(largeFile).toHaveAttribute("aria-selected", "true");
     await browser.waitUntil(async () => await browser.execute(() => document.querySelector(".patch-heading code")?.textContent) === "large-hunk.txt");
-    // The windowed stream keeps the DOM bounded: the 1200-line patch mounts
-    // only the rows around the viewport, and scrolling slides the window.
+    // The whole stream renders in native flow: the full 6000-line patch is
+    // in the DOM exactly once, and native scrolling covers it end to end.
     const streamGutters = () => browser.execute(() => Array.from(document.querySelectorAll(".diff-line"), (line) =>
       Array.from(line.querySelectorAll(".line-number"), (gutter) => gutter.textContent?.trim() ?? "")));
-    await browser.waitUntil(async () => (await $$(".diff-line")).length > 0);
-    const mountedBefore = await browser.execute(() => document.querySelectorAll(".diff-line").length);
-    assert.ok(mountedBefore < 1200, `expected a bounded stream window, mounted ${mountedBefore}`);
+    await browser.waitUntil(async () => (await $$(".diff-line")).length === 6000);
     let largeGutters = await streamGutters();
     assert.deepEqual(largeGutters[0], ["", "1"]);
+    await browser.execute(() => { const scroll = document.querySelector(".patch-scroll"); if (scroll) scroll.scrollTop += 2000; });
+    await browser.pause(300);
+    await browser.execute(() => { const scroll = document.querySelector(".patch-scroll"); if (scroll) scroll.scrollTop = 0; });
+    await browser.waitUntil(async () => {
+      const gutters = await streamGutters();
+      return gutters[0]?.[1] === "1" && gutters.length === 6000;
+    }, { timeoutMsg: "stream did not return intact after scrolling away and back" });
     await browser.execute(() => { const scroll = document.querySelector(".patch-scroll"); if (scroll) scroll.scrollTop = scroll.scrollHeight; });
     await browser.waitUntil(async () => {
       const gutters = await streamGutters();
-      return gutters.at(-1)?.[1] === "1200";
+      return gutters.at(-1)?.[1] === "6000";
     });
-    const mountedAfter = await browser.execute(() => document.querySelectorAll(".diff-line").length);
-    assert.ok(mountedAfter < 1200, `expected a bounded stream window after scrolling, mounted ${mountedAfter}`);
+
+    // Full-file view: every row carries exactly one gutter, and the bottom
+    // of the file is reachable by native scrolling.
+    await $('button[title="Full file view"]').click();
+    await browser.waitUntil(async () => (await $$(".file-view .diff-line")).length === 6000);
+    const fileRowCount = await browser.execute(() => document.querySelectorAll(".file-view .diff-line").length);
+    const fileGutterCount = await browser.execute(() => document.querySelectorAll(".file-view .diff-line .line-number").length);
+    assert.equal(fileGutterCount, fileRowCount, "file view rows must carry exactly one line-number gutter");
+    await browser.execute(() => { const scroll = document.querySelector(".patch-scroll"); if (scroll) scroll.scrollTop = scroll.scrollHeight; });
+    await browser.waitUntil(async () => {
+      const gutters = await streamGutters();
+      return gutters.at(-1)?.[0] === "6000";
+    });
+    await $('button[title="Diff view"]').click();
+    await browser.waitUntil(async () => (await $$(".diff-line")).length > 0);
+
+    // Change navigation: Next moves the viewport to the first region below
+    // it and the counter follows; Previous walks back. README.md carries
+    // nine separate change regions.
+    await browser.execute(() => {
+      Array.from(document.querySelectorAll(".file-row")).find((row) => row.textContent?.includes("README.md"))?.click();
+    });
+    await browser.waitUntil(async () => await browser.execute(() => document.querySelector(".patch-heading code")?.textContent) === "README.md");
+    await browser.waitUntil(async () => (await $$(".diff-line")).length > 0);
+    const navCount = async () => {
+      const label = await browser.execute(() => document.querySelector(".change-count")?.textContent?.trim() ?? "");
+      const match = /(\d+) \//.exec(label);
+      return match ? Number(match[1]) : -1;
+    };
+    await browser.waitUntil(async () => await navCount() >= 1);
+    const scrollTopBeforeJump = await browser.execute(() => document.querySelector(".patch-scroll")?.scrollTop ?? -1);
+    await $('button[aria-label="Next change"]').click();
+    // From the very top the first Next lands on region 1 a row away; the
+    // second press must step on to region 2.
+    await browser.pause(300);
+    const scrollTopAfterJump = await browser.execute(() => document.querySelector(".patch-scroll")?.scrollTop ?? -1);
+    assert.ok(scrollTopAfterJump > scrollTopBeforeJump, "Next change must scroll the viewport down");
+    await $('button[aria-label="Next change"]').click();
+    await browser.waitUntil(async () => await navCount() > 1, { timeoutMsg: "Next change did not reach region 2" });
+    const afterFirstNext = await navCount();
+    await $('button[aria-label="Next change"]').click();
+    await browser.waitUntil(async () => await navCount() > afterFirstNext, { timeoutMsg: "second Next change did not advance" });
+    await browser.pause(300);
+    const scrollTopBeforePrev = await browser.execute(() => document.querySelector(".patch-scroll")?.scrollTop ?? -1);
+    await $('button[aria-label="Previous change"]').click();
+    await browser.pause(500);
+    const scrollTopAfterPrev = await browser.execute(() => document.querySelector(".patch-scroll")?.scrollTop ?? -1);
+    assert.ok(scrollTopAfterPrev < scrollTopBeforePrev, "Previous change must scroll the viewport up");
+    await browser.waitUntil(async () => await navCount() === afterFirstNext, { timeoutMsg: "Previous change did not step back" });
+
+    // Renderable image assets preview in File view; files past the render
+    // cap decline with open-externally actions instead of a frozen pane.
+    await browser.execute(() => {
+      Array.from(document.querySelectorAll(".file-row")).find((row) => row.textContent?.includes("zz-tiny.png"))?.click();
+    });
+    await browser.waitUntil(async () => await browser.execute(() => document.querySelector(".patch-heading code")?.textContent) === "zz-tiny.png");
+    await $('button[title="Full file view"]').click();
+    await browser.waitUntil(async () => (await $$(".image-preview")).length === 1, { timeoutMsg: "image preview did not render" });
+    await browser.execute(() => {
+      Array.from(document.querySelectorAll(".file-row")).find((row) => row.textContent?.includes("zz-capped.txt"))?.click();
+    });
+    await browser.waitUntil(async () => await browser.execute(() => document.querySelector(".patch-heading code")?.textContent) === "zz-capped.txt");
+    await $('button[title="Full file view"]').click();
+    await browser.waitUntil(async () => await $("strong=File too large to render").isDisplayed(), { timeoutMsg: "cap notice did not render" });
+    await expect($('button=Open in default app')).toBeDisplayed();
+    await expect($('button=Reveal in file explorer')).toBeDisplayed();
 
     await browser.executeAsync((done) => {
       Array.from(document.querySelectorAll(".file-row")).find((row) => row.textContent?.includes("large-hunk.txt"))?.click();
@@ -410,15 +496,15 @@ describe("bundled desktop lifecycle", () => {
     assert.equal(await $("span=other.txt").isExisting(), false);
     await $('//div[@id="review-base-options"]//button[normalize-space()="other"]').click();
     await expect($("span=other.txt")).toBeDisplayed();
-    await expect($(".review-counts")).toHaveText("4 files, +1202 -1");
+    await expect($(".review-counts")).toHaveText("6 files, +6010 -1");
     git(["config", "core.filemode", "true"], repository);
     chmodSync(path.join(worktree, ".gitignore"), 0o755);
     // Wait out each toggle's recompute: a click issued into the loading
     // reflow can land on the neighboring preset button.
     await $('button=Committed only').click();
-    await expect($(".review-counts")).toHaveText("2 files, +1201 -0");
+    await expect($(".review-counts")).toHaveText("2 files, +6001 -0");
     await $('button=All changes').click();
-    await expect($(".review-counts")).toHaveText("5 files, +1202 -1");
+    await expect($(".review-counts")).toHaveText("7 files, +6010 -1");
     assert.equal(await $("span=ignored.txt").isExisting(), false);
     await $('//button[contains(@class, "file-row")][.//span[normalize-space()=".gitignore"]]').click();
     await expect($('pre.patch-metadata')).toHaveText(expect.stringContaining("old mode 100644"));
@@ -429,7 +515,7 @@ describe("bundled desktop lifecycle", () => {
     writeFileSync(path.join(worktree, ".gitattributes"), "*.txt filter=e2e\n");
     git(["config", "filter.e2e.clean", filterHelper], repository);
     await $('button=Committed only').click();
-    await expect($(".review-counts")).toHaveText("2 files, +1201 -0");
+    await expect($(".review-counts")).toHaveText("2 files, +6001 -0");
     await $('button=All changes').click();
     await expect($("strong=Review unavailable")).toBeDisplayed();
     await expect($("span=This review cannot run because Git conversion filters apply to files in this review.")).toBeDisplayed();

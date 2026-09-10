@@ -920,38 +920,16 @@ pub(crate) async fn review_file_content(
     file: String,
     untracked: bool,
 ) -> Result<FileContent, CommandError> {
-    validate_ref(&base, "base")?;
-    let head_ref = effective_head_ref(head_ref);
-    validate_ref(&head_ref, "head_ref")?;
-    validate_scope_combination(&base, &head_ref, committed_only)?;
-    validate_file(&file)?;
-    validate_untracked_combination(untracked, committed_only, reversed)?;
-    let path = canonical_path(&path)?;
-    let bytes = if untracked {
-        capture_untracked_file(&path, &file).await?
-    } else if reversed {
-        if base == "empty-tree" {
-            Vec::new()
-        } else if committed_only {
-            match merge_base_or_none(&path, &base, &head_ref).await? {
-                Some(merge_base) => read_committed_file(&path, &merge_base, &file).await?,
-                None => Vec::new(),
-            }
-        } else {
-            read_committed_file(&path, &base, &file).await?
-        }
-    } else if !committed_only {
-        // The only review read that touches the filesystem without Git doing
-        // the walking: pin the root to a real worktree first so a
-        // renderer-supplied directory cannot read arbitrary files.
-        ensure_work_tree(&path).await?;
-        match open_bounded_file(&path, &file)? {
-            BoundedRead::File(bytes) => bytes,
-            BoundedRead::Missing => Vec::new(),
-        }
-    } else {
-        read_committed_file(&path, &head_ref, &file).await?
-    };
+    let bytes = resolve_review_file_bytes(
+        path,
+        base,
+        head_ref,
+        committed_only,
+        reversed,
+        file,
+        untracked,
+    )
+    .await?;
     if content_is_binary(&bytes) {
         return Ok(FileContent {
             binary: true,
@@ -965,6 +943,74 @@ pub(crate) async fn review_file_content(
         binary: false,
         text,
     })
+}
+
+// The same new-side resolution as review_file_content, but returning the raw
+// bytes: renderable assets (images) need them without the binary check or
+// UTF-8 decode. Empty bytes mean "no file on this side", not an error.
+pub(crate) async fn review_file_bytes(
+    path: String,
+    base: String,
+    head_ref: Option<String>,
+    committed_only: bool,
+    reversed: bool,
+    file: String,
+    untracked: bool,
+) -> Result<Vec<u8>, CommandError> {
+    resolve_review_file_bytes(
+        path,
+        base,
+        head_ref,
+        committed_only,
+        reversed,
+        file,
+        untracked,
+    )
+    .await
+}
+
+async fn resolve_review_file_bytes(
+    path: String,
+    base: String,
+    head_ref: Option<String>,
+    committed_only: bool,
+    reversed: bool,
+    file: String,
+    untracked: bool,
+) -> Result<Vec<u8>, CommandError> {
+    validate_ref(&base, "base")?;
+    let head_ref = effective_head_ref(head_ref);
+    validate_ref(&head_ref, "head_ref")?;
+    validate_scope_combination(&base, &head_ref, committed_only)?;
+    validate_file(&file)?;
+    validate_untracked_combination(untracked, committed_only, reversed)?;
+    let path = canonical_path(&path)?;
+    if untracked {
+        return capture_untracked_file(&path, &file).await;
+    }
+    if reversed {
+        if base == "empty-tree" {
+            return Ok(Vec::new());
+        }
+        if committed_only {
+            return match merge_base_or_none(&path, &base, &head_ref).await? {
+                Some(merge_base) => Ok(read_committed_file(&path, &merge_base, &file).await?),
+                None => Ok(Vec::new()),
+            };
+        }
+        return Ok(read_committed_file(&path, &base, &file).await?);
+    }
+    if !committed_only {
+        // The only review read that touches the filesystem without Git doing
+        // the walking: pin the root to a real worktree first so a
+        // renderer-supplied directory cannot read arbitrary files.
+        ensure_work_tree(&path).await?;
+        return match open_bounded_file(&path, &file)? {
+            BoundedRead::File(bytes) => Ok(bytes),
+            BoundedRead::Missing => Ok(Vec::new()),
+        };
+    }
+    Ok(read_committed_file(&path, &head_ref, &file).await?)
 }
 
 #[cfg(test)]
@@ -2295,6 +2341,21 @@ mod tests {
         .await
         .unwrap();
         assert!(binary.binary);
+
+        // Raw byte reads skip the binary check: renderable assets need the
+        // exact bytes, not a lossy flag.
+        let bytes = review_file_bytes(
+            repo.to_str().unwrap().into(),
+            base_sha.clone(),
+            None,
+            false,
+            false,
+            "blob.bin".into(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(bytes, [b'a', 0, b'b']);
 
         std::fs::remove_dir_all(repo).unwrap();
     }
