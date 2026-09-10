@@ -1453,7 +1453,7 @@ function PatchPane({ selectedFile, patch, patchError, patchLoading, diffPrefs, r
   // pane declines and points at the open/reveal actions instead.
   const capBody = rows.length > MAX_RENDERED_ROWS ? <Empty icon={<FileWarning size={24} />} title="File too large to render" detail={`This file has about ${rows.length.toLocaleString()} lines, past what WorktreeView renders so the app stays fast. Open it externally instead.`} action={onDiskWorktree ? <div className="cap-actions"><button className="secondary-button" type="button" onClick={() => openOnDisk(false)}><ExternalLink size={13} />Open in default app</button><button className="secondary-button" type="button" onClick={() => openOnDisk(true)}><FolderOpen size={13} />Reveal in file explorer</button></div> : undefined} /> : null;
   const streamPane = <div ref={scrollRef} className="patch-scroll"><div className={`hunk-list ${fileMode ? "file-view" : ""} ${split ? "split-layout" : ""} ${diffPrefs.lineWrap ? "wrap-lines" : ""}`}>{rows.map((row, index) => renderRow(row, index))}</div></div>;
-  return <section ref={paneRef} className="patch-pane" aria-label="File patch">{selectedFile && <div className="patch-heading"><code title={selectedFile.path}>{selectedFile.path}</code><span className="patch-heading-meta"><span>{selectedFile.status}</span><div className="patch-view-toggle" role="group" aria-label="Patch or full file view"><button type="button" className={patchView === "diff" ? "active" : ""} aria-pressed={patchView === "diff"} title="Diff view" onClick={() => setPatchView("diff")}>Diff</button><button type="button" className={patchView === "file" ? "active" : ""} aria-pressed={patchView === "file"} title="Full file view" onClick={() => { setPatchView("file"); onEnsureContent(); }}>File</button></div>{regions.length > 0 && <ChangeNav scrollRef={scrollRef} regions={regions} regionRows={regionRows} onStep={scrollToRegion} streamKey={`${selectedFile?.path ?? ""}:${patchView}:${rows.length}:${contentLines?.length ?? 0}`} />}{onDiskWorktree && <><button className="icon-button" type="button" aria-label="Open file" title="Open file" onClick={() => openOnDisk(false)}><ExternalLink size={13} /></button><button className="icon-button" type="button" aria-label="Reveal in file explorer" title="Reveal in file explorer" onClick={() => openOnDisk(true)}><FolderOpen size={13} /></button></>}{comments.key && <button className="icon-button" type="button" aria-label="Comment on file" title="Comment on file" onClick={() => comments.openFileComposer(selectedFile.path)}><MessageSquare size={13} /></button>}</span></div>}{openError && <p className="patch-open-error" role="status">{openError}</p>}{comments.composer?.kind === "file" && selectedFile && comments.composer.filePath === selectedFile.path && <div className="comment-composer-panel"><p className="eyebrow">Comment on {selectedFile.path}</p><DraftComposer placeholder={`Comment on ${selectedFile.path}`} submitLabel="Comment" onSubmit={({ body, severity }) => { void comments.create({ body, severity, file_path: selectedFile.path, side: null, start_line: null, end_line: null, lines: [] }).then(comments.closeComposer); }} onCancel={comments.closeComposer} /></div>}<div className="patch-body">{patchLoading ? <div className="patch-skeleton" aria-label="Loading patch"><i /><i /><i /><i /></div> : patchError ? <Empty icon={<FileDiff size={24} />} title="Patch not rendered" detail={patchError} /> : !selectedFile ? <Empty icon={<FileDiff size={24} />} title="Select a changed file" detail="The patch is rendered one file at a time." /> : imageBody !== null ? imageBody : patch?.binary ? <Empty icon={<FileDiff size={24} />} title="Binary file changed" detail={selectedFile.path} /> : patch?.text === "" ? <Empty icon={<CircleDot size={24} />} title="No changes in this file" detail="The selected file has no renderable patch." /> : fileMode ? contentLoading ? <div className="patch-skeleton" aria-label="Loading file"><i /><i /><i /><i /></div> : contentError ? <Empty icon={<FileDiff size={24} />} title="File content unavailable" detail={contentError} /> : !content || content.binary ? <Empty icon={<FileDiff size={24} />} title="Binary file" detail="The full file view is unavailable for binary content." /> : rows.length === 0 ? <Empty icon={<CircleDot size={24} />} title="No file on this side" detail="The file does not exist on this side of the diff." /> : capBody ?? streamPane : hunks.length === 0 ? <pre className="patch-metadata"><code>{patch?.text}</code></pre> : capBody ?? streamPane}{streamReady() && regions.length > 0 && <ChangeStrip scrollRef={scrollRef} regions={regions} regionRows={regionRows} onJump={scrollToRegion} streamKey={`${selectedFile?.path ?? ""}:${patchView}:${rows.length}`} />}</div></section>;
+  return <section ref={paneRef} className="patch-pane" aria-label="File patch">{selectedFile && <div className="patch-heading"><code title={selectedFile.path}>{selectedFile.path}</code><span className="patch-heading-meta"><span>{selectedFile.status}</span><div className="patch-view-toggle" role="group" aria-label="Patch or full file view"><button type="button" className={patchView === "diff" ? "active" : ""} aria-pressed={patchView === "diff"} title="Diff view" onClick={() => setPatchView("diff")}>Diff</button><button type="button" className={patchView === "file" ? "active" : ""} aria-pressed={patchView === "file"} title="Full file view" onClick={() => { setPatchView("file"); onEnsureContent(); }}>File</button></div>{regions.length > 0 && <ChangeNav scrollRef={scrollRef} regions={regions} regionRows={regionRows} onStep={scrollToRegion} streamKey={`${selectedFile?.path ?? ""}:${patchView}:${rows.length}:${contentLines?.length ?? 0}`} />}{onDiskWorktree && <><button className="icon-button" type="button" aria-label="Open file" title="Open file" onClick={() => openOnDisk(false)}><ExternalLink size={13} /></button><button className="icon-button" type="button" aria-label="Reveal in file explorer" title="Reveal in file explorer" onClick={() => openOnDisk(true)}><FolderOpen size={13} /></button></>}{comments.key && <button className="icon-button" type="button" aria-label="Comment on file" title="Comment on file" onClick={() => comments.openFileComposer(selectedFile.path)}><MessageSquare size={13} /></button>}</span></div>}{openError && <p className="patch-open-error" role="status">{openError}</p>}{comments.composer?.kind === "file" && selectedFile && comments.composer.filePath === selectedFile.path && <div className="comment-composer-panel"><p className="eyebrow">Comment on {selectedFile.path}</p><DraftComposer placeholder={`Comment on ${selectedFile.path}`} submitLabel="Comment" onSubmit={({ body, severity }) => { void comments.create({ body, severity, file_path: selectedFile.path, side: null, start_line: null, end_line: null, lines: [] }).then(comments.closeComposer); }} onCancel={comments.closeComposer} /></div>}<div className="patch-body">{patchLoading ? <div className="patch-skeleton" aria-label="Loading patch"><i /><i /><i /><i /></div> : patchError ? <Empty icon={<FileDiff size={24} />} title="Patch not rendered" detail={patchError} /> : !selectedFile ? <Empty icon={<FileDiff size={24} />} title="Select a changed file" detail="The patch is rendered one file at a time." /> : imageBody !== null ? imageBody : patch?.binary ? <Empty icon={<FileDiff size={24} />} title="Binary file changed" detail={selectedFile.path} /> : patch?.text === "" ? <Empty icon={<CircleDot size={24} />} title="No changes in this file" detail="The selected file has no renderable patch." /> : fileMode ? contentLoading ? <div className="patch-skeleton" aria-label="Loading file"><i /><i /><i /><i /></div> : contentError ? <Empty icon={<FileDiff size={24} />} title="File content unavailable" detail={contentError} /> : !content || content.binary ? <Empty icon={<FileDiff size={24} />} title="Binary file" detail="The full file view is unavailable for binary content." /> : rows.length === 0 ? <Empty icon={<CircleDot size={24} />} title="No file on this side" detail="The file does not exist on this side of the diff." /> : capBody ?? streamPane : hunks.length === 0 ? <pre className="patch-metadata"><code>{patch?.text}</code></pre> : capBody ?? streamPane}{streamReady() && fileMode && regions.length > 0 && <ChangeStrip scrollRef={scrollRef} regions={regions} regionRows={regionRows} onJump={scrollToRegion} streamKey={`${selectedFile?.path ?? ""}:${patchView}:${rows.length}`} />}</div></section>;
 
   // The stream renders only when a file, patch, or file content is actually
   // present; every other body state above replaces it wholesale.
@@ -1476,47 +1476,51 @@ function ExpandGapRow({ gap, slim, pending, error, onExpand }: { gap: PatchGap; 
 function ChangeNav({ scrollRef, regions, regionRows, onStep, streamKey }: { scrollRef: React.RefObject<HTMLDivElement | null>; regions: ChangeRegion[]; regionRows: (number | null)[]; onStep: (index: number) => void; streamKey: string }) {
   const [current, setCurrent] = useState(-1);
   const frame = useRef(0);
-  useEffect(() => () => cancelAnimationFrame(frame.current), []);
   useEffect(() => {
-    const update = () => {
-      frame.current = 0;
-      const el = scrollRef.current;
-      if (!el) return;
-      let index = -1;
+    const el = scrollRef.current;
+    if (!el) return;
+    // Region tops only move when layout changes, so they are measured up
+    // front and the scroll path compares plain numbers.
+    let marks: Array<{ index: number; top: number }> = [];
+    let layoutStale = true;
+    const measure = () => {
+      marks = [];
       for (let i = 0; i < regionRows.length; i += 1) {
         const row = regionRows[i];
         if (row === null || row === undefined) continue;
         const element = el.querySelector(`[data-index="${row}"]`);
-        if (element instanceof HTMLElement && element.offsetTop - STREAM_TOP_PADDING <= el.scrollTop) index = i;
-        else break;
+        if (element instanceof HTMLElement) marks.push({ index: i, top: element.offsetTop - STREAM_TOP_PADDING });
       }
+    };
+    const update = () => {
+      frame.current = 0;
+      if (layoutStale) { layoutStale = false; measure(); }
+      let index = -1;
+      for (const mark of marks) { if (mark.top <= el.scrollTop) index = mark.index; else break; }
       // At max scroll the last region is on screen even when its start row
       // sits above the clamp point, so the counter must reach it.
-      const maxScroll = el.scrollHeight - el.clientHeight;
-      if (el.scrollTop >= maxScroll - 1) {
-        for (let i = regionRows.length - 1; i >= 0; i -= 1) {
-          if (regionRows[i] !== null && regionRows[i] !== undefined) { index = i; break; }
-        }
-      }
+      if (marks.length > 0 && el.scrollTop >= el.scrollHeight - el.clientHeight - 1) index = marks[marks.length - 1].index;
       setCurrent(index);
     };
+    const schedule = () => { if (!frame.current) frame.current = requestAnimationFrame(update); };
+    const markLayout = () => { layoutStale = true; schedule(); };
     update();
-    const onScroll = () => { if (!frame.current) frame.current = requestAnimationFrame(update); };
-    const el = scrollRef.current;
-    el?.addEventListener("scroll", onScroll, { passive: true });
+    el.addEventListener("scroll", schedule, { passive: true });
     // A resize rewraps rows (wrap mode) and shifts offsets without any
     // scroll event, so re-derive from live layout then too. Observing the
     // element covers app-internal resizes (pane collapse), not just window
-    // edges.
-    window.addEventListener("resize", onScroll);
+    // edges; the content element covers reflows that leave the pane's own
+    // size alone (wrap toggle, zoom).
+    window.addEventListener("resize", markLayout);
     let observer: ResizeObserver | null = null;
-    if (el && typeof ResizeObserver !== "undefined") {
-      observer = new ResizeObserver(onScroll);
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(markLayout);
       observer.observe(el);
+      if (el.firstElementChild) observer.observe(el.firstElementChild);
     }
     return () => {
-      el?.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onScroll);
+      el.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", markLayout);
       observer?.disconnect();
       cancelAnimationFrame(frame.current);
     };
@@ -1532,54 +1536,72 @@ function ChangeNav({ scrollRef, regions, regionRows, onStep, streamKey }: { scro
   </div>;
 }
 
-// A thin fixed overlay mapping where the patch's changes sit in the stream;
+// A thin fixed rail mapping where the patch's changes sit in the stream;
 // one click jumps to a change. Positions come from the real DOM, so they
 // are exact without a height model.
+// The rail hugs the native scrollbar's left edge (the JS right offset keeps
+// the scrollbar itself clickable) and shows in the File view only. It is a
+// minimap: every tick sits at its change's fraction of the whole stream and
+// never moves on scroll; only the band tracks the viewport.
 function ChangeStrip({ scrollRef, regions, regionRows, onJump, streamKey }: { scrollRef: React.RefObject<HTMLDivElement | null>; regions: ChangeRegion[]; regionRows: (number | null)[]; onJump: (index: number) => void; streamKey: string }) {
-  const [band, setBand] = useState<{ top: number; height: number }>({ top: 0, height: 0 });
-  const [ticks, setTicks] = useState<Array<{ key: string; frac: number; added: boolean; title: string; index: number; line: number }>>([]);
+  const railRef = useRef<HTMLDivElement | null>(null);
+  const bandRef = useRef<HTMLDivElement | null>(null);
   const frame = useRef(0);
-  useEffect(() => () => cancelAnimationFrame(frame.current), []);
-  useEffect(() => {
-    const update = () => {
-      frame.current = 0;
-      const el = scrollRef.current;
-      if (!el || el.scrollHeight <= 0) return;
-      setBand({ top: (el.scrollTop / el.scrollHeight) * 100, height: Math.min(100, (el.clientHeight / el.scrollHeight) * 100) });
-    };
-    update();
-    const onScroll = () => { if (!frame.current) frame.current = requestAnimationFrame(update); };
-    const el = scrollRef.current;
-    el?.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onScroll);
-    let observer: ResizeObserver | null = null;
-    if (el && typeof ResizeObserver !== "undefined") {
-      observer = new ResizeObserver(onScroll);
-      observer.observe(el);
-    }
-    return () => {
-      el?.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onScroll);
-      observer?.disconnect();
-      cancelAnimationFrame(frame.current);
-    };
-  }, [scrollRef, streamKey]);
+  const [ticks, setTicks] = useState<Array<{ key: string; frac: number; added: boolean; title: string; index: number; line: number }>>([]);
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const next = regions.flatMap((region, index) => {
-      const row = regionRows[index];
-      if (row === null || row === undefined) return [];
-      const rowEl = el.querySelector(`[data-index="${row}"]`);
-      if (!(rowEl instanceof HTMLElement)) return [];
+    // The band is all that moves on scroll: two style writes, nothing else.
+    const updateBand = () => {
+      const band = bandRef.current;
+      if (!band || el.scrollHeight <= 0) return;
+      band.style.top = `${(el.scrollTop / el.scrollHeight) * 100}%`;
+      band.style.height = `${Math.min(100, (el.clientHeight / el.scrollHeight) * 100)}%`;
+    };
+    // Ticks and the scrollbar-hugging offset depend on layout alone, so
+    // they re-measure on layout changes, never in the scroll path.
+    let layoutStale = true;
+    const update = () => {
+      frame.current = 0;
+      const rail = railRef.current;
+      updateBand();
+      if (!rail || !layoutStale) return;
+      layoutStale = false;
+      // Hug the native scrollbar's left edge (offsetWidth - clientWidth is
+      // the scrollbar's occupied width; scrollbar-gutter keeps it stable).
+      rail.style.right = `${el.offsetWidth - el.clientWidth}px`;
       const extent = Math.max(1, el.scrollHeight - STREAM_TOP_PADDING * 2);
-      return [{ key: `${region.start}:${region.end}`, frac: Math.min(1, Math.max(0, (rowEl.offsetTop - STREAM_TOP_PADDING) / extent)), added: region.added, title: `Change at line ${region.start}`, index, line: region.start }];
-    });
-    setTicks(next);
+      setTicks(regions.flatMap((region, index) => {
+        const row = regionRows[index];
+        if (row === null || row === undefined) return [];
+        const rowEl = el.querySelector(`[data-index="${row}"]`);
+        if (!(rowEl instanceof HTMLElement)) return [];
+        const frac = Math.min(1, Math.max(0, (rowEl.offsetTop - STREAM_TOP_PADDING) / extent));
+        return [{ key: `${region.start}:${region.end}`, frac, added: region.added, title: `Change at line ${region.start}`, index, line: region.start }];
+      }));
+    };
+    const schedule = () => { if (!frame.current) frame.current = requestAnimationFrame(update); };
+    const markLayout = () => { layoutStale = true; schedule(); };
+    update();
+    el.addEventListener("scroll", updateBand, { passive: true });
+    window.addEventListener("resize", markLayout);
+    // The scroll container's own box misses reflows that move rows (wrap
+    // toggle, zoom), so observe the content element too.
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(markLayout);
+      observer.observe(el);
+      if (el.firstElementChild) observer.observe(el.firstElementChild);
+    }
+    return () => {
+      el.removeEventListener("scroll", updateBand);
+      window.removeEventListener("resize", markLayout);
+      observer?.disconnect();
+      cancelAnimationFrame(frame.current);
+    };
   }, [regions, regionRows, scrollRef, streamKey]);
-  if (ticks.length === 0) return null;
-  return <div className="change-strip" role="group" aria-label="Change map">
-    <div className="strip-view" style={{ top: `${band.top}%`, height: `${band.height}%` }} />
+  return <div ref={railRef} className="change-strip" role="group" aria-label="Change map">
+    <div ref={bandRef} className="strip-view" />
     {ticks.map((tick) => <button key={tick.key} type="button" className={`strip-tick ${tick.added ? "added" : "deleted"}`} style={{ top: `${tick.frac * 100}%` }} title={tick.title} aria-label={`Jump to change at line ${tick.line}`} onClick={() => onJump(tick.index)} />)}
   </div>;
 }

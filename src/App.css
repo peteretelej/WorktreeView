@@ -1394,11 +1394,11 @@ button:disabled {
 .patch-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--background); }
 .patch-heading { display: flex; flex: none; height: 36px; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .patch-heading code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.patch-body { position: relative; flex: 1; min-height: 0; }
+.patch-body { display: flex; position: relative; flex: 1; min-height: 0; }
 /* The browser owns scrolling: the whole stream renders in native flow.
    scrollbar-gutter keeps the vertical bar's appearance from resizing the
    viewport mid-scroll; native scroll anchoring stays enabled. */
-.patch-scroll { position: absolute; inset: 0; overflow: auto; scrollbar-gutter: stable; }
+.patch-scroll { flex: 1; min-width: 0; overflow: auto; scrollbar-gutter: stable; }
 .hunk-list { position: relative; min-width: max-content; padding: 12px; font: 13px/1.5 var(--font-mono); }
 /* The diff is one continuous stream: slim hunk dividers and inline expand
    rows, so expanded context joins the hunks around it without seams. */
@@ -1415,12 +1415,13 @@ button:disabled {
 .change-count { min-width: 44px; text-align: center; font-size: 10px; color: var(--muted); }
 /* The change strip: a thin fixed rail mapping where the changes sit in the
    stream; ticks jump, the band shows the viewport. */
-.change-strip { position: absolute; top: 12px; bottom: 12px; right: 5px; width: 5px; border-radius: 3px; background: var(--surface-2); box-shadow: 0 0 0 1px var(--border); }
+.change-strip { position: absolute; top: 12px; bottom: 12px; right: 0; width: 8px; border-radius: 4px 0 0 4px; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--border); }
 .strip-view { position: absolute; left: 0; width: 100%; border-radius: 3px; background: var(--primary-soft); }
 .strip-tick { position: absolute; left: 0; width: 100%; height: 3px; min-height: 3px; padding: 0; border: 0; border-radius: 1px; cursor: pointer; }
-.strip-tick.added { background: var(--diff-addition-foreground); }
-.strip-tick.deleted { background: var(--diff-deletion-foreground); }
-.strip-tick:hover { filter: brightness(1.25); }
+/* Muted markers: present at a glance, not shouting with the diff colors. */
+.strip-tick.added { background: color-mix(in oklch, var(--diff-addition-foreground) 40%, var(--surface-2)); }
+.strip-tick.deleted { background: color-mix(in oklch, var(--diff-deletion-foreground) 45%, var(--surface-2)); }
+.strip-tick:hover { filter: brightness(1.3); }
 .patch-view-toggle { display: flex; height: 22px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
 .patch-view-toggle button { padding: 0 8px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
 .patch-view-toggle button.active { background: var(--primary-soft); color: var(--foreground); }
