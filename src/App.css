@@ -1084,6 +1084,11 @@ button:disabled {
   font-size: 11px;
 }
 
+/* The patch body is a flex row; its empties must fill it to center. */
+.patch-body > .empty-state {
+  flex: 1;
+}
+
 .empty-state strong {
   color: var(--foreground);
   font-size: 12px;
