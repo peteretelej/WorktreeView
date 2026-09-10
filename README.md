@@ -2,83 +2,46 @@
 
 **Code review where you and your agents meet**
 
-WorktreeView is an open-source desktop app that turns Git worktrees into a
-shared review inbox for humans and coding agents. Open a repository and
-review any worktree, branch, or commit against the right base without
-checking it out. Your agents join as first-class reviewers over a local
-API: they submit reviews, leave anchored comments, and reply in threads
-while you watch it all land live.
+WorktreeView is an open-source lightweight desktop app that turns Git worktrees into a shared review inbox for humans and coding agents to collaborate on. 
+
+Your agents join as first-class reviewers over a local API: they submit reviews, leave anchored comments, collaborate with other agents and reply in threads while you watch it all land live. 
 
 ![WorktreeView reviewing a commit with an agent submission in the comment stream](docs/images/screenshot.png)
 
 ## Features
 
-- Review any worktree, branch, tag, or commit without checkout, computed
-  against the right merge-base
-- Working changes, all changes, and committed-only review presets per
-  worktree
-- A project overview with live change counts and searchable worktree and
-  branch inventories
-- Threaded markdown comments anchored to lines, files, or the whole
-  review, with drift detection when code moves
-- Agents submit reviews and findings into the same comment stream, read
-  reviews over MCP, and double-check each other's work
-- Read-only by design: reviews never modify Git state, and the refresh
-  action's explicit fetch is the only network request
+- Lightweight, performant Code Review UI built for human devs. 
+- First-class support for any AI Agent that speaks MCP (that's all of them!).
+- Intuitive worktree, branch, remote branches selection and review experience.
+- **Local-first**: uses `git` under the hood to access changes 
+- **Read-only by design**: reviews never modify Git state. Built for reviews.
+- **Collaborative API for AI Agents**: gives AI Agents a [simple API](https://github.com/peteretelej/WorktreeView/blob/main/skills/worktreeview/SKILL.md#3-operate) to use for collaboration on reviews
 
 ## Install
 
-- **GitHub Releases**: grab the installer for your platform from the
-  [latest release](https://github.com/peteretelej/WorktreeView/releases/latest).
-  Builds are unsigned, so Windows SmartScreen and macOS Gatekeeper warn on
-  first launch (macOS: right-click the app and choose Open)
-- **Microsoft Store**: coming soon
+- **GitHub Releases**: [latest release](https://github.com/peteretelej/WorktreeView/releases/latest)
+- **Microsoft Store**: _coming soon_
 
 ## Use it yourself
 
-Launch the app, add a repository, and click a worktree: the review opens
-against the fork point with your uncommitted work included. Comment by
-selecting lines in the diff, and copy any thread as markdown for your
-notes or tools. The illustrated walkthrough lives in
-[docs/user-guide.md](docs/user-guide.md).
+- Launch the app
+- Add a local repository to review your worktrees, branches, remote branches.
+- Illustrated user guide: [docs/user-guide.md](docs/user-guide.md).
 
-## Connect your agent
+_Collaboration with AI:_
+- Copy the [worktreeview SKILL](https://github.com/peteretelej/WorktreeView/blob/main/skills/worktreeview/SKILL.md) to your AI skills (or use `npx skills add peteretelej/WorktreeView`)
+- Ask your AI to setup WorktreeView integration. It will automatically configure its MCP to talk to WorktreeView.
+- Ask AI to send reviews to WorktreeView or to look into feedback from other agents
 
-The app serves a local MCP endpoint your coding agent can talk to the
-moment it launches. The quickest route is the bundled agent skill, which
-teaches your agent installation, connection, and the day-to-day review
-workflow:
-
-```sh
-npx skills add peteretelej/WorktreeView
-```
-
-To wire a client by hand, point its MCP entry at
-`http://127.0.0.1:<port>/mcp` with the bearer token from the discovery
-file the app writes on startup. Setup steps and client examples are in
-[docs/connect-an-agent.md](docs/connect-an-agent.md); the full API
-contract for submissions and comments is
-[docs/agent-submissions.md](docs/agent-submissions.md).
+_Connecting via MCP:_
+- MCP setup instructions available at: [docs/connect-an-agent.md](docs/connect-an-agent.md)
+- API Spec: [docs/agent-submissions.md](docs/agent-submissions.md)
 
 ## Development
 
-```sh
-nvm use
-npm ci
-npm run dev
-```
+Full development loop and Contributing Guide at[CONTRIBUTING.md](CONTRIBUTING.md). 
 
-Fast checks for a change: `npm run check` (TypeScript) and
-`cargo test --manifest-path src-tauri/Cargo.toml` (backend). Headless
-desktop e2e against a fixture repository:
-
-```sh
-npm run test:desktop -- /absolute/path/to/git-repository
-```
-
-Setup, the full development loop, and the desktop testing guide live in
-[CONTRIBUTING.md](CONTRIBUTING.md). Design and architecture live in
-[docs/](docs/README.md).
+Design and architecture live in [docs/](docs/README.md).
 
 ## License
 
