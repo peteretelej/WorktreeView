@@ -153,21 +153,22 @@ or global Docker pruning.
 
 ## Releases
 
-Releases are cut by tag. Align the version in `package.json` (run
-`npm install` to sync `package-lock.json`), `src-tauri/Cargo.toml`, and
-`src-tauri/tauri.conf.json` (then run
-`cargo check --manifest-path src-tauri/Cargo.toml` to update
-`Cargo.lock`), commit, and push the tag:
+Releases are cut by tag alone. The Release workflow derives the app
+version from the pushed tag and injects it into the manifests at build
+time, so no bump commit is needed; between releases the manifests on
+`main` keep the last released version, and development builds report
+that version. Before tagging, make sure `main` is pushed and the desktop
+e2e suite is green: pushing the tag publishes the release.
 
 ```sh
-git tag v0.0.1
-git push origin main v0.0.1
+git tag v0.2.0
+git push origin main v0.2.0
 ```
 
 The Release workflow builds Windows, macOS, and Linux bundles and
-attaches them to a draft GitHub Release. Review the draft, edit the
-notes if needed, then publish it; publishing also triggers the desktop
-e2e suite. Builds are unsigned.
+publishes them directly as the GitHub Release for the tag, with
+generated release notes; publishing dispatches the desktop e2e suite.
+Builds are unsigned.
 
 ## Documentation
 

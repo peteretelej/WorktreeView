@@ -35,7 +35,9 @@ GitHub Actions runs two workflows:
   MSI), macOS (dmg, x64 and arm64), and Linux (deb, rpm, AppImage) and
   publishes them to a GitHub Release for the tag, then dispatches the
   desktop e2e suite (a release created by the workflow token does not
-  itself trigger other workflows).
+  itself trigger other workflows). The app version comes from the tag:
+  the workflow injects it into the manifests at build time, so cutting
+  a release needs no version-bump commit on `main`.
 
 Release builds are unsigned: Windows shows a
 SmartScreen warning, and macOS requires right-click Open (or

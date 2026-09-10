@@ -41,9 +41,31 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
-      - name: Verify tag matches app version
+      - name: Set app version from tag
         timeout-minutes: 2
-        run: node -e "const v=require('./src-tauri/tauri.conf.json').version; if ('v'+v !== process.env.GITHUB_REF_NAME) { console.error('tag '+process.env.GITHUB_REF_NAME+' does not match app version v'+v); process.exit(1); }"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          VERSION="$version" node -e '
+            const fs = require("fs");
+            const v = process.env.VERSION;
+            if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(v)) {
+              console.error("tag " + process.env.GITHUB_REF_NAME + " is not a valid vX.Y.Z version");
+              process.exit(1);
+            }
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.version = v;
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+            const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
+            lock.version = v;
+            lock.packages[""].version = v;
+            fs.writeFileSync("package-lock.json", JSON.stringify(lock, null, 2) + "\n");
+            const conf = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"));
+            conf.version = v;
+            fs.writeFileSync("src-tauri/tauri.conf.json", JSON.stringify(conf, null, 2) + "\n");
+            const cargo = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
+            if (!/^version = "/m.test(cargo)) throw new Error("no package version line in Cargo.toml");
+            fs.writeFileSync("src-tauri/Cargo.toml", cargo.replace(/^version = "[^"]*"/m, "version = \"" + v + "\""));
+          '
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
