@@ -11,10 +11,19 @@ from outside the machine unless the listen address is changed there.
 
 Clients that support the discovery file need no configuration: after a
 successful bind the app writes `agent-endpoint.json` into its app data
-directory (dev builds use `agent-endpoint-dev.json`), carrying the
-current `{port, token}`. The token it names is the built-in default,
-which renews at every app start, so discovery clients keep working
-across restarts; the file is rewritten each boot.
+directory, carrying the current `{port, token}`. The token it names is
+the built-in default, which renews at every app start, so discovery
+clients keep working across restarts; the file is rewritten each boot.
+Dev builds write `agent-endpoint-dev.json` instead, so the two channels
+never trade registrations.
+
+Where the file lives:
+
+| Platform | Path |
+| --- | --- |
+| Windows | `%APPDATA%\com.etelej.worktreeview\agent-endpoint.json` |
+| macOS | `~/Library/Application Support/com.etelej.worktreeview/agent-endpoint.json` |
+| Linux | `$XDG_DATA_HOME/com.etelej.worktreeview/agent-endpoint.json` (default `~/.local/share/com.etelej.worktreeview/`) |
 
 ## Manual configuration
 
@@ -24,9 +33,23 @@ across restarts; the file is rewritten each boot.
    deleted independently.
 2. Point the client's MCP server entry at
    `http://127.0.0.1:<port>/mcp` with the header
-   `Authorization: Bearer <secret>`. Comment writes accept an optional
-   self-reported `author_model` label ("GPT Luna medium") shown next to
-   the agent name, so one token can distinguish the models it runs. Clients that speak the stateless
+   `Authorization: Bearer <secret>`. Clients that take a JSON server
+   list accept an entry like:
+
+   ```json
+   {
+     "mcpServers": {
+       "worktreeview": {
+         "url": "http://127.0.0.1:9888/mcp",
+         "headers": { "Authorization": "Bearer <secret>" }
+       }
+     }
+   }
+   ```
+
+   Comment writes accept an optional self-reported `author_model` label
+   ("GPT Luna medium") shown next to the agent name, so one token can
+   distinguish the models it runs. Clients that speak the stateless
    2026-07-28 MCP revision connect directly; older revisions connect
    through the stateless handshake answer (see the conformance notes in
    [agent-submissions.md](agent-submissions.md)).

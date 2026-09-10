@@ -89,13 +89,10 @@ repository cannot mutate it or execute code it defines.
   `POST /mcp`, all over bearer-token authentication. Tokens are per-agent
   rows; the discovery file in the app data directory carries the current
   boot's default token. Beyond loopback the token is the real
-  authentication boundary; locally it still guards accidents. The
-  endpoint serves axum HTTP semantics over a raw tokio connection loop;
-  request heads are parsed with httparse, hyper's own parser, under
-  bounded head, header, and body caps. hyper's h1 connection layer is
-  bypassed because it does not deliver responses on the current Windows
-  host (upstream-report candidate). See
-  [agent-submissions.md](agent-submissions.md).
+  authentication boundary; locally it still guards accidents. Transport
+  internals (HTTP semantics, head and body caps, the hyper h1 bypass)
+  are described in [architecture.md](architecture.md); the protocol
+  surface is specified in [agent-submissions.md](agent-submissions.md).
 - The local threat model is unchanged: any process running as the user
   can already read the app's store and the discovery file, so the token
   guards against stale clients and accidents, not against user-level

@@ -118,7 +118,7 @@ matches each user's installed Git exactly (repo formats, ref semantics,
 diff behavior), streams output that can be bounded and cancelled, and keeps
 Git crashes in a child process instead of the app. Queries use stable
 porcelain formats, and invocations whose stderr is machine-parsed pin the
-locale to C. The full rationale is in the repo `AGENTS.md`.
+locale to C.
 
 ## Frontend (`src/`)
 
@@ -166,10 +166,8 @@ Comments may carry an `author_token_id` naming the agent token that owns
 them. All three tables cascade from the `repos` row, as do the older
 repo-scoped caches. The schema is one consolidated `0001` migration plus
 append-only additive migrations (`0002` adds the `agent_tokens` table and
-comment ownership); a store recorded under an older migration set
-diverges from the embedded baseline and is set aside as
-`worktreeview.sqlite3.bak` at startup while a fresh store is rebuilt, so
-no manual deletion is needed.
+comment ownership); migration divergence handling is described at the end
+of this section.
 
 Retrospected surfaces key on `(repo_path, kind, identity_key)` and carry the
 recorded label, head, pin state, and row origin (`review` for recorded

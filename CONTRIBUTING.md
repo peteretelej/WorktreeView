@@ -67,9 +67,10 @@ with `npm run tauri info`.
 
 Schema migrations in `src-tauri/migrations` are append-only: never edit or
 delete a migration that has shipped; only add new numbered files. New
-migration files must also be added to `e2e/Dockerfile`, which copies each
-migration by name; a missing entry silently leaves the e2e image on the old
-schema. sqlx
+migration files need no registration: the e2e image copies the whole
+`src-tauri/migrations/` directory (sqlx::migrate! embeds every `.sql` it
+finds, so a build must never pin an explicit migration file list).
+sqlx
 records a checksum per applied migration, so an edited file makes every
 existing store diverge on next launch, costing the user their saved repos,
 pins, and settings: the store is set aside as `worktreeview.sqlite3.bak` and

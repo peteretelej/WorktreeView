@@ -99,11 +99,9 @@ configured in the Settings Agent API section (loopback `127.0.0.1:9888`
 by default) when the app starts; nothing is reachable from outside the
 machine unless the listen address is changed there. A bind failure, such
 as a port already in use, never blocks app startup: the Settings section
-shows the error and no discovery file is written. The endpoint serves
-axum HTTP semantics over a raw tokio connection loop; request heads are
-parsed with httparse, hyper's own parser, because hyper's h1 connection
-layer does not deliver responses on the current Windows host
-(upstream-report candidate).
+shows the error and no discovery file is written. Transport internals
+(HTTP semantics, head and body caps, the hyper h1 bypass) are described
+in [architecture.md](architecture.md).
 
 ### Authentication
 
