@@ -1,9 +1,8 @@
 import { pairHunkLines, type DiffLine, type HunkLike, type PatchGap } from "./diff.ts";
 
 // Presentation stream for the patch pane: one flat row list per file
-// (hunk headers, patch or file lines, expand controls), plus the height
-// bookkeeping that lets a scroll window mount only visible rows. Both
-// patch and full-file views render from this module.
+// (hunk headers, patch or file lines, expand controls) that renders whole
+// in native flow. Both patch and full-file views render from this module.
 
 // Gaps at or under this many hidden lines collapse to a slim one-line
 // control; taller gaps keep the regular control.
@@ -70,7 +69,7 @@ export function buildPatchRows(expandedHunks: HunkLike[], gaps: PatchGap[], expa
 }
 
 // The full-file view as a stream of new-side line rows, so both pane modes
-// share the windowed renderer. Lines carry a context prefix so token
+// render from one row-list builder. Lines carry a context prefix so token
 // lookup rides the same path as patch lines.
 export function buildFileRows(contentLines: string[]): RowSpec[] {
   return contentLines.map((text, index) => ({ kind: "line" as const, line: { text: ` ${text}`, oldLine: null, newLine: index + 1 }, hunkIndex: 0 }));

@@ -26,11 +26,11 @@ later optimization target.
 - Both patch and full-file views render one continuous row stream in
   native flow (`src/stream.ts` builds the rows; there is no custom scroll
   code). The whole stream is present in the DOM and the browser owns
-  scrolling; rows declare `content-visibility: auto` with a fixed
-  intrinsic size, so the engine skips layout and paint for offscreen rows
-  and scrolling stays smooth on very large diffs and files. The DOM scales
-  with the diff - memory, not responsiveness, is the trade-off, and the
-  e2e suite validates a 6000-line patch end to end.
+  scrolling, so the scrollbar and the content can never desync. The DOM
+  scales with the diff - memory, not responsiveness, is the trade-off.
+  Files past the render cap (50,000 rows) decline with open-externally
+  actions instead of freezing, and the e2e suite validates a 6000-line
+  patch end to end.
 - Selected file patches are cached in memory for the life of the review,
   keyed by the same identity the backend fetch uses. Revisiting a file
   renders from the cache with no Git spawn; the cache resets when the
@@ -44,8 +44,8 @@ later optimization target.
   stream the user scrolls through.
 - Diff highlighting never delays first paint: lines render as plain text
   immediately, and token spans swap in once the worker responds. Patch
-  hunks tokenize whole as they scroll into view; the full-file view
-  tokenizes in bounded chunks that land progressively. Tokenization runs
+  hunks tokenize whole, in order, on load; the full-file view tokenizes in
+  bounded chunks that land progressively. Tokenization runs
   in a Web Worker, so grammar CPU can never block rendering or input;
   per-line length and time budgets degrade pathological lines to plain
   text instead of hanging, superseded requests are discarded on file

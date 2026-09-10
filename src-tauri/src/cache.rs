@@ -84,10 +84,12 @@ pub(crate) async fn store_log_page(
         let Ok(parents) = serde_json::to_string(&commit.parents) else {
             return;
         };
-        // Commit content is immutable, so a stored SHA row is never updated.
+        // Commit content is immutable, but refs are mutable decorations: a
+        // stored row's refs must follow the branch when it moves.
         let _ = sqlx::query(
-            "INSERT OR IGNORE INTO commits (sha, subject, author, date, refs, parents) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO commits (sha, subject, author, date, refs, parents) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(sha) DO UPDATE SET refs = excluded.refs",
         )
         .bind(&commit.sha)
         .bind(&commit.subject)

@@ -778,6 +778,9 @@ function App() {
     try {
       const bytes = await invoke<ArrayBuffer>("read_review_file_bytes", { path: identity.target.kind === "worktree" ? identity.target.worktree.path : identity.repoPath, base: identity.base, headRef: identity.target.kind === "ref" ? identity.target.name : identity.target.kind === "commit" ? identity.target.sha : null, committedOnly: identity.scope === "committed", reversed: identity.reversed, file: file.path, untracked: file.untracked });
       if (generation !== imageGenerationRef.current || imageIdentityRef.current !== imageIdentity || !sameReview(reviewIdentityRef.current, identity)) return;
+      // Empty bytes mean the file does not exist on this side (deleted
+      // images), not a renderable asset.
+      if (bytes.byteLength === 0) { setFileImage(null); return; }
       const mime = imageMimeForPath(file.path) ?? "application/octet-stream";
       setFileImage(URL.createObjectURL(new Blob([bytes], { type: mime })));
     } catch (error) {
@@ -1229,8 +1232,8 @@ function PatchPane({ selectedFile, patch, patchError, patchLoading, diffPrefs, r
   }, [regions, rows]);
 
   // The whole stream renders in native flow: every row stays in the DOM,
-  // the browser owns the scrollbar, and rows outside the viewport skip
-  // layout and paint via content-visibility. No scroll math lives here.
+  // the browser owns scrolling, and nothing custom runs in the scroll
+  // path.
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // Change navigation: prev/next step between change regions, the strip
@@ -1339,8 +1342,8 @@ function PatchPane({ selectedFile, patch, patchError, patchLoading, diffPrefs, r
   };
   // Highlighting is progressive: lines paint as plain text immediately, and
   // token spans swap in once their hunk has been tokenized in the worker.
-  // Hunks tokenize as they scroll into view; tokenization runs off the UI
-  // thread, so it can never block rendering or input.
+  // Hunks tokenize whole, in order, off the UI thread; token spans swap in
+  // as results land and can never block rendering or input.
   const lang = diffPrefs.syntaxVisible && patch && !patch.binary && selectedFile ? languageForPath(selectedFile.path) : null;
   const [tokenMap, setTokenMap] = useState<Map<DiffLine, TokenLine> | null>(null);
   const tokenizedHunksRef = useRef(new Set<string>());
@@ -1467,9 +1470,6 @@ function ExpandGapRow({ gap, slim, pending, error, onExpand }: { gap: PatchGap; 
   return <button className={`expand-gap${slim ? " slim" : ""}`} type="button" disabled={pending} aria-label={label} title={error ? "File content is unavailable" : label} onClick={onExpand}>{pending ? "Loading hidden lines…" : error ? "Hidden lines unavailable, click to retry" : <><UnfoldVertical size={slim ? 10 : 12} />{label}</>}</button>;
 }
 
-// A thin fixed overlay mapping where the patch's changes sit in the
-// stream; one click jumps to a change. Ticks keep the change strip cheap:
-// plain positioned buttons, no canvas.
 // The pane heading's change stepper. It derives the current region from the
 // live scroll position, so the counter, the enabled states, and the
 // movement can never disagree.
@@ -1505,9 +1505,21 @@ function ChangeNav({ scrollRef, regions, regionRows, onStep, streamKey }: { scro
     const el = scrollRef.current;
     el?.addEventListener("scroll", onScroll, { passive: true });
     // A resize rewraps rows (wrap mode) and shifts offsets without any
-    // scroll event, so re-derive from live layout then too.
+    // scroll event, so re-derive from live layout then too. Observing the
+    // element covers app-internal resizes (pane collapse), not just window
+    // edges.
     window.addEventListener("resize", onScroll);
-    return () => { el?.removeEventListener("scroll", onScroll); window.removeEventListener("resize", onScroll); cancelAnimationFrame(frame.current); };
+    let observer: ResizeObserver | null = null;
+    if (el && typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(onScroll);
+      observer.observe(el);
+    }
+    return () => {
+      el?.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+      observer?.disconnect();
+      cancelAnimationFrame(frame.current);
+    };
   }, [regionRows, scrollRef, streamKey]);
   const step = (direction: 1 | -1) => {
     const index = current + direction;
@@ -1540,7 +1552,17 @@ function ChangeStrip({ scrollRef, regions, regionRows, onJump, streamKey }: { sc
     const el = scrollRef.current;
     el?.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", onScroll);
-    return () => { el?.removeEventListener("scroll", onScroll); window.removeEventListener("resize", onScroll); cancelAnimationFrame(frame.current); };
+    let observer: ResizeObserver | null = null;
+    if (el && typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(onScroll);
+      observer.observe(el);
+    }
+    return () => {
+      el?.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+      observer?.disconnect();
+      cancelAnimationFrame(frame.current);
+    };
   }, [scrollRef, streamKey]);
   useEffect(() => {
     const el = scrollRef.current;
