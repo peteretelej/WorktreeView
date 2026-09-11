@@ -58,15 +58,18 @@ Every worktree review carries three presets:
 The base defaults to the fork point between the reviewed branch and the
 default branch (the merge-base), so a review shows what the branch
 actually changes, not everything that moved elsewhere since. To compare
-against something else, pick any ref in the **BASE** box or click the
-corner-arrow "Use as review base" button on any commit row in the
-history to re-base the review there.
+against something else, open the compare chip in the review header (it
+shows the active `base...target` range) and pick any ref in the
+**BASE** box, or click the corner-arrow "Use as review base" button on
+any commit row in the history to re-base the review there.
 
 ## Review any commit
 
 Commit history is always in the sidebar, following the project or
 branch you are viewing. Click a commit to review that commit's own
-diff against its parent; no checkout, no new branch.
+diff against its parent; no checkout, no new branch. The commit row in
+the review header keeps the subject visible; click it to expand the
+full description with copyable base and target hashes.
 
 ![Commit review](images/guide-commit-review.webp)
 

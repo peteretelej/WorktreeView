@@ -191,8 +191,7 @@ code,
   background: var(--surface);
 }
 
-.brand-row,
-.topbar {
+.brand-row {
   height: 48px;
   flex: none;
   border-bottom: 1px solid var(--border);
@@ -450,61 +449,6 @@ kbd {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-}
-
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0 12px 0 16px;
-  background: var(--surface);
-}
-
-.breadcrumb {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 5px;
-  overflow: hidden;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.breadcrumb span {
-  color: var(--muted);
-}
-
-.topbar-actions {
-  display: flex;
-  margin-left: auto;
-  align-items: center;
-  gap: 7px;
-}
-
-.safety-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--ok);
-  font-size: 11px;
-}
-
-.search-button {
-  display: inline-flex;
-  height: 30px;
-  align-items: center;
-  gap: 6px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 11px;
-}
-
-.search-button:not(:disabled):hover {
-  color: var(--foreground);
 }
 
 .content {
@@ -944,8 +888,8 @@ h2 {
 .commit-row:focus-within .copy-button.ghost,
 .commit-row:hover .ghost-action,
 .commit-row:focus-within .ghost-action,
-.review-identity:hover .copy-button.ghost,
-.review-identity:focus-within .copy-button.ghost {
+.sha-row:hover .copy-button.ghost,
+.sha-row:focus-within .copy-button.ghost {
   opacity: 0.7;
 }
 
@@ -1329,11 +1273,6 @@ button:disabled {
 }
 
 @media (max-width: 680px) {
-  .safety-label,
-  .search-button span {
-    display: none;
-  }
-
   .table-header {
     display: none;
   }
@@ -1353,17 +1292,40 @@ button:disabled {
 }
 
 .review-view { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; }
-.review-header { position: relative; display: flex; min-height: 106px; flex: none; flex-wrap: wrap; align-items: flex-start; gap: 12px 24px; padding: 16px 20px 12px; border-bottom: 1px solid var(--border); background: var(--surface); }
-.review-heading { min-width: 220px; flex: 1; }
-.review-heading h1 { margin: 0; font-family: var(--font-mono); font-size: 18px; }
-.back-button, .swap-button { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; }
-.back-button { margin-bottom: 10px; padding: 0; }
-.review-nav { display: inline-flex; align-items: center; gap: 4px; margin-bottom: 10px; }
-.review-nav .icon-button { width: 24px; height: 24px; }
+.review-header { display: flex; flex: none; flex-direction: column; border-bottom: 1px solid var(--border); background: var(--surface); }
+.review-bar { position: relative; display: flex; min-height: 44px; align-items: center; gap: 8px; padding: 0 10px; }
+.review-nav { display: inline-flex; align-items: center; gap: 2px; }
+.review-nav .icon-button { width: 26px; height: 26px; }
+.crumb-link { max-width: 220px; overflow: hidden; padding: 3px 5px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); cursor: pointer; font: 11.5px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.crumb-link:hover { background: var(--surface-2); color: var(--foreground); }
+.crumb-sep { color: var(--border); }
+.crumb-leaf { overflow: hidden; padding: 3px 4px; color: var(--foreground); font: 650 11.5px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.compare-wrap { position: relative; }
+.range-chip { display: inline-flex; height: 28px; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--background); color: var(--foreground); cursor: pointer; font: 11px var(--font-mono); }
+.range-chip:hover { border-color: var(--primary); }
+.range-chip svg { color: var(--muted); }
+.compare-pop { position: absolute; z-index: 6; top: calc(100% + 6px); left: 0; display: flex; flex-direction: column; gap: 8px; width: min(340px, calc(100vw - 40px)); padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--elevated); box-shadow: var(--shadow-dropdown); }
+.compare-pop .branch-picker { width: 100%; }
+.compare-row { display: flex; align-items: flex-end; gap: 8px; }
+.compare-row .branch-picker { flex: 1; min-width: 0; }
+.bar-grow { flex: 1; min-width: 0; }
+.review-counts { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.review-commit { border-top: 1px solid var(--border); }
+.commit-toggle { display: flex; width: 100%; min-height: 32px; align-items: center; gap: 8px; padding: 0 12px; border: 0; background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
+.commit-toggle:hover { background: var(--surface-2); color: var(--foreground); }
+.commit-toggle:focus { outline: none; }
+.commit-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.commit-toggle .chev { flex: none; transition: transform 0.15s ease; }
+.commit-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.commit-title { overflow: hidden; font: 600 12px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.commit-detail { display: flex; flex-direction: column; gap: 8px; max-width: 720px; padding: 0 12px 10px 32px; }
+.commit-body { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+.sha-row { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; padding-top: 8px; border-top: 1px solid var(--border); color: var(--muted); font-size: 10.5px; }
+.sha { display: inline-flex; min-width: 0; align-items: center; gap: 6px; }
+.sha code { overflow: hidden; max-width: 340px; text-overflow: ellipsis; white-space: nowrap; }
+.review-subbar { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 0 10px; border-top: 1px solid var(--border); background: var(--surface-2); }
+.back-button, .swap-button { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0; }
 .back-button:hover, .swap-button:hover { color: var(--foreground); }
-.review-meta { display: flex; min-width: 0; gap: 12px; margin-top: 8px; color: var(--muted); font-size: 10px; }
-.review-meta code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.review-controls { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
 .branch-picker { position: relative; display: grid; width: 180px; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; color: var(--muted); font-size: 9px; text-transform: uppercase; }
 .branch-picker label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .branch-selection { overflow: hidden; max-width: 90px; color: var(--foreground); font-size: 9px; text-overflow: ellipsis; text-transform: none; white-space: nowrap; }
@@ -1383,9 +1345,6 @@ button:disabled {
 .scope-toggle button:last-child { border-right: 0; }
 .scope-toggle button.active { background: var(--primary-soft); color: var(--foreground); }
 .scope-fixed { display: inline-flex; height: 29px; align-items: center; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--muted); font-size: 10px; }
-.review-status { display: flex; width: 100%; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
-.review-counts, .review-identity { color: var(--muted); font-size: 11px; }
-.review-identity { display: inline-flex; gap: 12px; }
 .review-body { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: 300px minmax(0, 1fr); }
 .file-index { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--border); background: var(--surface); }
 .pane-heading { display: flex; height: 36px; flex: none; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
@@ -1454,7 +1413,6 @@ button:disabled {
 .diff-toggles { display: flex; align-items: center; gap: 1px; }
 .diff-toggles .icon-button { width: 24px; height: 24px; border-radius: 4px; }
 .diff-toggles .icon-button.active { color: var(--primary); background: var(--primary-soft); }
-.review-status .diff-toggles { margin-left: auto; align-self: center; }
 .whitespace-glyph { color: var(--muted); }
 .hunk-list.wrap-lines { min-width: 0; }
 .hunk-list.wrap-lines .diff-line { grid-template-columns: 42px 42px minmax(0, 1fr); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -1507,15 +1465,6 @@ button:disabled {
 .commit-ref { flex: none; overflow: hidden; max-width: 140px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 8px; text-overflow: ellipsis; }
 .commits-load-more { flex: none; margin: 4px 6px; padding: 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--foreground); cursor: pointer; font-size: 10px; }
 .commits-load-more:disabled { cursor: not-allowed; opacity: 0.55; }
-/* The description is reading material, not identity: collapsed by default,
-   opened on demand with the whole body prewrapped. */
-.commit-description { margin-top: 6px; color: var(--muted); font-size: 10px; }
-.commit-description summary { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; list-style: none; user-select: none; }
-.commit-description summary::-webkit-details-marker { display: none; }
-.commit-description summary:hover, .commit-description[open] summary { color: var(--foreground); }
-.commit-description summary svg { transition: transform 120ms ease; }
-.commit-description[open] summary svg { transform: rotate(90deg); }
-.commit-description p { margin: 6px 0 0; max-width: 560px; max-height: 180px; overflow-y: auto; padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--foreground); font: 11px/1.5 var(--font-mono); white-space: pre-wrap; }
 .nav-collapsed .commits-bar { display: none; }
 
 @media (max-width: 960px) {
@@ -1524,15 +1473,11 @@ button:disabled {
 
 @media (max-width: 760px) {
   .review-body { grid-template-columns: minmax(180px, 38%) minmax(0, 1fr); }
-  .review-header { padding: 12px; }
-  .review-controls { width: 100%; align-items: center; }
-  .review-meta { display: none; }
-  .review-heading h1 { font-size: 16px; }
+  .review-bar { flex-wrap: wrap; }
 }
 
 .settings-overlay { position: fixed; z-index: 15; inset: 0; display: grid; grid-template-columns: 240px minmax(0, 1fr); background: var(--background); }
 .settings-nav { display: flex; min-width: 0; flex-direction: column; gap: 14px; padding: 14px 12px; border-right: 1px solid var(--border); background: var(--surface); }
-.settings-nav .back-button { margin-bottom: 0; }
 .settings-nav-sections { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .settings-nav-link { display: flex; height: 30px; align-items: center; padding: 0 8px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; text-align: left; }
 .settings-nav-link:hover, .settings-nav-link:focus-visible { background: var(--surface-2); color: var(--foreground); }

@@ -109,7 +109,7 @@ describe("bundled desktop surface pins and archived surfaces", () => {
     const archiveRow = await inventoryRow("e2e-archive");
     await archiveRow.$(".branch-title").click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
-    await $(`button=Overview`).click();
+    await $(".crumb-link").click();
     await openInventoryTab("Branches");
     await $('button[aria-label="Pin branch e2e-gone"]').click();
     await expect($('button[aria-label="Unpin branch e2e-gone"]')).toBeExisting();

@@ -177,11 +177,11 @@ describe("bundled desktop lifecycle", () => {
     await sidebarBranchRow.$(".branch-title").click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await expect($('span[aria-label="Review scope"]')).toHaveText("Committed only");
-    await $(`button=Overview`).click();
+    await $(".crumb-link").click();
     await $(`.sidebar-children button.sidebar-worktree-row`).click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await $('button=All changes').click();
-    await $(`button=Overview`).click();
+    await $(".crumb-link").click();
     await $(`button[aria-label="Pin repository"]`).click();
     await expect($("div.nav-section-label=Pinned")).toBeDisplayed();
     await browser.refresh();
@@ -325,7 +325,9 @@ describe("bundled desktop lifecycle", () => {
     await expect(worktreePaletteResult).toBeDisplayed();
     await worktreePaletteResult.click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
-    await expect($(".review-heading h1")).toHaveText("feature");
+    // The commit row's title is a plain span: the driver reads its text from
+    // the DOM instead of via getElementText, which reports empty for spans.
+    await browser.waitUntil(async () => await browser.execute(() => document.querySelector(".commit-title")?.textContent) === "feature");
     await expect($(".review-counts")).toHaveText("6 files, +6010 -0");
 
     await $('button[aria-label="Find repositories and worktrees"]').click();
@@ -345,10 +347,13 @@ describe("bundled desktop lifecycle", () => {
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await expect($(".review-counts")).toHaveText("6 files, +6010 -0");
 
+    // The pickers live behind the compare chip; opening it mounts them.
+    await $(".range-chip").click();
     const baseSearch = await $('input[aria-controls="review-base-options"]');
     await baseSearch.click();
     await browser.waitUntil(async () => (await $$('#review-base-options > button[role="option"]')).length === 50);
     await expect($('#review-base-options [aria-label="Base branch pages"]')).toHaveText(expect.stringContaining("1-50 of 123"));
+    await browser.keys("Escape");
     await browser.keys("Escape");
     await browser.execute(() => {
       const buttons = Array.from(document.querySelectorAll(".scope-toggle button"));
@@ -492,11 +497,13 @@ describe("bundled desktop lifecycle", () => {
     await $('//button[contains(@class, "file-row")][.//span[normalize-space()="untracked.txt"]]').click();
     await expect($("strong=Patch not rendered")).toBeDisplayed();
     await expect($("span=The selected file is not an untracked review file.")).toBeDisplayed();
-    await baseSearch.setValue("other");
+    await $(".range-chip").click();
+    await $('input[aria-controls="review-base-options"]').setValue("other");
     assert.equal(await $("span=other.txt").isExisting(), false);
     await $('//div[@id="review-base-options"]//button[normalize-space()="other"]').click();
     await expect($("span=other.txt")).toBeDisplayed();
     await expect($(".review-counts")).toHaveText("6 files, +6010 -1");
+    await browser.keys("Escape");
     git(["config", "core.filemode", "true"], repository);
     chmodSync(path.join(worktree, ".gitignore"), 0o755);
     // Wait out each toggle's recompute: a click issued into the loading
