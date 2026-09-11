@@ -7,6 +7,11 @@ use sqlx::{Row, SqlitePool};
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const MAX_TOKEN_NAME_CHARS: usize = 200;
 const DEFAULT_TOKEN_NAME: &str = "agent";
+// Secrets carry this recognizable prefix so a pasted string can be
+// identified as a WorktreeView token in agent configs; it is part of the
+// secret and covered by the stored hash. Kept separator-free so a
+// double-click selects the whole token in editors and terminals.
+const TOKEN_PREFIX: &str = "wv";
 
 // The authenticated caller resolved from a bearer secret: only the token row
 // id and its display name leave this module, never the hash or secret.
@@ -38,7 +43,8 @@ pub(crate) fn generate_token() -> Result<String, String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes)
         .map_err(|error| format!("Could not generate the endpoint token: {error}"))?;
-    let mut token = String::with_capacity(64);
+    let mut token = String::with_capacity(TOKEN_PREFIX.len() + 64);
+    token.push_str(TOKEN_PREFIX);
     for byte in bytes {
         token.push(HEX_DIGITS[usize::from(byte >> 4)] as char);
         token.push(HEX_DIGITS[usize::from(byte & 0x0f)] as char);
@@ -173,7 +179,7 @@ pub(crate) async fn authenticate_token_in_pool(pool: &SqlitePool, secret: &str) 
     Some(AgentIdentity { token_id, name })
 }
 
-// The listener's per-boot provisioning: deletes the previous default (plus
+// The listener's start provisioning: deletes the previous default (plus
 // any revoked rows left by older builds) and inserts a fresh one in one
 // transaction, so the table never accumulates dead defaults. The returned
 // secret goes only into the discovery file written by the same startup path.
@@ -208,11 +214,13 @@ mod tests {
     use crate::testutil::test_pool;
 
     #[test]
-    fn token_is_64_lowercase_hex_and_unique_per_call() {
+    fn token_has_the_wv_prefix_lowercase_hex_body_and_is_unique_per_call() {
         let first = generate_token().unwrap();
         let second = generate_token().unwrap();
-        assert_eq!(first.len(), 64);
-        assert!(first.chars().all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase()));
+        assert!(first.starts_with(TOKEN_PREFIX));
+        assert_eq!(first.len(), TOKEN_PREFIX.len() + 64);
+        let body = &first[TOKEN_PREFIX.len()..];
+        assert!(body.chars().all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase()));
         assert_ne!(first, second);
     }
 
@@ -311,7 +319,7 @@ mod tests {
         assert!(rows[0].is_default);
     }
 
-    // Named tokens persist across the per-boot default rotations: a fresh
+    // Named tokens persist across the default rotations on listener starts: a fresh
     // boot's provisioning never touches them, and their secrets keep working.
     #[tokio::test]
     async fn named_tokens_survive_boots() {

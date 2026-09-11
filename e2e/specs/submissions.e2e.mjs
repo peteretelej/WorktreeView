@@ -117,10 +117,10 @@ describe("desktop agent submissions", () => {
     // surface and the arrival cue then opens the targeted review.
     await openSelectedRepository(repository);
 
-    // The app published its loopback endpoint and per-boot token at startup.
+    // The app published its loopback endpoint and startup token.
     const discovery = JSON.parse(readFileSync(discoveryPath, "utf8"));
     assert.equal(typeof discovery.port, "number");
-    assert.match(discovery.token, /^[0-9a-f]{64}$/);
+    assert.match(discovery.token, /^wv[0-9a-f]{64}$/);
     console.log(`submissions-e2e: discovery read, port=${discovery.port}`);
     const endpoint = `http://127.0.0.1:${discovery.port}/`;
 

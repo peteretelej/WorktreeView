@@ -19,8 +19,9 @@ normalized domain data through narrow, typed Tauri commands.
   `list_comments`, `list_submissions`, `reply_comment`, `set_comment_resolved`,
   `edit_comment`, `match_comment_anchors`.
 - `agents.rs`: the token store: per-agent tokens as table rows with only
-  their SHA-256 hex hash persisted. Secrets are 32 random bytes hex,
-  generated once at creation and never stored or logged; authentication
+  their SHA-256 hex hash persisted. Secrets carry a `wv` prefix followed
+  by 32 random bytes hex, generated once at creation and never stored or
+  logged; authentication
   hashes the presented secret and matches a non-revoked row, recording a
   last-used timestamp. Deletion is immediate and refuses the current
   default token, which the listener's startup path provisions fresh

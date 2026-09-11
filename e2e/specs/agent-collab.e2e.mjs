@@ -68,7 +68,7 @@ async function waitText(selector_, expected, label) {
 }
 
 // One stateless MCP tools/call against the app's loopback face, authorized
-// by the discovery file's per-boot default token (the same auth every face
+// by the discovery file's default token (the same auth every face
 // and token shares). Returns the parsed JSON payload of the tool result.
 async function callTool(endpoint, token, name, args) {
   const response = await fetch(endpoint, {
@@ -109,10 +109,10 @@ describe("desktop agent comment collaboration", () => {
 
     await openSelectedRepository(repository);
 
-    // The app published its loopback endpoint and per-boot token at startup.
+    // The app published its loopback endpoint and startup token.
     const discovery = JSON.parse(readFileSync(discoveryPath, "utf8"));
     assert.equal(typeof discovery.port, "number");
-    assert.match(discovery.token, /^[0-9a-f]{64}$/);
+    assert.match(discovery.token, /^wv[0-9a-f]{64}$/);
     const endpoint = `http://127.0.0.1:${discovery.port}/mcp`;
     console.log(`agent-collab-e2e: discovery read, port=${discovery.port}`);
 

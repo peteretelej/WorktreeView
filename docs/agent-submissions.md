@@ -115,7 +115,8 @@ in [architecture.md](architecture.md).
 Every request carries `Authorization: Bearer <token>`. Tokens are
 per-agent rows minted in the Settings Agent API section (see
 [connect-an-agent.md](connect-an-agent.md) for the setup flow): the
-secret is 32 random bytes hex-encoded, shown once at creation, and only
+secret carries a `wv` prefix followed by 32 random bytes hex-encoded,
+shown once at creation, and only
 its SHA-256 hash is stored. A token's activity is recorded as a last-used timestamp,
 so agent calls are attributable. Deleting a token refuses it immediately;
 the endpoint answers a missing, wrong, or deleted secret identically, and
@@ -138,11 +139,12 @@ data directory (Linux `$XDG_DATA_HOME/com.etelej.worktreeview`, macOS
 `%APPDATA%\com.etelej.worktreeview`):
 
 ```json
-{ "port": 54321, "token": "<64 lowercase hex chars>" }
+{ "port": 54321, "token": "wv<64 lowercase hex chars>" }
 ```
 
-The token is the current listener's default agent token: 32 random bytes
-hex-encoded, generated fresh per listener start and never persisted
+The token is the current listener's default agent token: a `wv` prefix
+followed by 32 random bytes hex-encoded, generated fresh per listener
+start and never persisted
 across restarts. When the endpoint is disabled in Settings, or its bind
 fails,
 no discovery file is written or refreshed. Debug builds write

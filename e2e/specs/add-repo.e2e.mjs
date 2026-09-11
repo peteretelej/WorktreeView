@@ -60,7 +60,7 @@ describe("desktop unattended repository setup", () => {
     git(["add", "README.md"], repository);
     git(["-c", "user.name=WorktreeView E2E", "-c", "user.email=e2e@example.invalid", "commit", "-q", "-m", "readme"], repository);
 
-    // The app publishes its loopback endpoint and per-boot token at
+    // The app publishes its loopback endpoint and startup token at
     // startup, before any repository is open.
     await browser.waitUntil(() => existsSync(discoveryPath), {
       timeout: 20_000,
