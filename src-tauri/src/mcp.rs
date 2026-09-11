@@ -790,7 +790,7 @@ mod tests {
     use crate::testutil::{seed_repo, test_pool, test_path, test_repo};
     use crate::transport::{
         discovery_path, handle, start, CommentChange, CommentSink, ListenerConfig, ListenerStatus,
-        McpStatusHandle, RefreshSink, UNAUTHORIZED,
+        McpStatusHandle, RefreshSink, TransportDeps, UNAUTHORIZED,
     };
     use axum::body::{to_bytes, Body};
     use axum::extract::State;
@@ -1744,15 +1744,20 @@ mod tests {
         let pool = test_pool().await;
         let dir = test_path("mcp-routing");
         std::fs::create_dir_all(&dir).unwrap();
-        let mcp = start(
+        let config = ListenerConfig { enabled: true, address: "127.0.0.1".into(), port: free_port() };
+        let listener = start(
             pool,
-            &dir,
-            Arc::new(|_| {}),
-            noop_refreshes(),
-            noop_comment_changes(),
-            ListenerConfig { enabled: true, address: "127.0.0.1".into(), port: free_port() },
+            TransportDeps {
+                data_dir: dir.clone(),
+                arrivals: Arc::new(|_| {}),
+                refreshes: noop_refreshes(),
+                comment_changes: noop_comment_changes(),
+            },
+            config.clone(),
+            McpStatusHandle::for_config(&config),
         )
         .await
+        .unwrap()
         .unwrap();
         let discovery: Value =
             serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
@@ -1785,7 +1790,7 @@ mod tests {
         .join()
         .unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK"), "unexpected response: {response}");
-        mcp.handle.unwrap().shutdown();
+        listener.stop();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1801,15 +1806,20 @@ mod tests {
         let (refreshes, announced) = recording_refreshes();
         let dir = test_path("mcp-socket");
         std::fs::create_dir_all(&dir).unwrap();
-        let mcp = start(
+        let config = ListenerConfig { enabled: true, address: "127.0.0.1".into(), port: free_port() };
+        let listener = start(
             pool.clone(),
-            &dir,
-            Arc::new(|_| {}),
-            refreshes,
-            noop_comment_changes(),
-            ListenerConfig { enabled: true, address: "127.0.0.1".into(), port: free_port() },
+            TransportDeps {
+                data_dir: dir.clone(),
+                arrivals: Arc::new(|_| {}),
+                refreshes,
+                comment_changes: noop_comment_changes(),
+            },
+            config.clone(),
+            McpStatusHandle::for_config(&config),
         )
         .await
+        .unwrap()
         .unwrap();
         let discovery: Value =
             serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
@@ -1891,7 +1901,7 @@ mod tests {
             [repo.to_string_lossy().as_ref()]
         );
 
-        mcp.handle.unwrap().shutdown();
+        listener.stop();
         // Storage attribution is asserted after the endpoint stops serving:
         // querying the shared single-connection pool mid-service would only
         // exercise sqlx cross-runtime scheduling, as in the raw face's

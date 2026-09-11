@@ -12,7 +12,7 @@ normalized domain data through narrow, typed Tauri commands.
   `remove_repo`, `get_branch_inventory`, `fetch_project`,
   `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
   `list_agent_tokens`, `create_agent_token`, `delete_agent_token`,
-  `get_mcp_status`,
+  `get_mcp_status`, `restart_mcp`,
   `list_refs`, `list_commits`, `describe_commit`, `list_review_changes`,
   `list_surfaces`, `read_review_patch`, `read_review_file`, `open_review_file`,
   `create_comment`,
@@ -23,9 +23,9 @@ normalized domain data through narrow, typed Tauri commands.
   generated once at creation and never stored or logged; authentication
   hashes the presented secret and matches a non-revoked row, recording a
   last-used timestamp. Deletion is immediate and refuses the current
-  boot's default token, which the listener's startup path provisions fresh
-  per boot (deleting the previous default in the same transaction) and
-  publishes only through the discovery file.
+  default token, which the listener's startup path provisions fresh
+  per listener start, boot or restart (deleting the previous default in
+  the same transaction) and publishes only through the discovery file.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
   (16 MiB per stream), a deadline (30 seconds for local probes, 300 for the
   fetch the refresh action runs), and kill-on-drop cancellation.
@@ -95,10 +95,15 @@ normalized domain data through narrow, typed Tauri commands.
   mutation on the MCP face a `comment-changed` event, all via injected
   sinks so the handler matrix is testable without an app; the webview
   never listens on a socket. On a successful bind the startup path
-  provisions the per-boot default token and writes the discovery file;
+  provisions the default token and writes the discovery file;
   exit shutdown is best-effort and removes the file only when still
   owned. A stale discovery file may be left behind; clients tolerate
-  that by re-reading the file when their token is refused.
+  that by re-reading the file when their token is refused. The
+  `restart_mcp` command (the Settings Agent API Restart action) stops
+  the running listener and waits for its thread, freeing the socket,
+  then binds a fresh one from the settings as persisted right now
+  through the same start path and the same shared status handle; the
+  default token renews on every start.
 - `cache.rs`: SQLite-backed history cache for commit pages and ancestry
   marks, keyed by resolved SHAs.
 - `retrospection.rs`: records reviewed worktree and branch identities

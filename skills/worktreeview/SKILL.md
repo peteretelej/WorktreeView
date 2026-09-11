@@ -46,8 +46,9 @@ Read the discovery file for the current `{port, token}`:
 Two token options:
 
 - **Zero-config**: use the discovery file's `token`. It is the built-in
-  default token and renews at every app start, so re-read the file whenever
-  a request answers 401.
+  default token and renews at every app start and whenever the endpoint is
+  restarted from Settings, so re-read the file whenever a request answers
+  401.
 - **Named token (stable)**: have the human mint one in Settings -> Agent
   API (name it after the agent). It survives restarts, gives the agent its
   own comment identity, and can be deleted independently. Prefer this for

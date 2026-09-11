@@ -18,7 +18,7 @@ use commands::{
     list_comments, list_commits, list_refs, list_repos, list_review_changes, list_submissions,
     list_surfaces, list_worktree_status, list_worktrees, match_comment_anchors, open_repo,
     open_review_file, read_review_file, read_review_file_bytes, read_review_patch,
-    remove_repo, reply_comment,
+    remove_repo, reply_comment, restart_mcp,
     delete_agent_token, set_comment_resolved, set_repo_pinned, set_settings, set_surface_pinned,
 };
 use serde::Serialize;
@@ -274,6 +274,7 @@ pub fn run() {
             create_agent_token,
             delete_agent_token,
             get_mcp_status,
+            restart_mcp,
             create_comment,
             list_comments,
             list_submissions,
@@ -288,9 +289,16 @@ pub fn run() {
     app.run(|app_handle, event| {
         if let tauri::RunEvent::Exit = event {
             // Best-effort: stop the loopback listener so the server task
-            // removes the discovery file; nothing joins the task.
-            if let Some(endpoint) = app_handle.try_state::<transport::TransportHandle>() {
-                endpoint.shutdown();
+            // removes the discovery file; nothing joins the task. A
+            // restart holding the owner lock is skipped rather than
+            // waited on: the exiting process takes the listener down
+            // regardless.
+            if let Some(owner) = app_handle.try_state::<transport::ListenerOwner>() {
+                if let Ok(mut owned) = owner.0.try_lock() {
+                    if let Some(endpoint) = owned.take() {
+                        endpoint.shutdown();
+                    }
+                }
             }
         }
     });
@@ -402,23 +410,31 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
         address: settings.mcp_listen_address.clone(),
         port: settings.mcp_port,
     };
+    // One status handle and one set of surroundings serve every listener
+    // start, boot or restart: get_mcp_status readers never hold a stale
+    // object, and the restart command rebuilds the listener with the same
+    // sinks and data directory.
+    let status = transport::McpStatusHandle::for_config(&config);
+    let deps = transport::TransportDeps {
+        data_dir,
+        arrivals,
+        refreshes: Arc::clone(&refreshes),
+        comment_changes,
+    };
     // A failed bind is a normal, user-visible condition (a configured port
     // collision): the app starts and the Settings MCP section shows the
     // error instead of startup failing.
-    let mcp = tauri::async_runtime::block_on(transport::start(
-        pool,
-        &data_dir,
-        arrivals,
-        Arc::clone(&refreshes),
-        comment_changes,
+    let endpoint = tauri::async_runtime::block_on(transport::start(
+        pool.clone(),
+        deps.clone(),
         config,
+        status.clone(),
     ))
     .map_err(|error| format!("Could not start the agent endpoint: {error}"))?;
     app.manage(refreshes);
-    app.manage(mcp.status);
-    if let Some(endpoint) = mcp.handle {
-        app.manage(endpoint);
-    }
+    app.manage(deps);
+    app.manage(status);
+    app.manage(transport::ListenerOwner(tokio::sync::Mutex::new(endpoint)));
     Ok(())
 }
 

@@ -24,6 +24,10 @@ const TRANSPORT_BODY_GUARD_BYTES: usize = 3 * 1024 * 1024;
 // real deliveries are single sub-3 MiB loopback requests.
 const CONNECTION_STALL_LIMIT: Duration = Duration::from_secs(30);
 
+// Idle poll period for the accept loop's exit check; a restart or app exit
+// breaks the loop within this window.
+const ACCEPT_POLL: Duration = Duration::from_millis(200);
+
 // Our responses are small JSON or plain text; anything larger is a bug.
 const RESPONSE_BODY_LIMIT: usize = 1024 * 1024;
 // A request head beyond this is refused before parsing continues.
@@ -92,6 +96,32 @@ pub(crate) struct ListenerStatus {
 pub(crate) struct McpStatusHandle(pub(crate) Arc<Mutex<ListenerStatus>>);
 
 impl McpStatusHandle {
+    // One handle serves the listener's whole lifetime, including restarts:
+    // startup and the restart command share it so get_mcp_status readers
+    // never hold a stale object.
+    pub(crate) fn for_config(config: &ListenerConfig) -> Self {
+        let status = Self(Arc::new(Mutex::new(ListenerStatus {
+            enabled: false,
+            running: false,
+            address: String::new(),
+            port: 0,
+            error: None,
+        })));
+        status.reset_from_config(config);
+        status
+    }
+
+    // Every listener start, boot or restart, resets the shared status
+    // from the config it is given.
+    pub(crate) fn reset_from_config(&self, config: &ListenerConfig) {
+        let mut live = self.lock_status();
+        live.enabled = config.enabled;
+        live.address = config.address.clone();
+        live.port = config.port;
+        live.running = false;
+        live.error = None;
+    }
+
     pub(crate) fn lock_status(&self) -> std::sync::MutexGuard<'_, ListenerStatus> {
         self.0.lock().expect("listener status mutex poisoned")
     }
@@ -109,6 +139,17 @@ pub(crate) struct ListenerConfig {
     pub(crate) enabled: bool,
     pub(crate) address: String,
     pub(crate) port: u16,
+}
+
+// The fixed surroundings a listener start (boot or restart) needs beyond
+// the config: captured once at app startup and managed so the restart
+// command can rebuild the listener with the same sinks.
+#[derive(Clone)]
+pub(crate) struct TransportDeps {
+    pub(crate) data_dir: PathBuf,
+    pub(crate) arrivals: ArrivalSink,
+    pub(crate) refreshes: RefreshSink,
+    pub(crate) comment_changes: CommentSink,
 }
 
 #[derive(Clone)]
@@ -337,20 +378,34 @@ pub(crate) async fn handle(State(state): State<TransportState>, request: Request
 
 pub(crate) struct TransportHandle {
     shutdown: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl TransportHandle {
+    // Best-effort exit signal at app exit: the accept loop breaks within
+    // one idle poll period.
     pub(crate) fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
     }
+
+    // Full stop for restarts: signal, then wait for the thread so the
+    // socket is released and discovery cleanup has run before a new
+    // listener may rebind the same address. Bounded by one idle poll
+    // period plus the stall limit while an in-flight request finishes.
+    pub(crate) fn stop(mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
-// What one listener start leaves behind: the shared status handle (always)
-// and the running endpoint's shutdown handle (only when serving).
-pub(crate) struct McpStart {
-    pub(crate) status: McpStatusHandle,
-    pub(crate) handle: Option<TransportHandle>,
-}
+// The running listener's stop handle, held by the app so a restart can
+// take the current listener out before binding a new one. The lock is
+// async-aware and held across a whole restart so overlapping restart
+// commands serialize instead of orphaning a listener outside the owner.
+#[derive(Default)]
+pub(crate) struct ListenerOwner(pub(crate) tokio::sync::Mutex<Option<TransportHandle>>);
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 struct EndpointDiscovery {
@@ -568,38 +623,41 @@ async fn write_response(stream: &mut tokio::net::TcpStream, response: Response) 
 // startup: a disabled listener serves nothing, and a failed bind is a
 // normal user-visible condition that never writes a discovery file or
 // provisions a default token, so nothing advertises a dead endpoint.
-// On a successful bind the same startup path provisions the per-boot
-// default token and writes the discovery file with its secret.
+// On a successful bind the same startup path provisions the default
+// token and writes the discovery file with its secret. The status
+// handle is shared across restarts and reset from the config on every
+// call.
 pub(crate) async fn start(
     pool: SqlitePool,
-    data_dir: &Path,
-    arrivals: ArrivalSink,
-    refreshes: RefreshSink,
-    comment_changes: CommentSink,
+    deps: TransportDeps,
     config: ListenerConfig,
-) -> Result<McpStart, String> {
-    let status = McpStatusHandle(Arc::new(Mutex::new(ListenerStatus {
-        enabled: config.enabled,
-        running: false,
-        address: config.address.clone(),
-        port: config.port,
-        error: None,
-    })));
+    status: McpStatusHandle,
+) -> Result<Option<TransportHandle>, String> {
+    status.reset_from_config(&config);
+    let TransportDeps { data_dir, arrivals, refreshes, comment_changes } = deps;
     let state = TransportState { pool, arrivals, refreshes, comment_changes, status: status.clone() };
     if !config.enabled {
-        return Ok(McpStart { status, handle: None });
+        return Ok(None);
     }
     let listener = match std::net::TcpListener::bind((config.address.as_str(), config.port)) {
         Ok(listener) => listener,
         Err(error) => {
             status.set(false, Some(format!("Could not bind the agent endpoint to {address}:{port}: {error}", address = config.address, port = config.port)));
-            return Ok(McpStart { status, handle: None });
+            return Ok(None);
         }
     };
+    // tokio::net::TcpListener::from_std leaves the socket mode to the
+    // caller; without this, accept runs blocking inside the future's poll
+    // and an idle listener sits in the kernel beyond the reach of timers,
+    // the exit flag, and every restart join.
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("Could not ready the agent endpoint socket: {error}"))?;
     let port = listener
         .local_addr()
         .map_err(|error| format!("Could not resolve the agent endpoint port: {error}"))?
         .port();
+    status.lock_status().port = port;
     // Provisioning and discovery come after the bind and stay one unit: if
     // either fails, the bound listener shuts and the error surfaces in the
     // Settings MCP section without a discovery file advertising it.
@@ -610,13 +668,13 @@ pub(crate) async fn start(
                 false,
                 Some(format!("Could not provision the default agent token: {}", error.message)),
             );
-            return Ok(McpStart { status, handle: None });
+            return Ok(None);
         }
     };
-    let discovery = discovery_path(data_dir);
+    let discovery = discovery_path(&data_dir);
     if let Err(error) = write_discovery_file(&discovery, port, &default_secret) {
         status.set(false, Some(error));
-        return Ok(McpStart { status, handle: None });
+        return Ok(None);
     }
     status.set(true, None);
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -626,11 +684,20 @@ pub(crate) async fn start(
     // tasks): the endpoint is one write-only method whose deliveries are
     // bounded by the body guard, so serial handling cannot queue behind
     // scheduler wakeups, and a stalled client is cut by the stall limit.
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("Could not start the agent endpoint runtime: {error}"))?;
-    std::thread::Builder::new()
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let message = format!("Could not start the agent endpoint runtime: {error}");
+            remove_discovery_if_owned(&discovery, port, &default_secret);
+            status.set(false, Some(message.clone()));
+            return Err(message);
+        }
+    };
+    let failure_discovery = discovery.clone();
+    let failure_secret = default_secret.clone();
+    let failure_status = status.clone();
+    let failure_port = port;
+    let thread = std::thread::Builder::new()
         .name("agent-endpoint".into())
         .spawn(move || {
                 let _ = runtime.block_on(async move {
@@ -639,22 +706,62 @@ pub(crate) async fn start(
                         state.status.set(false, Some("Could not adopt the bound listener socket.".into()));
                         return;
                     };
+                    // The exit flag is checked on an accept deadline rather
+                    // than across a dedicated wake: shutdown then costs at
+                    // most one poll period plus any in-flight request,
+                    // which restarts rely on before rebinding the port.
                     loop {
                         if exit.load(Ordering::Relaxed) {
                             break;
                         }
-                        let (mut stream, _) = match listener.accept().await {
-                            Ok(accepted) => accepted,
-                            Err(_) => break,
-                        };
-                        serve_connection(&mut stream, state.clone()).await;
+                        match tokio::time::timeout(ACCEPT_POLL, listener.accept()).await {
+                            Ok(Ok((mut stream, _))) => {
+                                serve_connection(&mut stream, state.clone()).await;
+                            }
+                            // Timed out idle: re-check the flag. Accept errors
+                            // mean the listener is gone.
+                            Ok(Err(_)) => break,
+                            Err(_) => continue,
+                        }
                     }
                     remove_discovery_if_owned(&discovery, port, &default_secret);
                     state.status.set(false, None);
                 });
         })
-        .map_err(|error| format!("Could not start the agent endpoint thread: {error}"))?;
-    Ok(McpStart { status, handle: Some(TransportHandle { shutdown }) })
+        .map_err(|error| {
+            // A dead thread must not leave a discovery file advertising the
+            // bound endpoint or a status claiming it is running.
+            remove_discovery_if_owned(&failure_discovery, failure_port, &failure_secret);
+            let message = format!("Could not start the agent endpoint thread: {error}");
+            failure_status.set(false, Some(message.clone()));
+            message
+        })?;
+    Ok(Some(TransportHandle { shutdown, thread: Some(thread) }))
+}
+
+// Stops the owned listener and starts a fresh one from the given config,
+// reusing the same status handle. The old thread is joined before the new
+// bind so a same-address restart cannot collide with its own predecessor;
+// an in-flight request finishes first, bounded by the stall limit. The
+// owner lock spans the whole sequence, so overlapping restart commands
+// serialize instead of racing the take and the store.
+pub(crate) async fn restart(
+    pool: SqlitePool,
+    deps: &TransportDeps,
+    config: ListenerConfig,
+    status: McpStatusHandle,
+    owner: &ListenerOwner,
+) -> Result<ListenerStatus, String> {
+    let mut owned = owner.0.lock().await;
+    if let Some(stopping) = owned.take() {
+        // The join is a blocking wait on a dedicated thread so the async
+        // caller never blocks the runtime.
+        let _ = tokio::task::spawn_blocking(move || stopping.stop()).await;
+    }
+    let handle = start(pool, deps.clone(), config, status.clone()).await?;
+    *owned = handle;
+    drop(owned);
+    Ok(status.lock_status().clone())
 }
 
 #[cfg(test)]
@@ -685,6 +792,15 @@ mod tests {
 
     fn test_config(port: u16) -> ListenerConfig {
         ListenerConfig { enabled: true, address: "127.0.0.1".into(), port }
+    }
+
+    fn test_deps(
+        dir: &std::path::Path,
+        arrivals: ArrivalSink,
+        refreshes: RefreshSink,
+        comment_changes: CommentSink,
+    ) -> TransportDeps {
+        TransportDeps { data_dir: dir.to_path_buf(), arrivals, refreshes, comment_changes }
     }
 
     // A handler state authenticated by a real token row: the pool-backed
@@ -995,7 +1111,7 @@ mod tests {
     }
 
     // The listener binds the configured address and port, provisions the
-    // per-boot default, and writes the discovery file whose secret is the
+    // default token, and writes the discovery file whose secret is the
     // only copy of that default.
     #[tokio::test(flavor = "multi_thread")]
     async fn start_uses_the_configured_port_and_provisions_the_default() {
@@ -1003,18 +1119,18 @@ mod tests {
         let dir = crate::testutil::test_path("transport-start-configured");
         std::fs::create_dir_all(&dir).unwrap();
         let port = free_port();
-        let mcp = start(
+        let config = test_config(port);
+        let status = McpStatusHandle::for_config(&config);
+        let handle = start(
             pool.clone(),
-            &dir,
-            Arc::new(|_| {}),
-            noop_refreshes(),
-            noop_comment_changes(),
-            test_config(port),
+            test_deps(&dir, Arc::new(|_| {}), noop_refreshes(), noop_comment_changes()),
+            config,
+            status.clone(),
         )
         .await
+        .unwrap()
         .unwrap();
-        assert!(mcp.handle.is_some());
-        let status = mcp.status.lock_status().clone();
+        let status = status.lock_status().clone();
         assert!(status.running);
         assert_eq!(status.port, port);
         assert_eq!(status.error, None);
@@ -1032,7 +1148,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(default_row, ("agent".into(), true));
-        mcp.handle.unwrap().shutdown();
+        handle.stop();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1046,18 +1162,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let occupier = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = occupier.local_addr().unwrap().port();
-        let mcp = start(
+        let config = test_config(port);
+        let status = McpStatusHandle::for_config(&config);
+        let handle = start(
             pool.clone(),
-            &dir,
-            Arc::new(|_| {}),
-            noop_refreshes(),
-            noop_comment_changes(),
-            test_config(port),
+            test_deps(&dir, Arc::new(|_| {}), noop_refreshes(), noop_comment_changes()),
+            config,
+            status.clone(),
         )
         .await
         .unwrap();
-        assert!(mcp.handle.is_none());
-        let status = mcp.status.lock_status().clone();
+        assert!(handle.is_none());
+        let status = status.lock_status().clone();
         assert!(!status.running);
         assert!(status.error.is_some());
         assert!(!discovery_path(&dir).exists());
@@ -1076,18 +1192,18 @@ mod tests {
         let pool = test_pool().await;
         let dir = crate::testutil::test_path("transport-start-disabled");
         std::fs::create_dir_all(&dir).unwrap();
-        let mcp = start(
+        let config = ListenerConfig { enabled: false, address: "127.0.0.1".into(), port: free_port() };
+        let status = McpStatusHandle::for_config(&config);
+        let handle = start(
             pool,
-            &dir,
-            Arc::new(|_| {}),
-            noop_refreshes(),
-            noop_comment_changes(),
-            ListenerConfig { enabled: false, address: "127.0.0.1".into(), port: free_port() },
+            test_deps(&dir, Arc::new(|_| {}), noop_refreshes(), noop_comment_changes()),
+            config,
+            status.clone(),
         )
         .await
         .unwrap();
-        assert!(mcp.handle.is_none());
-        let status = mcp.status.lock_status().clone();
+        assert!(handle.is_none());
+        let status = status.lock_status().clone();
         assert!(!status.enabled && !status.running);
         assert!(status.error.is_none());
         assert!(!discovery_path(&dir).exists());
@@ -1138,15 +1254,21 @@ mod tests {
         let (arrivals, received) = recording_sink();
         let dir = crate::testutil::test_path("transport-socket");
         std::fs::create_dir_all(&dir).unwrap();
-        let mcp = start(pool, &dir, arrivals, noop_refreshes(), noop_comment_changes(), test_config(0))
-            .await
-            .unwrap();
+        let handle = start(
+            pool,
+            test_deps(&dir, arrivals, noop_refreshes(), noop_comment_changes()),
+            test_config(0),
+            McpStatusHandle::for_config(&test_config(0)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let discovery: EndpointDiscovery =
             serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
 
         let body = rpc_body(json!(1), "post_review", review_params("/demo"));
         let response = send_over_socket(discovery.port, &discovery.token, body).join().unwrap();
-        mcp.handle.unwrap().shutdown();
+        handle.stop();
         assert!(response.starts_with("HTTP/1.1 200 OK"), "unexpected response: {response}");
         let payload = response.split("\r\n\r\n").nth(1).unwrap();
         let parsed: Value = serde_json::from_str(payload).unwrap();
@@ -1161,7 +1283,7 @@ mod tests {
 
     // The raw face's second method round-trips over the live socket: an
     // authorized refresh_repo against an open repo answers ok:true, and the
-    // per-boot default from the discovery file authenticates it.
+    // startup default from the discovery file authenticates it.
     #[tokio::test(flavor = "multi_thread")]
     async fn started_endpoint_serves_refresh_repo_over_a_live_socket() {
         let pool = test_pool().await;
@@ -1170,15 +1292,14 @@ mod tests {
         let (refreshes, announced) = recording_refreshes();
         let dir = crate::testutil::test_path("transport-socket-refresh-dir");
         std::fs::create_dir_all(&dir).unwrap();
-        let mcp = start(
+        let handle = start(
             pool,
-            &dir,
-            Arc::new(|_| {}),
-            refreshes,
-            noop_comment_changes(),
+            test_deps(&dir, Arc::new(|_| {}), refreshes, noop_comment_changes()),
             test_config(0),
+            McpStatusHandle::for_config(&test_config(0)),
         )
         .await
+        .unwrap()
         .unwrap();
         let discovery: EndpointDiscovery =
             serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
@@ -1189,7 +1310,7 @@ mod tests {
             json!({ "repo_path": repo.to_str().unwrap() }),
         );
         let response = send_over_socket(discovery.port, &discovery.token, body).join().unwrap();
-        mcp.handle.unwrap().shutdown();
+        handle.stop();
         assert!(response.starts_with("HTTP/1.1 200 OK"), "unexpected response: {response}");
         let payload = response.split("\r\n\r\n").nth(1).unwrap();
         let parsed: Value = serde_json::from_str(payload).unwrap();
@@ -1200,5 +1321,46 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    // A restart stops the idle listener without any inbound connection,
+    // rebinds the same port, renews the default (the old secret stops
+    // authenticating), rewrites the discovery file, and reports through
+    // the same status handle while the owner carries the new listener.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restart_rebinds_the_same_port_and_renews_the_default() {
+        let pool = test_pool().await;
+        let dir = crate::testutil::test_path("transport-restart");
+        std::fs::create_dir_all(&dir).unwrap();
+        let port = free_port();
+        let config = test_config(port);
+        let deps = test_deps(&dir, Arc::new(|_| {}), noop_refreshes(), noop_comment_changes());
+        let status = McpStatusHandle::for_config(&config);
+        let owner = ListenerOwner::default();
+        let first = start(pool.clone(), deps.clone(), config.clone(), status.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        owner.0.lock().await.replace(first);
+        let first_discovery: EndpointDiscovery =
+            serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
+
+        let status_after =
+            restart(pool.clone(), &deps, config, status.clone(), &owner).await.unwrap();
+        assert!(status_after.running);
+        assert_eq!(status_after.port, port);
+        assert_eq!(status_after.error, None);
+        assert_eq!(status.lock_status().running, true, "the shared status handle follows the restart");
+        let second_discovery: EndpointDiscovery =
+            serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
+        assert_eq!(second_discovery.port, port);
+        assert_ne!(second_discovery.token, first_discovery.token);
+        assert!(
+            crate::agents::authenticate_token_in_pool(&pool, &first_discovery.token).await.is_none(),
+            "the previous default must stop authenticating after a restart"
+        );
+        assert!(owner.0.lock().await.is_some(), "the restarted listener is owned again");
+        owner.0.lock().await.take().unwrap().stop();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -12,8 +12,9 @@ from outside the machine unless the listen address is changed there.
 Clients that support the discovery file need no configuration: after a
 successful bind the app writes `agent-endpoint.json` into its app data
 directory, carrying the current `{port, token}`. The token it names is
-the built-in default, which renews at every app start, so discovery
-clients keep working across restarts; the file is rewritten each boot.
+the built-in default, which renews at every app start and whenever the
+endpoint is restarted from the Settings Agent API section, so discovery
+clients keep working; the file is rewritten each time.
 Dev builds write `agent-endpoint-dev.json` instead, so the two channels
 never trade registrations.
 

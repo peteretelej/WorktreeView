@@ -138,7 +138,8 @@ state.
 Settings has two pages. **General** covers appearance (theme, interface
 zoom) and diff behavior (layout, highlighting, whitespace, line wrap).
 **Agent API** controls the local endpoint your coding agents connect
-through.
+through; saved address and port changes apply through that section's
+Restart action, no app restart needed.
 
 ![Settings: General page](images/guide-settings-general.webp)
 

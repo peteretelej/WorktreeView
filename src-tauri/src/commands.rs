@@ -23,7 +23,9 @@ use crate::store::{
     get_settings_in_pool, load_repos, open_repo_path, remove_repo_in_pool, set_repo_pinned_in_pool,
     set_settings_in_pool, Repo, Settings,
 };
-use crate::transport::{ListenerStatus, McpStatusHandle};
+use crate::transport::{
+    restart, ListenerConfig, ListenerOwner, ListenerStatus, McpStatusHandle, TransportDeps,
+};
 use crate::{canonical_path, plain_path, AppState, CommandError};
 use serde::Serialize;
 use std::path::Path;
@@ -253,6 +255,28 @@ pub(crate) async fn get_mcp_status(
     status: tauri::State<'_, McpStatusHandle>,
 ) -> Result<ListenerStatus, CommandError> {
     Ok(status.lock_status().clone())
+}
+
+// Applies the stored Agent API settings to the live listener without an
+// app restart: the previous listener stops first (freeing its address)
+// and a fresh one binds from the settings as persisted right now. The
+// returned status is the post-restart view for the Settings section.
+#[tauri::command]
+pub(crate) async fn restart_mcp(
+    state: tauri::State<'_, AppState>,
+    deps: tauri::State<'_, TransportDeps>,
+    status: tauri::State<'_, McpStatusHandle>,
+    listener: tauri::State<'_, ListenerOwner>,
+) -> Result<ListenerStatus, CommandError> {
+    let settings = get_settings_in_pool(&state.pool).await?;
+    let config = ListenerConfig {
+        enabled: settings.mcp_enabled,
+        address: settings.mcp_listen_address.clone(),
+        port: settings.mcp_port,
+    };
+    restart(state.pool.clone(), &deps, config, (*status).clone(), &listener)
+        .await
+        .map_err(|message| CommandError::new("transport", message))
 }
 
 #[tauri::command]

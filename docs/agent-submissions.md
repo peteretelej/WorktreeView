@@ -96,10 +96,17 @@ separates agent authors.
 Agents deliver submissions over JSON-RPC 2.0 to an HTTP endpoint served
 inside the WorktreeView process. The listener binds the address and port
 configured in the Settings Agent API section (loopback `127.0.0.1:9888`
-by default) when the app starts; nothing is reachable from outside the
+by default) at app start, and again whenever the endpoint is restarted
+from that section; nothing is reachable from outside the
 machine unless the listen address is changed there. A bind failure, such
 as a port already in use, never blocks app startup: the Settings section
-shows the error and no discovery file is written. Transport internals
+shows the error and no discovery file is written. One caveat on
+restarting with an unchanged port: connections the endpoint closed
+recently can keep the port busy for a while after activity (up to a
+couple of minutes depending on the platform), so an immediate same-port
+restart can report a bind error; waiting a little, or restarting onto a
+different port, succeeds.
+Transport internals
 (HTTP semantics, head and body caps, the hyper h1 bypass) are described
 in [architecture.md](architecture.md).
 
@@ -115,8 +122,9 @@ the endpoint answers a missing, wrong, or deleted secret identically, and
 comments the token authored stay visible as history but can no longer be
 mutated by any agent.
 
-One designated default token is provisioned fresh at every app start
-(exactly like the per-boot secret this token model replaced): its secret
+One designated default token is provisioned fresh at every listener
+start, an app start or a restart from Settings (exactly like the per-boot
+secret this token model replaced): its secret
 goes only into the discovery file, so zero-config discovery clients keep
 working across restarts without any secret persisting. The built-in default token
 cannot be deleted; it renews at the next start, replacing the previous
@@ -133,9 +141,10 @@ data directory (Linux `$XDG_DATA_HOME/com.etelej.worktreeview`, macOS
 { "port": 54321, "token": "<64 lowercase hex chars>" }
 ```
 
-The token is the current boot's default agent token: 32 random bytes
-hex-encoded, generated fresh per boot and never persisted across
-restarts. When the endpoint is disabled in Settings, or its bind fails,
+The token is the current listener's default agent token: 32 random bytes
+hex-encoded, generated fresh per listener start and never persisted
+across restarts. When the endpoint is disabled in Settings, or its bind
+fails,
 no discovery file is written or refreshed. Debug builds write
 `agent-endpoint-dev.json` instead, so a dev instance and an installed
 release never claim each other's registration. Clients read the discovery
@@ -236,7 +245,8 @@ The schema's ingest caps are authoritative; the transport adds only a
 coarse 3 MiB pre-parse guard, so a schema-legal submission is never
 transport-rejected. A 401 means the presented secret is missing, wrong,
 or deleted. Discovery clients should first re-read the discovery file:
-each boot renews the default token, and another instance may own the
+each boot or endpoint restart renews the default token, and another
+instance may own the
 registration. Agents using a named token paste a new one from the
 Settings Agent API section; a deleted token stays refused.
 Connection refusal simply means the app is not running.

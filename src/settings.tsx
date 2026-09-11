@@ -22,6 +22,7 @@ export function listAgentTokens() { return invoke<AgentToken[]>("list_agent_toke
 export function createAgentToken(name: string) { return invoke<CreatedAgentToken>("create_agent_token", { name }); }
 export function deleteAgentToken(id: number) { return invoke<void>("delete_agent_token", { id }); }
 export function getMcpStatus() { return invoke<McpStatus>("get_mcp_status"); }
+export function restartMcp() { return invoke<McpStatus>("restart_mcp"); }
 
 const DARK_MEDIA_QUERY = "(prefers-color-scheme: dark)";
 
@@ -81,10 +82,11 @@ function StatusLine({ status }: { status: McpStatus | null }) {
 }
 
 // The Agent API page is the control surface for the agent endpoint:
-// enable, address, and port apply at the next app start; the token list
-// mints named tokens (secret revealed once, with a connection snippet
-// while it is visible) and deletes them; the status line surfaces the
-// live listener, including a non-fatal bind failure.
+// enable, address, and port are stored immediately and applied by the
+// Restart action beside the listener status; the token list mints named
+// tokens (secret revealed once, with a connection snippet while it is
+// visible) and deletes them; the status line surfaces the live listener,
+// including a non-fatal bind failure.
 function AgentApiSection({ settings, onChange }: { settings: Settings; onChange: (next: Settings) => void }) {
   const [tokens, setTokens] = useState<AgentToken[]>([]);
   const [status, setStatus] = useState<McpStatus | null>(null);
@@ -92,6 +94,7 @@ function AgentApiSection({ settings, onChange }: { settings: Settings; onChange:
   const [revealed, setRevealed] = useState<CreatedAgentToken | null>(null);
   const [error, setError] = useState("");
   const [armed, setArmed] = useState<number | null>(null);
+  const [restarting, setRestarting] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -109,6 +112,20 @@ function AgentApiSection({ settings, onChange }: { settings: Settings; onChange:
       setTokens(await listAgentTokens());
     } catch (caught) {
       setError(errorMessageOf(caught));
+    }
+  }
+
+  async function restart() {
+    setError("");
+    setRestarting(true);
+    try {
+      setStatus(await restartMcp());
+      // The built-in default token renews on restart, so its row changes.
+      setTokens(await listAgentTokens());
+    } catch (caught) {
+      setError(errorMessageOf(caught));
+    } finally {
+      setRestarting(false);
     }
   }
 
@@ -141,6 +158,7 @@ function AgentApiSection({ settings, onChange }: { settings: Settings; onChange:
       </div>
       <div className="settings-row">
         <div className="settings-row-copy"><strong>Listener</strong><StatusLine status={status} /></div>
+        <button className="settings-select settings-button" type="button" disabled={restarting} onClick={() => void restart()}>{restarting ? "Restarting..." : "Restart"}</button>
       </div>
     </section>
     <section id="settings-tokens" className="settings-section" aria-labelledby="settings-tokens-heading">
@@ -162,7 +180,7 @@ function AgentApiSection({ settings, onChange }: { settings: Settings; onChange:
         {tokens.map((token) => <div className="settings-token" key={token.id}>
           <div className="settings-token-copy">
             <strong>{token.name}{token.is_default && <span className="settings-badge default">built-in</span>}</strong>
-            <span>{token.is_default ? "Renewed at every app start; discovery clients re-read it automatically." : `Created ${formatDate(token.created_at)}${token.last_used_at ? ` · last used ${formatDate(token.last_used_at)}` : " · never used"}`}</span>
+            <span>{token.is_default ? "Renewed at every endpoint start; discovery clients re-read it automatically." : `Created ${formatDate(token.created_at)}${token.last_used_at ? ` · last used ${formatDate(token.last_used_at)}` : " · never used"}`}</span>
           </div>
           {!token.is_default && <button className={armed === token.id ? "settings-select settings-button settings-button-danger" : "settings-select settings-button"} type="button" onClick={() => {
             if (armed === token.id) {
