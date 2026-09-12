@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { ArrowLeft } from "lucide-react";
 import { ZOOM_LEVELS, snapZoom } from "./zoom.ts";
 
@@ -204,11 +205,33 @@ function errorMessageOf(error: unknown) {
   return "The agent API settings could not be loaded.";
 }
 
-type SettingsPageId = "general" | "agents";
+// Static app facts plus the release version; the version is the same value
+// the agent endpoint reports as its server version.
+function AboutSection() {
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    let mounted = true;
+    getVersion().then((loaded) => { if (mounted) setVersion(loaded); }).catch(() => { /* the rest of the page still renders */ });
+    return () => { mounted = false; };
+  }, []);
+  return <section id="settings-about" className="settings-section" aria-labelledby="settings-about-heading">
+    <h2 id="settings-about-heading">About</h2>
+    <div className="settings-row">
+      <div className="settings-row-copy"><strong>WorktreeView</strong><span>Review-first desktop app for code review across Git worktrees, built for developers running coding agents in parallel.</span></div>
+    </div>
+    <div className="settings-row">
+      <div className="settings-row-copy"><strong>Version</strong><span>Also reported to agents as the endpoint server version.</span></div>
+      <code>{version || "unknown"}</code>
+    </div>
+  </section>;
+}
+
+type SettingsPageId = "general" | "agents" | "about";
 
 const SETTINGS_PAGES: { id: SettingsPageId; label: string }[] = [
   { id: "general", label: "General" },
   { id: "agents", label: "Agent API" },
+  { id: "about", label: "About" },
 ];
 
 export function SettingsPage({ settings, saveError, onBack, onChange }: { settings: Settings; saveError: string; onBack: () => void; onChange: (next: Settings) => void }) {
@@ -266,6 +289,7 @@ export function SettingsPage({ settings, saveError, onBack, onChange }: { settin
         </section>
       </>}
       {page === "agents" && <AgentApiSection settings={settings} onChange={onChange} />}
+      {page === "about" && <AboutSection />}
       {saveError && <div className="settings-inline-error" role="status" aria-live="polite">{saveError}</div>}
     </div>
   </section>;

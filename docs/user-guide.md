@@ -158,11 +158,12 @@ state.
 
 ## Tune the app
 
-Settings has two pages. **General** covers appearance (theme, interface
-zoom) and diff behavior (layout, highlighting, whitespace, line wrap).
-**Agent API** controls the local endpoint your coding agents connect
-through; saved address and port changes apply through that section's
-Restart action, no app restart needed.
+Settings has three pages. **General** covers appearance (theme,
+interface zoom) and diff behavior (layout, highlighting, whitespace,
+line wrap). **Agent API** controls the local endpoint your coding agents
+connect through; saved address and port changes apply through that
+section's Restart action, no app restart needed. **About** names the app
+and its version (the same value agents see from the endpoint).
 
 ![Settings: General page](images/guide-settings-general.webp)
 
