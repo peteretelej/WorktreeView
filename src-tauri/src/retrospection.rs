@@ -153,6 +153,60 @@ pub(crate) async fn list_surfaces_in_pool(
     Ok(SurfaceListing { gone, pinned })
 }
 
+// Store-only head inventory for the attention queue: the recorded identity
+// and last resolved head of every retrospected surface. No Git runs here;
+// rows reflect the last retrospection pass, which the queue's
+// progressive-disclosure contract accepts.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub(crate) struct SurfaceHead {
+    pub(crate) repo_path: String,
+    pub(crate) kind: String,
+    pub(crate) identity_key: String,
+    pub(crate) label: String,
+    pub(crate) head_sha: String,
+    pub(crate) last_seen_at: i64,
+}
+
+pub(crate) async fn recorded_surface_heads_in_pool(
+    pool: &SqlitePool,
+) -> Result<Vec<SurfaceHead>, sqlx::Error> {
+    sqlx::query(
+        "SELECT repo_path, kind, identity_key, label, head_sha, last_seen_at \
+         FROM retrospected_surfaces \
+         ORDER BY last_seen_at DESC, kind ASC, identity_key ASC",
+    )
+    .fetch_all(pool)
+    .await?
+    .iter()
+    .map(|row| {
+        Ok(SurfaceHead {
+            repo_path: row.try_get("repo_path")?,
+            kind: row.try_get("kind")?,
+            identity_key: row.try_get("identity_key")?,
+            label: row.try_get("label")?,
+            head_sha: row.try_get("head_sha")?,
+            last_seen_at: row.try_get("last_seen_at")?,
+        })
+    })
+    .collect()
+}
+
+// A request's worktree target joins a recorded surface through the same
+// canonicalization the recording path used; a key that no longer resolves
+// (the surface is gone) compares in its raw form as a fallback.
+pub(crate) fn recorded_worktree_head<'a>(
+    heads: &'a [SurfaceHead],
+    repo_path: &str,
+    target_key: &str,
+) -> Option<&'a SurfaceHead> {
+    let key = live_worktree_key(target_key);
+    heads.iter().find(|head| {
+        head.kind == "worktree"
+            && head.repo_path == repo_path
+            && (head.identity_key == key || head.identity_key == target_key)
+    })
+}
+
 // Recorded worktree keys are platform-canonical plain paths while
 // `worktree list --porcelain` emits forward-slash paths; run every live
 // path through the same canonicalization before comparing. A live path
@@ -402,6 +456,71 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn recorded_surface_heads_read_store_only_and_join_worktree_keys() {
+        let repo = test_repo("surface-heads");
+        let pool = test_pool().await;
+        let repo_path = repo.to_str().unwrap().to_string();
+        seed_repo(&pool, &repo_path).await;
+        test_git(&repo, &["branch", "-M", "main"]);
+        let head_sha = test_rev_parse(&repo, "HEAD");
+        let worktree = test_path("surface-heads-wt");
+        test_git(
+            &repo,
+            &["worktree", "add", "-b", "feature", worktree.to_str().unwrap()],
+        );
+        let worktree_key = canonical_key(&worktree);
+        record_surface_open(
+            &pool,
+            &repo_path,
+            "worktree",
+            &worktree_key,
+            "feature",
+            &worktree_key,
+            &head_sha,
+        )
+        .await;
+        record_surface_open(
+            &pool,
+            &repo_path,
+            "branch",
+            "refs/heads/feature",
+            "feature",
+            "refs/heads/feature",
+            &head_sha,
+        )
+        .await;
+
+        // The queue's head read spawns no Git at all: it is a plain store
+        // query over the rows the retrospection passes already recorded.
+        let (spawns, heads) =
+            spawn_counted(recorded_surface_heads_in_pool(&pool)).await;
+        assert_eq!(spawns, 0);
+        let heads = heads.unwrap();
+        assert_eq!(heads.len(), 2);
+        let recorded = heads
+            .iter()
+            .find(|head| head.kind == "worktree")
+            .unwrap();
+        assert_eq!(recorded.repo_path, repo_path);
+        assert_eq!(recorded.identity_key, worktree_key);
+        assert_eq!(recorded.label, "feature");
+        assert_eq!(recorded.head_sha, head_sha);
+
+        // The request-side join canonicalizes the target key the same way
+        // the recording path did; branch rows and unknown keys never match.
+        assert!(recorded_worktree_head(&heads, &repo_path, &worktree_key).is_some());
+        assert!(recorded_worktree_head(&heads, &repo_path, "refs/heads/feature").is_none());
+        assert!(
+            recorded_worktree_head(&heads, &repo_path, &format!("{worktree_key}-gone"))
+                .is_none()
+        );
+        assert!(recorded_worktree_head(&heads, "other-repo", &worktree_key).is_none());
+
+        test_git(&repo, &["worktree", "remove", worktree.to_str().unwrap()]);
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
     #[tokio::test]

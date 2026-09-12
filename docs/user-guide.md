@@ -148,6 +148,38 @@ reviewers:
 
 ![One GitHub Copilot token posting as Security, Correctness, and Conventions reviewers](images/guide-agent-roles.webp)
 
+## Read the attention queue
+
+The **Attention** tab in the sidebar is the cross-project to-do list:
+every project's review activity lands in one queue, newest signal first.
+The tab carries a live count, and the queue splits into categories, each
+with its own tab and count:
+
+- **Review requested**: an agent asked for a review and no one has
+  picked it up yet.
+- **Changes requested**: a reviewer sent the work back; the requester
+  owes fixes. The round column shows how many fix cycles remain
+  (`n/max`).
+- **Needs human**: the round budget ran out with changes still
+  requested, or a P0 finding sits unresolved on a requested or in-review
+  review. This is the queue's one alarm color.
+- **Unresolved findings**: a review carries unresolved P0 or P1
+  comments, whether or not a request is still open, so late findings on
+  approved work stay visible.
+- **Changed since review**: the surface's head moved after the review
+  recorded it, so the review is stale.
+
+Clicking a row opens the underlying review as it exists today. If the
+reviewed worktree has since been deleted, the row still opens by its
+recorded head and shows the usual degraded state. Within a category,
+rows sort by P0 count and then age, and background updates never reorder
+the rows while you read; concurrent requests on the same change carry
+the same labelled row so the duplication reads as intentional. The queue
+is store-backed: it renders instantly from what the app already knows,
+and Git-derived details fill in as the app's passes observe them. When
+the agent endpoint is off, the queue still renders with a note that
+agents cannot reach it.
+
 ## Keep projects current
 
 The **Refresh** action on a project runs `git fetch --all --prune`

@@ -7,6 +7,7 @@ use crate::git::{
     Worktree,
 };
 use crate::overview::{branch_inventory, BranchInventory};
+use crate::requests::{list_attention_in_pool, AttentionQueue};
 use crate::review::{
     commit_detail, commit_page, refs_inventory, review_changes, review_file_bytes,
     review_file_content, review_patch, CommitDetail, FileContent, FilePatch, RefInventory,
@@ -316,6 +317,16 @@ pub(crate) async fn list_surfaces(
     state: tauri::State<'_, AppState>,
 ) -> Result<SurfaceListing, CommandError> {
     list_surfaces_in_pool(&state.pool, &path).await
+}
+
+// The cross-repo attention queue: one read-only store pass, no Git runs on
+// this path; Git-derived signals fill in from the retrospection store's
+// last pass instead of being computed here.
+#[tauri::command]
+pub(crate) async fn list_attention(
+    state: tauri::State<'_, AppState>,
+) -> Result<AttentionQueue, CommandError> {
+    list_attention_in_pool(&state.pool).await
 }
 
 #[tauri::command]

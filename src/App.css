@@ -736,6 +736,127 @@ h2 {
   font-size: 11px;
 }
 
+/* Attention queue: the sidebar's cross-repo projection. Membership is the
+   payload's; the view only counts, filters, sorts, and labels. */
+.nav-tab-count {
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.attention-pane .overview-tabs {
+  padding: 0 20px 10px;
+  flex-wrap: wrap;
+}
+
+.attention-endpoint-note {
+  margin: 0 20px 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* The header re-states the shared .table-header columns, so the queue's
+   seven win over the three-column worktree grid later in this file. */
+.table-header.attention-head,
+.attention-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 180px) minmax(140px, 1fr) minmax(80px, 120px) 108px 56px 110px 44px;
+  gap: 12px;
+  align-items: center;
+}
+
+.attention-head {
+  margin-top: 4px;
+}
+
+.attention-row {
+  min-height: 44px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.attention-row:hover,
+.attention-row:focus-visible {
+  background: var(--surface-2);
+  outline: none;
+}
+
+.attention-project strong,
+.attention-change strong {
+  display: block;
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attention-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.attention-meta .path-text {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attention-meta code {
+  font: 10px var(--font-mono);
+}
+
+.attention-requester,
+.attention-status,
+.attention-findings {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.attention-round code {
+  font: 10.5px var(--font-mono);
+  color: var(--muted);
+}
+
+.attention-age {
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+/* The one attention color in the queue: a needs-human row's status chip. */
+.status-chip.attention-danger {
+  border-color: transparent;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.attention-narrow .attention-row {
+  grid-template-columns: minmax(90px, 150px) minmax(120px, 1fr) minmax(80px, 120px) 100px 48px 40px;
+}
+
+.attention-narrow .attention-age {
+  font-size: 10px;
+}
+
 /* Overview branch and archived rows reuse the worktree row grid inside a
    project-row-wrap so the hover-revealed surface pin carries over; every
    overview row shares the same right inset so the percentage columns line
