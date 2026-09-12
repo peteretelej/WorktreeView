@@ -48,7 +48,9 @@ pub(crate) struct BranchRecord {
 
 // The project-page view of a branch: identity plus just enough history and
 // sync state for the worktree table. ahead/behind are None when unknown (no
-// upstream and no fallback base, or a gone upstream).
+// upstream and no fallback base, or a gone upstream). merged is whether the
+// default branch already contains the branch tip, false when no default
+// branch could be resolved.
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct BranchSummary {
     pub(crate) ref_name: String,
@@ -59,6 +61,7 @@ pub struct BranchSummary {
     pub(crate) upstream: Option<String>,
     pub(crate) ahead: Option<u32>,
     pub(crate) behind: Option<u32>,
+    pub(crate) merged: bool,
 }
 
 pub(crate) fn parse_untracked_paths(output: &[u8]) -> Result<Vec<String>, CommandError> {

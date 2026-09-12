@@ -961,6 +961,12 @@ h2 {
   font-family: var(--font-mono);
 }
 
+.status-chip.merged {
+  background: var(--ok-soft);
+  color: var(--ok);
+  font-weight: 500;
+}
+
 .status-chip.dirty:hover,
 .status-chip.dirty:focus-visible,
 .status-chip.sync:hover,

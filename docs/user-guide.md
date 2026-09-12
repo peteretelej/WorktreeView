@@ -34,6 +34,9 @@ commit. The status chips answer "what is happening here" at a glance:
 - **↑N / ↓N**: commits ahead of or behind the branch's upstream (or the
   default branch when there is no upstream); click to review those
   commits.
+- **Merged**: every commit on the branch is already contained in the
+  default branch. The work has landed, so the worktree can be cleaned
+  up whenever you like, or left in place as a visible record.
 
 Clicking a row opens the default review of that worktree. The same
 pattern extends to branches: the Branches and Remote tabs list local and

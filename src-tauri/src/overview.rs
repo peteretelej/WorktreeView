@@ -4,6 +4,7 @@ use crate::git::{
 };
 use crate::{canonical_path, CommandError};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::Path;
 
 #[derive(Debug, Serialize)]
@@ -17,12 +18,13 @@ pub struct BranchInventory {
 
 // One bounded pass over refs/heads and refs/remotes gives the project page
 // almost everything: per-branch HEAD, last-commit identity, upstream and its
-// ahead/behind track. Local branches checked out in worktrees without an
-// upstream get one extra rev-list --count against the default branch, so
-// agent-created branches still show their divergence from main; remote
-// branches never trigger the fallback probe. The optional fallback probe and
-// origin URL degrade to empty values on failure without sinking the
-// inventory; structural Git failures still error.
+// ahead/behind track, plus one --merged pass resolving which tips the
+// default branch already contains. Local branches checked out in worktrees
+// without an upstream get one extra rev-list --count against the default
+// branch, so agent-created branches still show their divergence from main;
+// remote branches never trigger the fallback probe. The optional fallback
+// probe and origin URL degrade to empty values on failure without sinking
+// the inventory; structural Git failures still error.
 // for-each-ref does not reliably expand %xNN hex escapes (that is a git log
 // pretty-format feature), so the record and field separators are embedded as
 // literal control characters; the spawn passes args without a shell. The
@@ -58,6 +60,13 @@ pub(crate) async fn branch_inventory(path: String) -> Result<BranchInventory, Co
         .collect();
     let default_branch = primary_branch(&heads).map(str::to_string);
 
+    // One --merged pass answers for every ref at once; no per-branch
+    // merge-base probes.
+    let merged = match default_branch.as_deref() {
+        Some(base) => merged_refs(&path, base).await,
+        None => HashSet::new(),
+    };
+
     // The fallback is bounded by the worktree count: only local branches
     // actually checked out somewhere get an extra probe.
     let worktree_branches = worktree_branches(&path).await;
@@ -83,13 +92,20 @@ pub(crate) async fn branch_inventory(path: String) -> Result<BranchInventory, Co
             Some((ahead, behind)) => (Some(ahead), Some(behind)),
             None => (None, None),
         };
-        branches.push(branch_summary(record, ahead, behind));
+        branches.push(branch_summary(
+            record,
+            ahead,
+            behind,
+            merged.contains(&record.ref_name),
+        ));
     }
     // Remote-tracking branches carry no meaningful upstream track of their
     // own; their sync columns stay unknown.
     let remote_branches: Vec<BranchSummary> = remote
         .iter()
-        .map(|record| branch_summary(record, None, None))
+        .map(|record| {
+            branch_summary(record, None, None, merged.contains(&record.ref_name))
+        })
         .collect();
 
     Ok(BranchInventory {
@@ -101,7 +117,12 @@ pub(crate) async fn branch_inventory(path: String) -> Result<BranchInventory, Co
     })
 }
 
-fn branch_summary(record: &BranchRecord, ahead: Option<u32>, behind: Option<u32>) -> BranchSummary {
+fn branch_summary(
+    record: &BranchRecord,
+    ahead: Option<u32>,
+    behind: Option<u32>,
+    merged: bool,
+) -> BranchSummary {
     BranchSummary {
         ref_name: record.ref_name.clone(),
         head: record.head.clone(),
@@ -111,7 +132,32 @@ fn branch_summary(record: &BranchRecord, ahead: Option<u32>, behind: Option<u32>
         upstream: record.upstream.clone(),
         ahead,
         behind,
+        merged,
     }
+}
+
+// `--merged` lists refs whose tip the base already contains, i.e. fully
+// merged work. A failed probe degrades to an empty set like the other
+// optional inventory extras: branches stay unmarked rather than sinking
+// the inventory.
+async fn merged_refs(path: &Path, base: &str) -> HashSet<String> {
+    let owned_args = vec![
+        "for-each-ref".to_string(),
+        "refs/heads".to_string(),
+        "refs/remotes".to_string(),
+        format!("--merged={base}"),
+        "--format=%(refname)".to_string(),
+    ];
+    let args = git_args(&owned_args);
+    let Ok((exit_code, stdout, _)) = run_git(path, &args).await else {
+        return HashSet::new();
+    };
+    if exit_code != 0 {
+        return HashSet::new();
+    }
+    std::str::from_utf8(&stdout)
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
 // `%(upstream:track)` shapes: "" when in sync, "[ahead N]", "[behind N]",
@@ -281,6 +327,7 @@ mod tests {
             .find(|branch| branch.ref_name == "refs/heads/master")
             .unwrap();
         assert_eq!((master.ahead, master.behind), (Some(0), Some(0)));
+        assert!(master.merged);
         assert_eq!(master.subject, "main moves");
         assert_eq!(master.author, "WorktreeView Tests");
         assert_eq!(
@@ -297,6 +344,7 @@ mod tests {
         // probe is bounded to worktree branches, so this stays unknown.
         assert_eq!(feature.upstream, None);
         assert_eq!((feature.ahead, feature.behind), (None, None));
+        assert!(!feature.merged);
         assert_eq!(feature.subject, "feature work");
 
         std::fs::remove_dir_all(repo).unwrap();
@@ -321,6 +369,40 @@ mod tests {
             inventory.origin_url.as_deref(),
             Some("https://github.com/example/demo.git")
         );
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn inventory_marks_branches_the_default_branch_contains() {
+        let repo = test_repo("inventory-merged");
+        test_git(&repo, &["branch", "-M", "master"]);
+
+        test_git(&repo, &["checkout", "--quiet", "-b", "landed"]);
+        std::fs::write(repo.join("landed.txt"), "landed\n").unwrap();
+        test_git(&repo, &["add", "landed.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "landed work"]);
+        test_git(&repo, &["checkout", "--quiet", "-b", "open"]);
+        std::fs::write(repo.join("open.txt"), "open\n").unwrap();
+        test_git(&repo, &["add", "open.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "open work"]);
+        test_git(&repo, &["checkout", "--quiet", "master"]);
+        test_git(&repo, &["merge", "--quiet", "--ff-only", "landed"]);
+
+        let inventory = branch_inventory(repo.to_str().unwrap().into())
+            .await
+            .unwrap();
+        let merged_of = |name: &str| {
+            inventory
+                .branches
+                .iter()
+                .find(|branch| branch.ref_name == format!("refs/heads/{name}"))
+                .unwrap()
+                .merged
+        };
+        assert!(merged_of("master"));
+        assert!(merged_of("landed"));
+        assert!(!merged_of("open"));
+
         std::fs::remove_dir_all(repo).unwrap();
     }
 

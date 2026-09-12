@@ -5,8 +5,9 @@ export type SurfaceListing = { gone: GoneSurface[]; pinned: SurfacePinRef[] };
 export type ChangedFile = { path: string; status: string; untracked: boolean };
 export type RefInventory = { heads: string[]; remotes: string[]; tags: string[]; default_base: string | null };
 // One for-each-ref record for the project page: ahead/behind are null when
-// unknown (no upstream, no fallback base, or a gone upstream).
-export type BranchSummary = { ref_name: string; head: string; author: string; subject: string; commit_date: number; upstream: string | null; ahead: number | null; behind: number | null };
+// unknown (no upstream, no fallback base, or a gone upstream); merged is
+// whether the default branch already contains the branch tip.
+export type BranchSummary = { ref_name: string; head: string; author: string; subject: string; commit_date: number; upstream: string | null; ahead: number | null; behind: number | null; merged: boolean };
 export type BranchInventory = { default_branch: string | null; origin_url: string | null; remote_branch_count: number; branches: BranchSummary[]; remote_branches: BranchSummary[] };
 export type ReviewScope = "all" | "committed";
 export type ReviewTarget = { kind: "worktree"; worktree: Worktree } | { kind: "ref"; name: string } | { kind: "commit"; sha: string; parents: string[]; defaultBaseAncestor: boolean };
