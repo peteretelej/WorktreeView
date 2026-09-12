@@ -53,7 +53,7 @@ pub struct FileContent {
 pub struct CommitDetail {
     pub sha: String,
     pub author: String,
-    pub date: i64,
+    pub date: String,
     pub subject: String,
     pub body: String,
     pub parents: Vec<String>,
@@ -368,8 +368,10 @@ pub(crate) async fn commit_detail(path: String, rev: String) -> Result<CommitDet
         // One record, two separators by strength: the body starts at a NUL
         // (commit messages never carry one) so nothing in the message can
         // shift the earlier fields, and the subject trails the fixed fields
-        // so a separator inside it reassembles by joining the tail.
-        "--format=%H%x1f%an%x1f%at%x1f%P%x1f%s%x00%b".into(),
+        // so a separator inside it reassembles by joining the tail. The date
+        // rides as git's own default rendering (the C locale keeps the
+        // abbreviations stable).
+        "--format=%H%x1f%an%x1f%cd%x1f%P%x1f%s%x00%b".into(),
         sha.clone(),
     ];
     let args = git_args(&owned_args);
@@ -394,7 +396,6 @@ fn parse_commit_detail(output: &[u8], sha: &str) -> Result<CommitDetail, Command
     if fields.len() < 5 {
         return Err(malformed());
     }
-    let date = fields[2].parse::<i64>().map_err(|_| malformed())?;
     let parents: Vec<String> = fields[3].split_whitespace().map(str::to_string).collect();
     // Parents are always full hex SHAs in %P; anything else means the record
     // is not shaped like a log entry.
@@ -407,7 +408,7 @@ fn parse_commit_detail(output: &[u8], sha: &str) -> Result<CommitDetail, Command
     Ok(CommitDetail {
         sha: sha.to_string(),
         author: fields[1].to_string(),
-        date,
+        date: fields[2].to_string(),
         subject: fields[4..].join("\u{1f}"),
         parents,
         body: body.trim_end().to_string(),
@@ -2498,7 +2499,7 @@ mod tests {
         assert_eq!(abbreviated.body, "first paragraph\n\nsecond paragraph");
         assert_eq!(abbreviated.parents, [root_sha.clone()]);
         assert!(!abbreviated.author.is_empty());
-        assert!(abbreviated.date > 0);
+        assert_eq!(abbreviated.date.split_whitespace().count(), 6);
 
         let root = commit_detail(repo.to_str().unwrap().into(), root_sha.clone())
             .await

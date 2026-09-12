@@ -1469,7 +1469,7 @@ function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target, refs,
         {target.kind === "commit" ? <>
           {summary?.body && <p className="commit-body">{summary.body}</p>}
           {(summary || (index && !index.error)) && <div className="sha-row">
-            {summary && <span className="sha" title={new Date(summary.date * 1000).toLocaleString()}>{summary.author} · {relativeTime(summary.date)}</span>}
+            {summary && <span className="sha">{summary.author} · {summary.date}</span>}
             {index && !index.error && <>
               <span className="sha"><code>base {shortToken(index.base_sha)}</code><CopyButton ghost value={index.base_sha} label="Copy base commit hash" /></span>
               <span className="sha"><code>target {shortToken(index.target_sha)}</code><CopyButton ghost value={index.target_sha} label="Copy target commit hash" /></span>
