@@ -81,7 +81,8 @@ Commit history is always in the sidebar, following the project or
 branch you are viewing. Click a commit to review that commit's own
 diff against its parent; no checkout, no new branch. The commit row in
 the review header keeps the subject visible; click it to expand the
-full description with copyable base and target hashes.
+full description with the author, commit time, and copyable base and
+target hashes.
 
 ![Commit review](images/guide-commit-review.webp)
 
@@ -236,8 +237,9 @@ Logs row opens the diagnostic log folder.
 
 ## Troubleshooting
 
-The app writes small rolling log files (at most three, one megabyte
-each) into its log folder; open it from **Settings > About > Logs**.
+The app writes small rolling log files (at most four: the active file
+plus three rotated, one megabyte each) into its log folder; open it from
+**Settings > About > Logs**.
 The log records app lifecycle events, review-request status changes, and
 endpoint rejections at a level that is safe to share: agent token
 secrets, request notes, and comment or review text are never written to
