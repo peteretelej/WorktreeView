@@ -1355,6 +1355,31 @@ button:disabled {
 .file-row b { color: var(--ok); font-size: 10px; }
 .file-row.status-d b, .file-row.status-r b { color: var(--danger); }
 .file-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.file-filter { display: flex; flex: 1 0 110px; min-width: 0; align-items: center; gap: 6px; padding: 0 7px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); }
+.file-filter:focus-within { border-color: var(--primary); }
+.file-filter input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--foreground); font: 11px var(--font-mono); padding: 5px 0; outline: none; }
+.file-view-toggle { display: flex; overflow: hidden; border: 1px solid var(--border); border-radius: 4px; }
+.file-view-toggle button { appearance: none; border: 0; background: transparent; color: var(--muted); font: 10px var(--font-mono); padding: 5px 8px; cursor: pointer; }
+.file-view-toggle button + button { border-left: 1px solid var(--border); }
+.file-view-toggle button.active { background: var(--primary-soft); color: var(--primary); }
+.file-tools .icon-button { flex: none; }
+.file-dir-row { display: flex; width: 100%; align-items: center; gap: 6px; padding: 5px 8px 5px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--foreground); cursor: pointer; text-align: left; font: 11px var(--font-mono); }
+.file-dir-row:hover { background: var(--primary-soft); }
+.file-dir-row .dir-chevron { flex: none; color: var(--muted); }
+.file-dir-row[aria-expanded="true"] .dir-chevron { transform: rotate(90deg); }
+.file-dir-row .dir-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-dir-row .dir-count { flex: none; font-size: 10px; color: var(--muted); }
+.file-list-empty { padding: 18px 12px; color: var(--muted); font-size: 11px; text-align: center; }
+.file-row.list-row .file-row-line { display: flex; min-width: 0; }
+/* The directory half degrades first: it clips from the left while the
+   filename stays readable. */
+.file-dir-part { flex: 0 1000 auto; min-width: 0; overflow: hidden; direction: rtl; text-align: left; white-space: nowrap; opacity: 0.62; }
+.file-row.list-row .file-name { flex: 0 1 auto; }
+.file-row.details-row { display: block; padding-top: 5px; padding-bottom: 5px; }
+.file-row.details-row .details-top { display: flex; gap: 6px; align-items: center; }
+.file-row.details-row .file-name { flex: 1; min-width: 0; }
+.file-dir-sub { display: block; margin: 2px 0 0 18px; color: var(--muted); font-size: 10px; }
 .patch-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--background); }
 .patch-heading { display: flex; flex: none; height: 36px; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .patch-heading code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

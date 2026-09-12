@@ -72,12 +72,40 @@ impl DiffLayout {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangedFilesView {
+    Tree,
+    List,
+    Details,
+}
+
+impl ChangedFilesView {
+    fn as_value(&self) -> &'static str {
+        match self {
+            ChangedFilesView::Tree => "tree",
+            ChangedFilesView::List => "list",
+            ChangedFilesView::Details => "details",
+        }
+    }
+
+    fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "tree" => Some(ChangedFilesView::Tree),
+            "list" => Some(ChangedFilesView::List),
+            "details" => Some(ChangedFilesView::Details),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Settings {
     pub theme: Theme,
     pub diff_layout: DiffLayout,
     pub whitespace_visible: bool,
     pub line_wrap: bool,
     pub syntax_visible: bool,
+    pub changed_files_view: ChangedFilesView,
     pub zoom: f64,
     pub mcp_enabled: bool,
     pub mcp_listen_address: String,
@@ -101,6 +129,7 @@ impl Default for Settings {
             whitespace_visible: false,
             line_wrap: false,
             syntax_visible: true,
+            changed_files_view: ChangedFilesView::Tree,
             zoom: 1.0,
             mcp_enabled: true,
             mcp_listen_address: "127.0.0.1".into(),
@@ -314,6 +343,11 @@ pub(crate) async fn get_settings_in_pool(pool: &SqlitePool) -> Result<Settings, 
                     settings.syntax_visible = flag;
                 }
             }
+            "changed_files_view" => {
+                if let Some(view) = ChangedFilesView::from_value(&value) {
+                    settings.changed_files_view = view;
+                }
+            }
             "zoom" => {
                 if let Ok(zoom) = value.parse::<f64>() {
                     settings.zoom = clamp_zoom(zoom);
@@ -356,6 +390,10 @@ pub(crate) async fn set_settings_in_pool(
         (
             "syntax_visible",
             settings_bool_value(settings.syntax_visible).to_string(),
+        ),
+        (
+            "changed_files_view",
+            settings.changed_files_view.as_value().to_string(),
         ),
         ("zoom", zoom.to_string()),
         (
@@ -482,6 +520,7 @@ mod tests {
             whitespace_visible: true,
             line_wrap: true,
             syntax_visible: true,
+            changed_files_view: ChangedFilesView::List,
             zoom: 1.25,
             mcp_enabled: false,
             mcp_listen_address: "0.0.0.0".into(),
@@ -508,7 +547,7 @@ mod tests {
     async fn corrupt_settings_rows_fall_back_to_defaults() {
         let pool = test_pool().await;
         sqlx::query(
-            "INSERT INTO settings (key, value) VALUES ('theme', 'neon'), ('diff_layout', 'fancy'), ('whitespace_visible', 'maybe'), ('line_wrap', 'sometimes'), ('zoom', 'huge'), ('mcp_enabled', 'perhaps'), ('mcp_listen_address', ''), ('mcp_port', 'not-a-port')",
+            "INSERT INTO settings (key, value) VALUES ('theme', 'neon'), ('diff_layout', 'fancy'), ('whitespace_visible', 'maybe'), ('line_wrap', 'sometimes'), ('changed_files_view', 'columns'), ('zoom', 'huge'), ('mcp_enabled', 'perhaps'), ('mcp_listen_address', ''), ('mcp_port', 'not-a-port')",
         )
         .execute(&pool)
         .await

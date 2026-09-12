@@ -23,6 +23,12 @@ later optimization target.
 
 ## Webview side
 
+- The changed-files pane renders the whole list at once: there is no
+  pager, so the directory tree always spans the full changeset. The tree,
+  its per-directory counts, and filtering derive client-side from the
+  existing `{path, status}` list, and rows are one-line buttons, so the
+  DOM scales with the changeset's file count at a fraction of the cost of
+  diff rows (the same trade the row stream below makes).
 - Both patch and full-file views render one continuous row stream in
   native flow (`src/stream.ts` builds the rows; there is no custom scroll
   code). The whole stream is present in the DOM and the browser owns

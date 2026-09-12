@@ -19,8 +19,8 @@ export type CommitDetail = { sha: string; subject: string; body: string; parents
 export type AppLocation =
   | { kind: "inbox" }
   | { kind: "settings" }
-  | { kind: "review"; identity: ReviewIdentity; selectedFile: ChangedFile | null; filePage: number }
-  | { kind: "commit-history"; repoPath: string; startPointLabel: string; startRef: string | null; worktreePath: string | null; selectedCommit: CommitInfo | null; selectedFile: ChangedFile | null; filePage: number };
+  | { kind: "review"; identity: ReviewIdentity; selectedFile: ChangedFile | null }
+  | { kind: "commit-history"; repoPath: string; startPointLabel: string; startRef: string | null; worktreePath: string | null; selectedCommit: CommitInfo | null; selectedFile: ChangedFile | null };
 
 export type ReviewLocation = Extract<AppLocation, { kind: "review" }>;
 export type CommitHistoryLocation = Extract<AppLocation, { kind: "commit-history" }>;
@@ -45,8 +45,7 @@ export function sameAppLocation(left: AppLocation, right: AppLocation): boolean 
       && sameReviewTarget(left.identity.target, right.identity.target)
       && left.identity.scope === right.identity.scope
       && left.identity.reversed === right.identity.reversed
-      && sameChangedFile(left.selectedFile, right.selectedFile)
-      && left.filePage === right.filePage;
+      && sameChangedFile(left.selectedFile, right.selectedFile);
   }
   if (left.kind === "commit-history" && right.kind === "commit-history") {
     return left.repoPath === right.repoPath
@@ -54,8 +53,7 @@ export function sameAppLocation(left: AppLocation, right: AppLocation): boolean 
       && left.worktreePath === right.worktreePath
       && (left.selectedCommit === null) === (right.selectedCommit === null)
       && (left.selectedCommit === null || right.selectedCommit === null || left.selectedCommit.sha === right.selectedCommit.sha)
-      && sameChangedFile(left.selectedFile, right.selectedFile)
-      && left.filePage === right.filePage;
+      && sameChangedFile(left.selectedFile, right.selectedFile);
   }
   return true;
 }

@@ -12,7 +12,7 @@ function reviewIdentity(overrides: Partial<ReviewIdentity> & { target: ReviewTar
   return { repoPath: "/repo", base: "main", scope: "committed", reversed: false, ...overrides };
 }
 function reviewEntry(overrides: Partial<Extract<AppLocation, { kind: "review" }>> & { identity: ReviewIdentity }): AppLocation {
-  return { kind: "review", selectedFile: null, filePage: 0, ...overrides };
+  return { kind: "review", selectedFile: null, ...overrides };
 }
 function file(path: string): ChangedFile {
   return { path, status: "M", untracked: false };
@@ -50,7 +50,7 @@ test("back and forward clamp at the stack bounds", () => {
   const start = history.current();
   assert.equal(history.back(), start);
   assert.equal(history.canBack(), false);
-  history.push({ kind: "commit-history", repoPath: "/repo", startPointLabel: "main", startRef: "main", worktreePath: null, selectedCommit: null, selectedFile: null, filePage: 0 });
+  history.push({ kind: "commit-history", repoPath: "/repo", startPointLabel: "main", startRef: "main", worktreePath: null, selectedCommit: null, selectedFile: null });
   const top = history.current();
   assert.equal(history.forward(), top);
   assert.equal(history.canForward(), false);
@@ -78,7 +78,7 @@ test("consecutive duplicate pushes collapse into one entry", () => {
   const a = reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a") }) });
   history.push(a);
   history.push(reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a") }) }));
-  history.push(reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a") }), filePage: 0 }));
+  history.push(reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a") }) }));
   history.back();
   assert.deepEqual(history.current(), { kind: "inbox" });
   assert.equal(history.canBack(), false);
@@ -98,11 +98,9 @@ test("entry equality ignores identity object shape but honors discriminating fie
   const left = reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a"), reversed: true }) });
   const same = reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a"), reversed: true }) });
   const otherFile = reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a"), reversed: true }), selectedFile: file("src/a.ts") });
-  const otherPage = reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a"), reversed: true }), filePage: 2 });
   const otherBase = reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a"), reversed: true, base: "develop" }) });
   assert.equal(sameAppLocation(left, same), true);
   assert.equal(sameAppLocation(left, otherFile), false);
-  assert.equal(sameAppLocation(left, otherPage), false);
   assert.equal(sameAppLocation(left, otherBase), false);
 });
 
@@ -137,7 +135,7 @@ test("position updates replace the current entry in place", () => {
   const history = createNavigationHistory();
   const a = reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a") }) });
   history.push(a);
-  const withFile = reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a") }), selectedFile: file("src/a.ts"), filePage: 1 });
+  const withFile = reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a") }), selectedFile: file("src/a.ts") });
   history.replace(withFile);
   assert.equal(history.current(), withFile);
   assert.equal(history.canBack(), true);

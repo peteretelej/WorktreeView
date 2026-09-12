@@ -5,9 +5,10 @@ import { ZOOM_LEVELS, snapZoom } from "./zoom.ts";
 
 export type Theme = "system" | "light" | "dark";
 export type DiffLayout = "unified" | "split";
-export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; syntax_visible: boolean; zoom: number; mcp_enabled: boolean; mcp_listen_address: string; mcp_port: number };
+export type ChangedFilesView = "tree" | "list" | "details";
+export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; syntax_visible: boolean; changed_files_view: ChangedFilesView; zoom: number; mcp_enabled: boolean; mcp_listen_address: string; mcp_port: number };
 
-export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false, syntax_visible: true, zoom: 1, mcp_enabled: true, mcp_listen_address: "127.0.0.1", mcp_port: 9888 };
+export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false, syntax_visible: true, changed_files_view: "tree", zoom: 1, mcp_enabled: true, mcp_listen_address: "127.0.0.1", mcp_port: 9888 };
 
 export function getSettings() { return invoke<Settings>("get_settings"); }
 export function persistSettings(settings: Settings) { return invoke<Settings>("set_settings", { settings }); }

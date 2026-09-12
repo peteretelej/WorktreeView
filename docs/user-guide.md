@@ -76,13 +76,16 @@ full description with copyable base and target hashes.
 ## Read the diff
 
 Select a file from **Changed files** and its diff opens in the patch
-pane. Gaps between hunks carry expand controls that pull surrounding
-lines into the diff, and the **Diff/File** toggle swaps the pane to the
-whole file as it exists on the new side, with the patch's additions
-highlighted. Toggling back restores the diff with its scroll position
-intact. Syntax highlighting renders progressively and never delays the
-first paint; appearance, zoom, layout, and whitespace preferences live
-in Settings.
+pane. The pane's **Tree/List/Details** toggle re-shapes the list: a
+collapsible directory tree with per-folder counts, a compact single-line
+list, or each name with its full path on a second line; the filter box
+narrows the list as you type, and the chosen view is remembered. Gaps
+between hunks carry expand controls that pull surrounding lines into the
+diff, and the **Diff/File** toggle swaps the pane to the whole file as it
+exists on the new side, with the patch's additions highlighted. Toggling
+back restores the diff with its scroll position intact. Syntax
+highlighting renders progressively and never delays the first paint;
+appearance, zoom, layout, and whitespace preferences live in Settings.
 
 ## Comment on a review
 
