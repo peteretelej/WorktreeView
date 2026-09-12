@@ -81,6 +81,24 @@ pub(crate) struct CommentChange {
 // ArrivalSink so the tool handlers are testable without an app.
 pub(crate) type CommentSink = Arc<dyn Fn(CommentChange) + Send + Sync>;
 
+// Webview notification pushed after a successful review-request mutation.
+// The request engine fires it centrally, so every surface (the MCP tools
+// and the human IPC commands) inherits emission without per-site wiring.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct RequestChange {
+    pub(crate) id: i64,
+    pub(crate) repo_path: String,
+    pub(crate) base_sha: String,
+    pub(crate) target_key: String,
+    pub(crate) target_kind: String,
+    pub(crate) status: String,
+}
+
+// Announces a review-request change (the `review-request-changed` event);
+// injected like CommentSink so the request engine is testable without an
+// app.
+pub(crate) type RequestChangeSink = Arc<dyn Fn(RequestChange) + Send + Sync>;
+
 // Shared, live view of the listener for the Settings MCP section. The
 // startup path writes it and the get_mcp_status command reads it.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -150,6 +168,7 @@ pub(crate) struct TransportDeps {
     pub(crate) arrivals: ArrivalSink,
     pub(crate) refreshes: RefreshSink,
     pub(crate) comment_changes: CommentSink,
+    pub(crate) request_changes: RequestChangeSink,
 }
 
 #[derive(Clone)]
@@ -161,6 +180,7 @@ pub(crate) struct TransportState {
     pub(crate) arrivals: ArrivalSink,
     pub(crate) refreshes: RefreshSink,
     pub(crate) comment_changes: CommentSink,
+    pub(crate) request_changes: RequestChangeSink,
     pub(crate) status: McpStatusHandle,
 }
 
@@ -255,6 +275,7 @@ async fn handle_post_review(
         &identity_fields.target_kind,
         &submission,
         &Actor::Agent(identity),
+        &state.request_changes,
     )
     .await
     {
@@ -634,8 +655,8 @@ pub(crate) async fn start(
     status: McpStatusHandle,
 ) -> Result<Option<TransportHandle>, String> {
     status.reset_from_config(&config);
-    let TransportDeps { data_dir, arrivals, refreshes, comment_changes } = deps;
-    let state = TransportState { pool, arrivals, refreshes, comment_changes, status: status.clone() };
+    let TransportDeps { data_dir, arrivals, refreshes, comment_changes, request_changes } = deps;
+    let state = TransportState { pool, arrivals, refreshes, comment_changes, request_changes, status: status.clone() };
     if !config.enabled {
         return Ok(None);
     }
@@ -780,6 +801,10 @@ mod tests {
         Arc::new(|_| {})
     }
 
+    fn noop_request_changes() -> RequestChangeSink {
+        Arc::new(|_| {})
+    }
+
     fn dummy_status() -> McpStatusHandle {
         McpStatusHandle(Arc::new(Mutex::new(ListenerStatus {
             enabled: true,
@@ -800,7 +825,13 @@ mod tests {
         refreshes: RefreshSink,
         comment_changes: CommentSink,
     ) -> TransportDeps {
-        TransportDeps { data_dir: dir.to_path_buf(), arrivals, refreshes, comment_changes }
+        TransportDeps {
+            data_dir: dir.to_path_buf(),
+            arrivals,
+            refreshes,
+            comment_changes,
+            request_changes: noop_request_changes(),
+        }
     }
 
     // A handler state authenticated by a real token row: the pool-backed
@@ -813,6 +844,7 @@ mod tests {
             arrivals,
             refreshes: noop_refreshes(),
             comment_changes: noop_comment_changes(),
+            request_changes: noop_request_changes(),
             status: dummy_status(),
         };
         (state, secret)

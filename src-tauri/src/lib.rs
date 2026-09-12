@@ -4,6 +4,7 @@ mod commands;
 mod git;
 mod mcp;
 mod overview;
+mod requests;
 mod retrospection;
 mod review;
 mod reviews;
@@ -405,6 +406,11 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
     let comment_changes: transport::CommentSink = Arc::new(move |change| {
         let _ = comment_app_handle.emit("comment-changed", change);
     });
+    // The request engine fires this sink centrally after every mutation.
+    // Production emission of `review-request-changed` lands with the MCP
+    // tools; until then the registered sink stays a placeholder so the
+    // state setup has its final shape.
+    let request_changes: transport::RequestChangeSink = Arc::new(|_| {});
     let config = transport::ListenerConfig {
         enabled: settings.mcp_enabled,
         address: settings.mcp_listen_address.clone(),
@@ -420,6 +426,7 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
         arrivals,
         refreshes: Arc::clone(&refreshes),
         comment_changes,
+        request_changes,
     };
     // A failed bind is a normal, user-visible condition (a configured port
     // collision): the app starts and the Settings MCP section shows the
@@ -536,8 +543,8 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        // The embedded set: the consolidated baseline plus 0002.
-        assert_eq!(versions.len(), 2);
+        // The embedded set: the consolidated baseline plus 0002 and 0003.
+        assert_eq!(versions.len(), 3);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await
@@ -598,7 +605,7 @@ mod tests {
                 .unwrap();
         // The overwritten backup held the first rebuilt store: the full
         // embedded migration set.
-        assert_eq!(preserved.0, 2);
+        assert_eq!(preserved.0, 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -673,7 +680,7 @@ mod tests {
                 .await
                 .unwrap();
         // The rebuilt store carries the full embedded migration set.
-        assert_eq!(versions.len(), 2);
+        assert_eq!(versions.len(), 3);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await

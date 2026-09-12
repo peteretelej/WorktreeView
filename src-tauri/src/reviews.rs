@@ -1,4 +1,5 @@
 use crate::store::now_millis;
+use crate::transport::RequestChangeSink;
 use crate::{agents::AgentIdentity, CommandError};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -919,7 +920,11 @@ fn validate_submission(payload: &SubmissionPayload) -> Result<(), CommandError> 
 // The only writer of submissions and agent comments: the loopback
 // transport's post_review handler calls this with the authenticated
 // agent actor, so ingested finding comments are owned by that token.
-// The submission and every finding comment commit atomically or not at all.
+// The submission and every finding comment commit atomically or not at
+// all. After storage, the request engine observes the submission: every
+// open review request on the identity advances (implicit claim plus the
+// blocking verdict), flag computed here from the engine's single-site
+// blocking definition.
 pub(crate) async fn ingest_submission_in_pool(
     pool: &SqlitePool,
     repo_path: &str,
@@ -928,6 +933,7 @@ pub(crate) async fn ingest_submission_in_pool(
     target_kind: &str,
     payload: &SubmissionPayload,
     author: &Actor,
+    request_changes: &RequestChangeSink,
 ) -> Result<i64, CommandError> {
     let author_token_id = match author {
         Actor::Human => None,
@@ -989,6 +995,20 @@ pub(crate) async fn ingest_submission_in_pool(
         .await?;
     }
     tx.commit().await?;
+    let blocking = payload
+        .findings
+        .iter()
+        .any(|finding| crate::requests::is_blocking_severity(&finding.priority));
+    crate::requests::observe_submission_in_pool(
+        pool,
+        repo_path,
+        base_sha,
+        target_key,
+        target_kind,
+        blocking,
+        request_changes,
+    )
+    .await?;
     Ok(submission_id)
 }
 
@@ -1674,8 +1694,21 @@ mod tests {
         payload: &SubmissionPayload,
         author: &Actor,
     ) -> Result<i64, CommandError> {
-        ingest_submission_in_pool(pool, repo_path, "base", "/demo", "worktree", payload, author)
-            .await
+        ingest_submission_in_pool(
+            pool,
+            repo_path,
+            "base",
+            "/demo",
+            "worktree",
+            payload,
+            author,
+            &noop_request_changes(),
+        )
+        .await
+    }
+
+    fn noop_request_changes() -> crate::transport::RequestChangeSink {
+        std::sync::Arc::new(|_| {})
     }
 
     #[tokio::test]
@@ -2043,5 +2076,75 @@ mod tests {
         .await
         .unwrap();
         assert!(!unowned.is_empty() && unowned.iter().all(|owner| owner.is_none()));
+    }
+
+    // The ingest path's observation hook rides the engine's single-site
+    // blocking definition: a P2-only submission is clean and approves the
+    // open request on its identity, a P0 finding blocks, and each
+    // identity's requests advance independently.
+    #[tokio::test]
+    async fn ingesting_a_submission_observes_open_review_requests() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let coder = crate::agents::create_agent_token_in_pool(&pool, "coder-bot")
+            .await
+            .unwrap()
+            .token
+            .id;
+        let request_draft = crate::requests::RequestDraft {
+            note: "Please review.".into(),
+            lenses: Vec::new(),
+            reviewers: Vec::new(),
+            max_rounds: None,
+            head_sha: "head-1".into(),
+        };
+        let blocking_target = crate::requests::create_request_in_pool(
+            &pool, "/demo", "base", "/demo", "worktree", &request_draft,
+            &crate::requests::Actor::Agent(coder), &noop_request_changes(),
+        )
+        .await
+        .unwrap();
+        let mut clean_draft = request_draft.clone();
+        clean_draft.head_sha = "head-2".into();
+        let clean_target = crate::requests::create_request_in_pool(
+            &pool, "/demo", "clean-base", "/demo", "worktree", &clean_draft,
+            &crate::requests::Actor::Human, &noop_request_changes(),
+        )
+        .await
+        .unwrap();
+        let status = |id: i64| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT status FROM review_requests WHERE id = ?",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+
+        let mut clean_payload = payload();
+        clean_payload
+            .findings
+            .retain(|finding| finding.priority == "P2");
+        ingest_submission_in_pool(
+            &pool, "/demo", "clean-base", "/demo", "worktree", &clean_payload, &HUMAN,
+            &noop_request_changes(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status(clean_target.id).await, "approved");
+        assert_eq!(status(blocking_target.id).await, "requested");
+
+        ingest_submission_in_pool(
+            &pool, "/demo", "base", "/demo", "worktree", &payload(), &HUMAN,
+            &noop_request_changes(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status(blocking_target.id).await, "changes_requested");
+        assert_eq!(status(clean_target.id).await, "approved");
     }
 }

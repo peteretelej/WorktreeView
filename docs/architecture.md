@@ -70,6 +70,20 @@ normalized domain data through narrow, typed Tauri commands.
   findings as agent comments with severity, submission reference, and the
   calling token's ownership in one transaction. `list_submissions`
   returns stored sections as typed entries, never raw JSON.
+- `requests.rs`: the review-request store and lifecycle engine over the
+  `review_requests` table: strict schema validation (note cap, lens
+  vocabulary, reviewer token names, 1-3 round budget), the state machine
+  with sticky verdicts (the first blocking verdict in a round wins and
+  only the requester's re-request resets it) and full human parity (the
+  human actor performs any reviewer transition, never gated by a request's
+  named reviewers list), same-requester dedup on (identity, requester,
+  head), and the round budget whose exhaustion leaves the request for the
+  human. The P0/P1 blocking definition lives once here: the submission
+  ingest computes its observation flag from it, and the attention queries
+  reference it when they build their severity predicates. A submission
+  observed through the ingest implicitly claims open requests on the
+  identity and applies the verdict; mutations announce through the
+  injected `RequestChangeSink` exactly once per successful mutation.
 - `transport.rs`: the agent endpoint, the app's one inbound network
   surface. A `TcpListener` binds the address and port configured in
   Settings (loopback `127.0.0.1:9888` by default) inside the app process;
@@ -151,7 +165,7 @@ for the utilities run with `npm run test:unit`.
 
 SQLite stores repositories, pin order, settings, retrospected surface
 identities, review sessions with their comments and agent submissions,
-plus a commit history cache: `list_commits` resolves the start
+review requests, plus a commit history cache: `list_commits` resolves the start
 ref with one fresh `git rev-parse`, then serves log pages and default-base
 ancestry marks from the cache when the resolved SHAs match what was fetched
 before. Pages key on `(repo_path, start_sha, against_sha, skip, limit)` with
@@ -170,10 +184,13 @@ sections as JSON; findings are never stored separately, they are comment
 rows authored by the agent with a severity and a submission reference.
 Comments may carry an `author_token_id` naming the agent token that owns
 them. All three tables cascade from the `repos` row, as do the older
-repo-scoped caches. The schema is one consolidated `0001` migration plus
+repo-scoped caches. Review requests key on the same review identity and
+cascade from the `repos` row too; their requester token reference is set
+null when the token is deleted, which makes the request human-keyed from
+then on. The schema is one consolidated `0001` migration plus
 append-only additive migrations (`0002` adds the `agent_tokens` table and
-comment ownership); migration divergence handling is described at the end
-of this section.
+comment ownership; `0003` adds review requests); migration divergence
+handling is described at the end of this section.
 
 Retrospected surfaces key on `(repo_path, kind, identity_key)` and carry the
 recorded label, head, pin state, and row origin (`review` for recorded

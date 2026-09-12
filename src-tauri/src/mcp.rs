@@ -790,7 +790,7 @@ mod tests {
     use crate::testutil::{seed_repo, test_pool, test_path, test_repo};
     use crate::transport::{
         discovery_path, handle, start, CommentChange, CommentSink, ListenerConfig, ListenerStatus,
-        McpStatusHandle, RefreshSink, TransportDeps, UNAUTHORIZED,
+        McpStatusHandle, RefreshSink, RequestChangeSink, TransportDeps, UNAUTHORIZED,
     };
     use axum::body::{to_bytes, Body};
     use axum::extract::State;
@@ -819,6 +819,10 @@ mod tests {
     }
 
     fn noop_comment_changes() -> CommentSink {
+        Arc::new(|_| {})
+    }
+
+    fn noop_request_changes() -> RequestChangeSink {
         Arc::new(|_| {})
     }
 
@@ -862,6 +866,7 @@ mod tests {
             arrivals: Arc::new(|_| {}),
             refreshes: noop_refreshes(),
             comment_changes: noop_comment_changes(),
+            request_changes: noop_request_changes(),
             status: dummy_status(),
         };
         (state, secret)
@@ -1359,6 +1364,7 @@ mod tests {
             arrivals: Arc::new(|_| {}),
             refreshes,
             comment_changes: noop_comment_changes(),
+            request_changes: noop_request_changes(),
             status: dummy_status(),
         };
         let payload = call_tool_raw(
@@ -1407,6 +1413,7 @@ mod tests {
             arrivals: Arc::new(|_| {}),
             refreshes: noop_refreshes(),
             comment_changes: changes,
+            request_changes: noop_request_changes(),
             status: dummy_status(),
         };
         let created = call_tool_raw(
@@ -1663,6 +1670,7 @@ mod tests {
             arrivals: Arc::new(|_| {}),
             refreshes: noop_refreshes(),
             comment_changes: changes,
+            request_changes: noop_request_changes(),
             status: dummy_status(),
         };
         let root_id = seed_review_with_comment(&pool, &state, &secret).await;
@@ -1752,6 +1760,7 @@ mod tests {
                 arrivals: Arc::new(|_| {}),
                 refreshes: noop_refreshes(),
                 comment_changes: noop_comment_changes(),
+                request_changes: noop_request_changes(),
             },
             config.clone(),
             McpStatusHandle::for_config(&config),
@@ -1814,6 +1823,7 @@ mod tests {
                 arrivals: Arc::new(|_| {}),
                 refreshes,
                 comment_changes: noop_comment_changes(),
+                request_changes: noop_request_changes(),
             },
             config.clone(),
             McpStatusHandle::for_config(&config),
