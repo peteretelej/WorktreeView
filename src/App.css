@@ -717,7 +717,9 @@ h2 {
 .table-header,
 .worktree-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1.4fr) minmax(160px, auto) minmax(200px, 1fr);
+  /* The worktree column hugs its content up to a cap; the last-commit
+     column absorbs the slack so wide windows do not balloon the names. */
+  grid-template-columns: fit-content(480px) minmax(160px, auto) minmax(200px, 1fr);
   gap: 12px;
   align-items: center;
 }
@@ -804,9 +806,13 @@ h2 {
 }
 
 .branch-title strong {
+  overflow: hidden;
+  min-width: 0;
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .worktree-path {
