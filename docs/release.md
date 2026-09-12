@@ -36,8 +36,10 @@ GitHub Actions runs two workflows:
   publishes them to a GitHub Release for the tag, then dispatches the
   desktop e2e suite (a release created by the workflow token does not
   itself trigger other workflows). The app version comes from the tag:
-  the workflow injects it into the manifests at build time, so cutting
-  a release needs no version-bump commit on `main`.
+  the workflow runs the same `scripts/set-version.mjs` used for release
+  prep (`npm run set-version`) to inject it into the manifests at build
+  time, so a forgotten bump commit on `main` cannot mislabel a release;
+  it only leaves development builds reporting the previous version.
 
 Release builds are unsigned: Windows shows a
 SmartScreen warning, and macOS requires right-click Open (or

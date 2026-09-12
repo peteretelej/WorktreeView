@@ -153,17 +153,25 @@ or global Docker pruning.
 
 ## Releases
 
-Releases are cut by tag alone. The Release workflow derives the app
-version from the pushed tag and injects it into the manifests at build
-time, so no bump commit is needed; between releases the manifests on
-`main` keep the last released version, and development builds report
+A release is a version-bump commit plus a tag. Run
+`npm run set-version -- X.Y.Z` to sync the version across `package.json`,
+`package-lock.json`, `src-tauri/tauri.conf.json`, and
+`src-tauri/Cargo.toml`, commit, then tag. Between releases the manifests
+on `main` keep the last released version, and development builds report
 that version. Before tagging, make sure `main` is pushed and the desktop
 e2e suite is green: pushing the tag publishes the release.
 
 ```sh
-git tag v0.2.0
-git push origin main v0.2.0
+npm run set-version -- 0.2.2
+git commit -am "bump version to 0.2.2"
+git tag v0.2.2
+git push origin main v0.2.2
 ```
+
+The Release workflow re-derives the version from the pushed tag with the
+same script and injects it into the manifests at build time, so a
+forgotten bump commit cannot mislabel a release; it only leaves
+development builds reporting the previous version.
 
 The Release workflow builds Windows, macOS, and Linux bundles and
 publishes them directly as the GitHub Release for the tag, with

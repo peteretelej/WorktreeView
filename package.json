@@ -1,7 +1,7 @@
 {
   "name": "worktreeview",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.1",
   "type": "module",
   "license": "Apache-2.0",
   "engines": {
@@ -27,6 +27,7 @@
     "build:e2e": "npm run check && vite build --mode e2e",
     "check": "tsc --noEmit && tsc -p tsconfig.node.json",
     "preview": "vite preview",
+    "set-version": "node scripts/set-version.mjs",
     "tauri": "tauri",
     "test:desktop": "bash scripts/test-desktop.sh",
     "test:unit": "node --test src/navigation.test.ts src/fileTree.test.ts src/reviewPresets.test.ts src/surfaces.test.ts src/diff.test.ts src/stream.test.ts src/zoom.test.ts src/highlight.test.ts src/comments.test.ts src/markdown.test.ts src/markdownEdit.test.ts src/canvas.test.ts"
