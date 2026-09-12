@@ -30,7 +30,7 @@ type HistoryEntry = { repoPath: string; startPointLabel: string; worktreePath?: 
 type HistoryState = HistoryEntry & { commits: CommitInfo[]; hasMore: boolean; loading: boolean; error: string };
 type WorktreeStatus = { path: string; changes: number | null };
 type ParsedHunk = { header: string; lines: DiffLine[] };
-type DiffPreferences = { layout: DiffLayout; whitespaceVisible: boolean; lineWrap: boolean; syntaxVisible: boolean };
+type DiffPreferences = { layout: DiffLayout; whitespaceVisible: boolean; lineWrap: boolean; syntaxVisible: boolean; inlineCommentsVisible: boolean };
 type OverviewTab = "worktrees" | "branches" | "remote" | "archived";
 // Mirrors the payload of the Rust `submission-received` event.
 type SubmissionArrival = { repo_path: string; base_sha: string; target_key: string; target_kind: "worktree" | "head"; submission_id: number; agent_name: string };
@@ -945,7 +945,7 @@ function App() {
     await loadHistoryPage(current, generation, current.commits.length, historyRefs.default_base, true);
   }
 
-  const diffPrefs: DiffPreferences = { layout: settings.diff_layout, whitespaceVisible: settings.whitespace_visible, lineWrap: settings.line_wrap, syntaxVisible: settings.syntax_visible };
+  const diffPrefs: DiffPreferences = { layout: settings.diff_layout, whitespaceVisible: settings.whitespace_visible, lineWrap: settings.line_wrap, syntaxVisible: settings.syntax_visible, inlineCommentsVisible: settings.inline_comments_visible };
   const diffToggles = <DiffToggles settings={settings} onChange={(next) => { void updateSettings(next); }} />;
   const goneReview = reviewLocation && reviewIndex !== null && reviewIndex.error && (reviewIndex.error_code === "unresolvable_ref" || reviewIndex.error_code === "git_execution") ? goneSurfaceMatching(reviewLocation.identity.repoPath, reviewLocation.identity.target) : null;
   const search = query.trim().toLowerCase(); const matchingResults: SearchResult[] = search ? repos.flatMap((repo) => `${repo.name} ${repo.path}`.toLowerCase().includes(search) ? [{ repo }] : repo.worktrees.filter((worktree) => `${worktree.branch} ${worktree.path} ${worktree.head}`.toLowerCase().includes(search)).map((worktree) => ({ repo, worktree }))) : repos.map((repo) => ({ repo }));
@@ -1421,7 +1421,7 @@ function PatchPane({ selectedFile, patch, patchError, patchLoading, diffPrefs, r
     return () => window.removeEventListener("mouseup", endDrag);
   }, []);
   const normalized = selection ? { displaySide: selection.displaySide, start: Math.min(selection.anchor, selection.focus), end: Math.max(selection.anchor, selection.focus) } : null;
-  const cardsFor: ReturnType<typeof inlineCards> = selectedFile ? inlineCards(comments, selectedFile.path, reversed) : new Map();
+  const cardsFor: ReturnType<typeof inlineCards> = selectedFile && diffPrefs.inlineCommentsVisible ? inlineCards(comments, selectedFile.path, reversed) : new Map();
   const patchLines = hunks.flatMap((hunk) => hunk.lines);
   function selectRow(side: DisplaySide, number: number, extend: boolean) {
     setSelection((current) => extend && current && current.displaySide === side ? { displaySide: side, anchor: current.anchor, focus: number } : { displaySide: side, anchor: number, focus: number });
@@ -1761,6 +1761,7 @@ function DiffToggles({ settings, onChange }: { settings: Settings; onChange: (ne
     <button className={`icon-button ${settings.diff_layout === "split" ? "active" : ""}`} type="button" aria-pressed={settings.diff_layout === "split"} aria-label="Split diff layout" title="Split diff layout" onClick={() => onChange({ ...settings, diff_layout: settings.diff_layout === "split" ? "unified" : "split" })}><Columns2 size={12} /></button>
     <button className={`icon-button ${settings.whitespace_visible ? "active" : ""}`} type="button" aria-pressed={settings.whitespace_visible} aria-label="Visible whitespace" title="Visible whitespace" onClick={() => onChange({ ...settings, whitespace_visible: !settings.whitespace_visible })}><Space size={12} /></button>
     <button className={`icon-button ${settings.line_wrap ? "active" : ""}`} type="button" aria-pressed={settings.line_wrap} aria-label="Wrap lines" title="Wrap lines" onClick={() => onChange({ ...settings, line_wrap: !settings.line_wrap })}><WrapText size={12} /></button>
+    <button className={`icon-button ${settings.inline_comments_visible ? "active" : ""}`} type="button" aria-pressed={settings.inline_comments_visible} aria-label="Inline comments" title="Inline comments in the diff" onClick={() => onChange({ ...settings, inline_comments_visible: !settings.inline_comments_visible })}><MessageSquare size={12} /></button>
   </div>;
 }
 

@@ -94,8 +94,12 @@ between hunks carry expand controls that pull surrounding lines into the
 diff, and the **Diff/File** toggle swaps the pane to the whole file as it
 exists on the new side, with the patch's additions highlighted. Toggling
 back restores the diff with its scroll position intact. Syntax
-highlighting renders progressively and never delays the first paint;
-appearance, zoom, layout, and whitespace preferences live in Settings.
+highlighting renders progressively and never delays the first paint.
+The display toggles at the top of the review cover syntax highlighting,
+split layout, visible whitespace, line wrap, and inline comments; hiding
+inline comments clears the diff for a plain read of the code while
+threads stay available in the Comments pane. Appearance, zoom, layout,
+and whitespace preferences live in Settings.
 
 ## Comment on a review
 

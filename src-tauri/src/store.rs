@@ -105,6 +105,7 @@ pub struct Settings {
     pub whitespace_visible: bool,
     pub line_wrap: bool,
     pub syntax_visible: bool,
+    pub inline_comments_visible: bool,
     pub changed_files_view: ChangedFilesView,
     pub zoom: f64,
     pub mcp_enabled: bool,
@@ -129,6 +130,7 @@ impl Default for Settings {
             whitespace_visible: false,
             line_wrap: false,
             syntax_visible: true,
+            inline_comments_visible: true,
             changed_files_view: ChangedFilesView::Tree,
             zoom: 1.0,
             mcp_enabled: true,
@@ -343,6 +345,11 @@ pub(crate) async fn get_settings_in_pool(pool: &SqlitePool) -> Result<Settings, 
                     settings.syntax_visible = flag;
                 }
             }
+            "inline_comments_visible" => {
+                if let Some(flag) = settings_bool_from_value(&value) {
+                    settings.inline_comments_visible = flag;
+                }
+            }
             "changed_files_view" => {
                 if let Some(view) = ChangedFilesView::from_value(&value) {
                     settings.changed_files_view = view;
@@ -390,6 +397,10 @@ pub(crate) async fn set_settings_in_pool(
         (
             "syntax_visible",
             settings_bool_value(settings.syntax_visible).to_string(),
+        ),
+        (
+            "inline_comments_visible",
+            settings_bool_value(settings.inline_comments_visible).to_string(),
         ),
         (
             "changed_files_view",
@@ -520,6 +531,7 @@ mod tests {
             whitespace_visible: true,
             line_wrap: true,
             syntax_visible: true,
+            inline_comments_visible: false,
             changed_files_view: ChangedFilesView::List,
             zoom: 1.25,
             mcp_enabled: false,
