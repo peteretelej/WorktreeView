@@ -448,7 +448,7 @@ function App() {
     query.addEventListener("change", onChange);
     return () => query.removeEventListener("change", onChange);
   }, [settings.theme]);
-  useEffect(() => { function handleKeyboard(event: KeyboardEvent) { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); paletteRef.current?.open ? closePalette() : openPalette(); return; } if ((event.ctrlKey || event.metaKey) && !event.altKey) { const shortcut = zoomShortcut(event.key); if (shortcut) { event.preventDefault(); if (shortcut === "reset") zoomActionsRef.current.reset(); else zoomActionsRef.current.step(shortcut === "in" ? 1 : -1); return; } } if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "b") { if (nav.current().kind === "review" || nav.current().kind === "commit-history") { event.preventDefault(); paneToggleRef.current(); } return; } if (!event.altKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight") || paletteRef.current?.open) return; event.preventDefault(); navigateRef.current(event.key === "ArrowLeft" ? -1 : 1); } window.addEventListener("keydown", handleKeyboard); return () => window.removeEventListener("keydown", handleKeyboard); }, []);
+  useEffect(() => { function handleKeyboard(event: KeyboardEvent) { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); paletteRef.current?.open ? closePalette() : openPalette(); return; } if ((event.ctrlKey || event.metaKey) && !event.altKey) { const shortcut = zoomShortcut(event.key); if (shortcut) { event.preventDefault(); if (shortcut === "reset") zoomActionsRef.current.reset(); else zoomActionsRef.current.step(shortcut === "in" ? 1 : -1); return; } } if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "b") { if (!paletteRef.current?.open) { event.preventDefault(); paneToggleRef.current(); } return; } if (!event.altKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight") || paletteRef.current?.open) return; event.preventDefault(); navigateRef.current(event.key === "ArrowLeft" ? -1 : 1); } window.addEventListener("keydown", handleKeyboard); return () => window.removeEventListener("keydown", handleKeyboard); }, []);
   // Ctrl+wheel steps zoom like a browser; trackpad pinch delivers the same
   // ctrl+wheel events. The accumulator turns smooth deltas into discrete
   // steps and resets after a pause.
@@ -463,7 +463,13 @@ function App() {
     });
     return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
   }, []);
-  useEffect(() => { commentsRef.current = comments; activeRepoPathRef.current = activeRepoPath; reposRef.current = repos; paneToggleRef.current = () => { void updateSettings({ ...settings, files_pane_visible: !settings.files_pane_visible }); }; });
+  useEffect(() => { commentsRef.current = comments; activeRepoPathRef.current = activeRepoPath; reposRef.current = repos; paneToggleRef.current = () => {
+    // Ctrl+B means the surface's pane: the files list in a review, the
+    // project navigator on the overview; the settings overlay has none.
+    const kind = nav.current().kind;
+    if (kind === "review" || kind === "commit-history") void updateSettings({ ...settings, files_pane_visible: !settings.files_pane_visible });
+    else if (kind === "inbox") setCollapsed((value) => !value);
+  }; });
   // Agent comment changes arrive through the same endpoint; when one names
   // the loaded review, the comment layer refetches so the stream and inline
   // threads update without a reload. Changes to other reviews are ignored:
