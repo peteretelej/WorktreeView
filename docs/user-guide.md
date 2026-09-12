@@ -43,6 +43,13 @@ pattern extends to branches: the Branches and Remote tabs list local and
 remote-tracking branches newest-first, and clicking one reviews it
 without checking anything out.
 
+The Archived tab keeps surfaces the app has reviewed, or you have
+pinned, after they disappear: a deleted worktree or branch keeps its
+label, path, and last seen commit, and opening it still shows its
+history for as long as those commits remain in the repository's object
+store. Nothing is deleted to get there; review a worktree once and it
+lands in Archived automatically if it is ever removed outside the app.
+
 ## Review working changes
 
 The **changed** chip on a worktree row opens the working-changes review:
