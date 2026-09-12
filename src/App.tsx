@@ -1468,9 +1468,12 @@ function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target, refs,
       <CommitRow key={targetName} title={commitTitle}>
         {target.kind === "commit" ? <>
           {summary?.body && <p className="commit-body">{summary.body}</p>}
-          {index && !index.error && <div className="sha-row">
-            <span className="sha"><code>base {shortToken(index.base_sha)}</code><CopyButton ghost value={index.base_sha} label="Copy base commit hash" /></span>
-            <span className="sha"><code>target {shortToken(index.target_sha)}</code><CopyButton ghost value={index.target_sha} label="Copy target commit hash" /></span>
+          {(summary || (index && !index.error)) && <div className="sha-row">
+            {summary && <span className="sha" title={new Date(summary.date * 1000).toLocaleString()}>{summary.author} · {relativeTime(summary.date)}</span>}
+            {index && !index.error && <>
+              <span className="sha"><code>base {shortToken(index.base_sha)}</code><CopyButton ghost value={index.base_sha} label="Copy base commit hash" /></span>
+              <span className="sha"><code>target {shortToken(index.target_sha)}</code><CopyButton ghost value={index.target_sha} label="Copy target commit hash" /></span>
+            </>}
           </div>}
         </> : target.kind === "worktree" ? <div className="sha-row">
           <span className="sha"><code title={target.worktree.path}>{target.worktree.path}</code><CopyButton ghost value={target.worktree.path} label="Copy worktree path" /></span>
