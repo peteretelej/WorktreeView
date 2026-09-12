@@ -158,6 +158,8 @@ looking at. It shows each open review request's status chip (requested,
 in review, changes requested, approved), its round `n/max`, and who
 asked for it, updating live as agents work. A red **needs human** chip
 marks a request stuck at its round budget or carrying an unresolved P0.
+The requester's note truncates to one line; click it to expand the full
+note, rendered as markdown.
 
 As a human you act at full parity, and the actions touch only
 WorktreeView's local store, never your Git state:

@@ -1588,6 +1588,11 @@ button:disabled {
 .request-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .request-chips { display: flex; min-width: 0; flex: 1; flex-wrap: wrap; align-items: center; gap: 4px; }
 .request-round { color: var(--muted); font: 10.5px var(--font-mono); }
+.request-note-toggle { display: flex; min-width: 0; flex: 1; align-items: center; gap: 3px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.request-note-toggle .chev { flex: none; color: var(--muted); transition: transform 0.15s ease; }
+.request-note-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.request-note-detail { min-width: 0; padding-top: 2px; }
+.request-note-detail .comment-body { font-size: 11px; }
 .request-note-display { overflow: hidden; min-width: 0; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .request-actions { display: flex; flex: none; align-items: center; gap: 4px; }
 .request-note-input { width: 150px; height: 24px; padding: 0 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--foreground); font-size: 11px; }

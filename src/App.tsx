@@ -15,6 +15,7 @@ import { hunkSideSources, languageForPath, splitWhitespace, tokenizeHunk, type H
 import { filterGoneSurfaces, goneSurfaceLabel, pinnedSurfaces, reviewFileRoot, surfacePinIndex, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces";
 import { ATTENTION_TABS, attentionAge, attentionRows, attentionStatus, attentionTabCounts, canReRequest, canVerdict, canWithdraw, groupedChangeLabel, isNarrowAttention, requestStatusLabel, rowsForAttentionTab, validateRequestForm, REQUEST_LENS_OPTIONS, REQUEST_NOTE_LIMIT, REQUEST_ROUNDS, type AttentionCategory, type AttentionQueue, type AttentionRow, type RequestAction, type RequestLens, type RequestChange, type ReviewRequestRow } from "./requests.ts";
 import { CommentStream, CommentThreadView, DraftComposer, InlineCommentComposer, inlineCards, selectableRow, useReviewComments, type CommentsApi } from "./comments.tsx";
+import { CommentBody } from "./markdown.tsx";
 import { ReviewsStrip } from "./canvas.tsx";
 import { copyText } from "./clipboard";
 import type { CommentSelection, DisplaySide, ReviewKey } from "./comments";
@@ -1323,6 +1324,7 @@ function ReviewRequestBar({ identityKey, headSha }: { identityKey: ReviewKey; he
 function RequestRowView({ row, headSha, onAction }: { row: ReviewRequestRow; headSha: string; onAction: (row: ReviewRequestRow, action: RequestAction, note: string) => void }) {
   const [note, setNote] = useState("");
   const [armed, setArmed] = useState(false);
+  const [noteOpen, setNoteOpen] = useState(false);
   const withdrawArmed = armed && canWithdraw(row.status);
   const actionable = canVerdict(row.status) || canReRequest(row) || canWithdraw(row.status);
   function withdraw() {
@@ -1345,8 +1347,9 @@ function RequestRowView({ row, headSha, onAction }: { row: ReviewRequestRow; hea
       {row.max_rounds > 0 && <code className="request-round" title={`Round ${row.round} of ${row.max_rounds}`}>{row.round}/{row.max_rounds}</code>}
       <span className="comment-badge" title={`Requested by ${row.requester}`}>{row.requester}</span>
       {row.reviewers.length > 0 && <span className="comment-badge" title={`Named reviewers: ${row.reviewers.join(", ")}`}>{row.reviewers.length === 1 ? row.reviewers[0] : `${row.reviewers.length} reviewers`}</span>}
-      {row.note && <span className="request-note-display" title={row.note}>{row.note}</span>}
+      {row.note && <button className="request-note-toggle" type="button" aria-expanded={noteOpen} aria-controls={`request-note-detail-${row.id}`} title={row.note} onClick={() => setNoteOpen((open) => !open)}><ChevronRight size={12} className="chev" /><span className="request-note-display">{row.note}</span></button>}
     </div>
+    {row.note && noteOpen && <div className="request-note-detail" id={`request-note-detail-${row.id}`}><CommentBody text={row.note} /></div>}
     {actionable && <div className="request-actions">
       <input className="request-note-input" type="text" aria-label={`Optional note for the ${requestStatusLabel(row.status)} request`} placeholder="Optional note" maxLength={REQUEST_NOTE_LIMIT} value={note} onChange={(event) => setNote(event.currentTarget.value)} />
       {canVerdict(row.status) && <button className="request-action" type="button" onClick={() => act("approve")}>Approve</button>}
