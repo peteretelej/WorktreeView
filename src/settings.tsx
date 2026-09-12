@@ -209,11 +209,20 @@ function errorMessageOf(error: unknown) {
 // the agent endpoint reports as its server version.
 function AboutSection() {
   const [version, setVersion] = useState("");
+  const [logError, setLogError] = useState("");
   useEffect(() => {
     let mounted = true;
     getVersion().then((loaded) => { if (mounted) setVersion(loaded); }).catch(() => { /* the rest of the page still renders */ });
     return () => { mounted = false; };
   }, []);
+  async function openLogs() {
+    setLogError("");
+    try {
+      await invoke("open_log_dir");
+    } catch (caught) {
+      setLogError(errorMessageOf(caught));
+    }
+  }
   return <section id="settings-about" className="settings-section" aria-labelledby="settings-about-heading">
     <h2 id="settings-about-heading">About</h2>
     <div className="settings-row">
@@ -223,6 +232,11 @@ function AboutSection() {
       <div className="settings-row-copy"><strong>Version</strong><span>Also reported to agents as the endpoint server version.</span></div>
       <code>{version || "unknown"}</code>
     </div>
+    <div className="settings-row">
+      <div className="settings-row-copy"><strong>Logs</strong><span>Small rolling diagnostic files; attach them when reporting an issue. Secrets, notes, and review text are never written to them.</span></div>
+      <button className="settings-select settings-button" type="button" onClick={() => void openLogs()}>Open folder</button>
+    </div>
+    {logError && <div className="settings-inline-error" role="status" aria-live="polite">{logError}</div>}
   </section>;
 }
 

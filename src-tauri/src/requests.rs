@@ -232,6 +232,7 @@ async fn require_request(pool: &SqlitePool, id: i64) -> Result<ReviewRequest, Co
 // One fire per successful mutation, centrally here: callers never
 // announce from their own sites.
 fn fire_change(notify: &RequestChangeSink, request: &ReviewRequest) {
+    log::info!("review request {} -> {} (round {})", request.id, request.status, request.round);
     notify(RequestChange {
         id: request.id,
         repo_path: request.repo_path.clone(),

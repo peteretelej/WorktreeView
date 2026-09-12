@@ -36,6 +36,7 @@ use crate::{canonical_path, plain_path, AppState, CommandError};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
+use tauri::Manager;
 
 #[tauri::command]
 pub(crate) async fn open_repo(
@@ -632,6 +633,22 @@ pub(crate) fn open_review_file(
     };
     opened.map_err(|error| {
         CommandError::new("open_failed", format!("The file could not be opened: {error}"))
+    })
+}
+
+// The settings page's log access resolves the same app log dir the log
+// plugin writes to, creating it when no log exists yet, and hands it to the
+// OS shell.
+#[tauri::command]
+pub(crate) fn open_log_dir(app: tauri::AppHandle) -> Result<(), CommandError> {
+    let dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|_| CommandError::new("log_dir", "The log folder could not be resolved."))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|_| CommandError::new("log_dir", "The log folder could not be created."))?;
+    tauri_plugin_opener::open_path(&dir, None::<&str>).map_err(|error| {
+        CommandError::new("open_failed", format!("The folder could not be opened: {error}"))
     })
 }
 

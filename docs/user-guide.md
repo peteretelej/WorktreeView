@@ -231,7 +231,17 @@ interface zoom) and diff behavior (layout, highlighting, whitespace,
 line wrap). **Agent API** controls the local endpoint your coding agents
 connect through; saved address and port changes apply through that
 section's Restart action, no app restart needed. **About** names the app
-and its version (the same value agents see from the endpoint).
+and its version (the same value agents see from the endpoint), and its
+Logs row opens the diagnostic log folder.
+
+## Troubleshooting
+
+The app writes small rolling log files (at most three, one megabyte
+each) into its log folder; open it from **Settings > About > Logs**.
+The log records app lifecycle events, review-request status changes, and
+endpoint rejections at a level that is safe to share: agent token
+secrets, request notes, and comment or review text are never written to
+it. Attach a log file when reporting an issue.
 
 ![Settings: General page](images/guide-settings-general.webp)
 

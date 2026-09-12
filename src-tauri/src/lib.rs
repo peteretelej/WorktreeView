@@ -18,7 +18,8 @@ use commands::{
     delete_comment, describe_commit, edit_comment, fetch_project, get_branch_inventory,
     get_mcp_status, get_settings, list_agent_tokens, list_attention, list_comments, list_commits,
     list_refs, list_repos, list_requests, list_review_changes, list_submissions, list_surfaces,
-    list_worktree_status, list_worktrees, match_comment_anchors, open_repo, open_review_file,
+    list_worktree_status, list_worktrees, match_comment_anchors, open_log_dir, open_repo,
+    open_review_file,
     read_review_file, read_review_file_bytes, read_review_patch, remove_repo, reply_comment,
     restart_mcp, update_review_request, set_comment_resolved, set_repo_pinned,
     set_settings, set_surface_pinned,
@@ -237,6 +238,20 @@ fn set_aside_store(db_path: &Path) -> std::io::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(
+            // The file log is the support artifact: capped rolling files in
+            // the app log dir, info level, never token secrets, note or
+            // comment bodies, or Authorization headers.
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None }),
+                ])
+                .level(log::LevelFilter::Info)
+                .max_file_size(1_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3))
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             initialize(app).map_err(|error| {
@@ -250,6 +265,7 @@ pub fn run() {
                     .blocking_show();
                 error
             })?;
+            log::info!("worktreeview {} started", app.package_info().version);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -274,6 +290,7 @@ pub fn run() {
             read_review_patch,
             read_review_file, read_review_file_bytes,
             open_review_file,
+            open_log_dir,
             get_settings,
             set_settings,
             list_agent_tokens,

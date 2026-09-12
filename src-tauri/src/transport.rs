@@ -348,6 +348,8 @@ pub(crate) async fn handle(State(state): State<TransportState>, request: Request
     let identity = match authenticate(&state, &request).await {
         Some(identity) => identity,
         None => {
+            // The presented secret is never logged, only the miss.
+            log::warn!("agent endpoint rejected an unauthorized request to {}", request.uri().path());
             return rpc_error(
                 &Value::Null,
                 StatusCode::UNAUTHORIZED,
@@ -665,6 +667,7 @@ pub(crate) async fn start(
     let listener = match std::net::TcpListener::bind((config.address.as_str(), config.port)) {
         Ok(listener) => listener,
         Err(error) => {
+            log::warn!("agent endpoint bind failed on {}:{}", config.address, config.port);
             status.set(false, Some(format!("Could not bind the agent endpoint to {address}:{port}: {error}", address = config.address, port = config.port)));
             return Ok(None);
         }
@@ -681,6 +684,7 @@ pub(crate) async fn start(
         .map_err(|error| format!("Could not resolve the agent endpoint port: {error}"))?
         .port();
     status.lock_status().port = port;
+    log::info!("agent endpoint listening on {}:{}", config.address, port);
     // Provisioning and discovery come after the bind and stay one unit: if
     // either fails, the bound listener shuts and the error surfaces in the
     // Settings MCP section without a discovery file advertising it.
