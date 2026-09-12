@@ -18,7 +18,7 @@ export function persistSettings(settings: Settings) { return invoke<Settings>("s
 // response and is shown once.
 export type AgentToken = { id: number; name: string; is_default: boolean; created_at: number; last_used_at: number | null; revoked_at: number | null };
 export type CreatedAgentToken = { token: AgentToken; secret: string };
-export type McpStatus = { enabled: boolean; running: boolean; address: string; port: number; error: string | null };
+export type McpStatus = { enabled: boolean; running: boolean; address: string; port: number; error: string | null; config_path: string; skill_dir: string };
 
 export function listAgentTokens() { return invoke<AgentToken[]>("list_agent_tokens"); }
 export function createAgentToken(name: string) { return invoke<CreatedAgentToken>("create_agent_token", { name }); }
@@ -162,6 +162,20 @@ function AgentApiSection({ settings, onChange }: { settings: Settings; onChange:
         <div className="settings-row-copy"><strong>Listener</strong><StatusLine status={status} /></div>
         <button className="settings-select settings-button" type="button" disabled={restarting} onClick={() => void restart()}>{restarting ? "Restarting..." : "Restart"}</button>
       </div>
+      {status && <div className="settings-row">
+        <div className="settings-row-copy">
+          <strong>Integration files</strong>
+          <span>Discovery clients read the config file for the live endpoint; the app keeps a version-matched copy of the agent skill in its home, refreshed on every launch.</span>
+          <span className="settings-paths">
+            <code>{status.config_path}</code>
+            <code>{status.skill_dir}</code>
+          </span>
+        </div>
+        <span className="settings-row-actions">
+          <CopyButton value={status.config_path} label="Copy config path" />
+          <CopyButton value={status.skill_dir} label="Copy skill path" />
+        </span>
+      </div>}
     </section>
     <section id="settings-tokens" className="settings-section" aria-labelledby="settings-tokens-heading">
       <h2 id="settings-tokens-heading">Agent tokens</h2>

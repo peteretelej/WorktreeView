@@ -1246,6 +1246,8 @@ mod tests {
             address: "127.0.0.1".into(),
             port: 0,
             error: None,
+            config_path: String::new(),
+            skill_dir: String::new(),
         })))
     }
 

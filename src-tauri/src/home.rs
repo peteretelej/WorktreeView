@@ -1,13 +1,55 @@
 //! The app home: one known directory holding everything the app persists
-//! (config.json with the agent endpoint payload and the SQLite store).
-//! Profile-root placement keeps the path identical on every OS and outside
-//! AppData virtualization for packaged (MSIX) builds, so external processes
-//! such as agents always find it at the documented location.
+//! (config.json with the agent endpoint payload, the SQLite store, and the
+//! published agent skill). Profile-root placement keeps the path identical
+//! on every OS and outside AppData virtualization for packaged (MSIX)
+//! builds, so external processes such as agents always find it at the
+//! documented location.
 
 use std::path::{Path, PathBuf};
 
 pub(crate) const HOME_ENV_VAR: &str = "WORKTREEVIEW_DATA_DIR";
 pub(crate) const HOME_ARG: &str = "--home";
+
+/// The agent skill ships inside the binary and is published into the home,
+/// so an installed app carries its own version-matched copy and never
+/// depends on the repository. The list must mirror `skills/worktreeview/`
+/// exactly; the drift test in this module fails when the folder and the
+/// bundle disagree.
+pub(crate) const SKILL_BUNDLE: &[(&str, &str)] = &[
+    ("SKILL.md", include_str!("../../skills/worktreeview/SKILL.md")),
+    (
+        "performing-review.md",
+        include_str!("../../skills/worktreeview/performing-review.md"),
+    ),
+    (
+        "requesting-review.md",
+        include_str!("../../skills/worktreeview/requesting-review.md"),
+    ),
+];
+
+/// Where the published skill copy lives, relative to the app home; mirrors
+/// the repository layout so the two stay mentally interchangeable.
+pub(crate) fn skill_dir(home: &Path) -> PathBuf {
+    home.join("skills").join("worktreeview")
+}
+
+/// Publish the bundled skill into the home, rewriting a file only when its
+/// content drifted so backup tools and readers see stable mtimes. Files in
+/// the folder that the bundle does not name are left alone.
+pub(crate) fn publish_skill_bundle(home: &Path) -> std::io::Result<()> {
+    let dir = skill_dir(home);
+    std::fs::create_dir_all(&dir)?;
+    for (name, contents) in SKILL_BUNDLE {
+        let path = dir.join(name);
+        let drifted = std::fs::read_to_string(&path)
+            .map(|existing| existing != *contents)
+            .unwrap_or(true);
+        if drifted {
+            std::fs::write(&path, contents)?;
+        }
+    }
+    Ok(())
+}
 
 /// Default home under the user profile; debug builds live beside it so a
 /// dev checkout never claims an installed release's data or endpoint.
@@ -110,7 +152,10 @@ pub(crate) fn migrate_legacy_store(legacy_dir: &Path, home: &Path, db_name: &str
 
 #[cfg(test)]
 mod tests {
-    use super::{default_home_dir, home_arg_from, migrate_legacy_store, resolve_home, HOME_ARG};
+    use super::{
+        default_home_dir, home_arg_from, migrate_legacy_store, publish_skill_bundle,
+        resolve_home, skill_dir, HOME_ARG, SKILL_BUNDLE,
+    };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
@@ -230,5 +275,51 @@ mod tests {
         assert!(!home.join("worktreeview.sqlite3").exists(), "no half-migrated store may stay behind");
         assert!(!home.join("worktreeview.sqlite3-wal").exists());
         assert!(!home.join("worktreeview.sqlite3-shm").exists());
+    }
+
+    #[test]
+    fn skill_bundle_mirrors_the_repository_folder() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../skills/worktreeview");
+        let mut expected: Vec<(String, String)> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().unwrap().is_file())
+            .map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let contents = std::fs::read_to_string(entry.path()).unwrap();
+                (name, contents)
+            })
+            .collect();
+        expected.sort();
+        let mut embedded: Vec<(String, String)> = SKILL_BUNDLE
+            .iter()
+            .map(|(name, contents)| (name.to_string(), contents.to_string()))
+            .collect();
+        embedded.sort();
+        assert_eq!(embedded, expected, "SKILL_BUNDLE must mirror skills/worktreeview exactly; update the bundle when the skill gains or loses files");
+    }
+
+    #[test]
+    fn publishing_writes_the_bundle_and_leaves_unknown_files() {
+        let home = crate::testutil::test_path("home-skill-publish");
+        std::fs::create_dir_all(&home).unwrap();
+
+        publish_skill_bundle(&home).unwrap();
+
+        let dir = skill_dir(&home);
+        for (name, contents) in SKILL_BUNDLE {
+            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), *contents);
+        }
+
+        std::fs::write(dir.join("stray.txt"), "kept").unwrap();
+        std::fs::write(dir.join("SKILL.md"), "stale").unwrap();
+        publish_skill_bundle(&home).unwrap();
+
+        assert_eq!(std::fs::read_to_string(dir.join("stray.txt")).unwrap(), "kept");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+            SKILL_BUNDLE[0].1,
+            "drifted bundled files are rewritten"
+        );
     }
 }

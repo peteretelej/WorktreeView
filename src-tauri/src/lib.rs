@@ -404,6 +404,8 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
     if let Ok(legacy_dir) = app.path().app_data_dir() {
         home::migrate_legacy_store(&legacy_dir, &data_dir, &db_name);
     }
+    home::publish_skill_bundle(&data_dir)
+        .map_err(|error| format!("Could not publish the agent skill into the home: {error}"))?;
     let db_path = data_dir.join(db_name);
     let options = SqliteConnectOptions::new()
         .filename(&db_path)
@@ -456,6 +458,7 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
     // object, and the restart command rebuilds the listener with the same
     // sinks and data directory.
     let status = transport::McpStatusHandle::for_config(&config);
+    status.set_paths(&data_dir);
     let deps = transport::TransportDeps {
         data_dir,
         arrivals,

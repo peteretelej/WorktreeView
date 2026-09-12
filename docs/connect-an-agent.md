@@ -71,7 +71,11 @@ follows the Agent Skills standard:
 npx skills add peteretelej/WorktreeView
 ```
 
-or copy the folder manually into your agents' skills directory
-(for example `~/.agents/skills/worktreeview/`) from
-`skills/worktreeview/` in this repository. The MCP endpoint remains fully
-usable without the skill; it only removes the guesswork.
+The app also publishes its own version-matched copy of the skill folder
+into the app home at `~/.worktreeview/skills/worktreeview/`, refreshed on
+every launch, and the Settings Agent API section shows the path with a
+copy button. Copying that folder into your agents' skills directory (for
+example `~/.agents/skills/worktreeview/`) is the same as installing from
+the repository, and it always matches the app version you run. The MCP
+endpoint remains fully usable without the skill; it only removes the
+guesswork.

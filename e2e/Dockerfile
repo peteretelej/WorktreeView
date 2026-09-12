@@ -31,6 +31,9 @@ COPY src-tauri/icons ./src-tauri/icons
 # The whole migrations directory: sqlx::migrate! embeds every .sql it
 # finds, so a build must never pin an explicit migration file list.
 COPY src-tauri/migrations/ ./src-tauri/migrations/
+# The whole skills directory: SKILL_BUNDLE embeds every file home.rs names,
+# and the drift test fails when the folder and the bundle disagree.
+COPY skills/ ./skills/
 COPY src-tauri/src/ ./src-tauri/src/
 COPY e2e ./e2e
 

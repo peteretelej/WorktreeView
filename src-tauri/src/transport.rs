@@ -110,6 +110,11 @@ pub(crate) struct ListenerStatus {
     pub(crate) address: String,
     pub(crate) port: u16,
     pub(crate) error: Option<String>,
+    // Constant per process: where agents find the endpoint config file and
+    // the published skill copy. Set once at startup, carried across
+    // restarts.
+    pub(crate) config_path: String,
+    pub(crate) skill_dir: String,
 }
 
 #[derive(Clone)]
@@ -126,9 +131,19 @@ impl McpStatusHandle {
             address: String::new(),
             port: 0,
             error: None,
+            config_path: String::new(),
+            skill_dir: String::new(),
         })));
         status.reset_from_config(config);
         status
+    }
+
+    // The paths never change for a running process, so startup sets them
+    // once and every reset keeps them.
+    pub(crate) fn set_paths(&self, data_dir: &Path) {
+        let mut live = self.lock_status();
+        live.config_path = endpoint_config_path(data_dir).display().to_string();
+        live.skill_dir = crate::home::skill_dir(data_dir).display().to_string();
     }
 
     // Every listener start, boot or restart, resets the shared status
@@ -815,6 +830,8 @@ mod tests {
             address: "127.0.0.1".into(),
             port: 0,
             error: None,
+            config_path: String::new(),
+            skill_dir: String::new(),
         })))
     }
 

@@ -224,8 +224,10 @@ and rebuilds the store; a store recording a migration version the running
 binary does not know also keeps its files untouched, but startup asks
 whether to set it aside as the same backup and rebuild, or to quit so the
 app can be updated instead. Everything lives in one app home under the
-user profile, `~/.worktreeview/` (the store and `config.json` carrying
-the endpoint's `{port, token}`), so agents and
+user profile, `~/.worktreeview/` (the store, `config.json` carrying
+the endpoint's `{port, token}`, and the published agent skill under
+`skills/worktreeview/`, embedded in the binary and refreshed on every
+launch so the copy always matches the running app), so agents and
 the Settings UI find it at the same documented path on every OS. Debug
 builds (`npm run dev`) use `~/.worktreeview-dev/` instead and keep their
 own store per checkout, named from the checkout's target directory

@@ -20,6 +20,8 @@
 !src-tauri/icons/**
 !src-tauri/migrations/
 !src-tauri/migrations/**
+!skills/
+!skills/**
 !src-tauri/src/
 !src-tauri/src/main.rs
 !src-tauri/src/lib.rs
