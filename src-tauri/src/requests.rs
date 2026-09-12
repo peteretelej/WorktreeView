@@ -759,6 +759,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn human_re_request_covers_agent_keyed_and_human_keyed_rows() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+
+        // Requester-only includes the human: a human re-requests any open
+        // changes_requested row, agent-keyed or not.
+        let agent_request = create(&pool, &Actor::Agent(coder), "head-1").await;
+        observe(&pool, true).await;
+        assert_eq!(get(&pool, agent_request.id).await.status, CHANGES_REQUESTED);
+        let reset = re_request(&pool, agent_request.id, "head-2", &Actor::Human).await;
+        assert_eq!(reset.status, IN_REVIEW);
+        assert_eq!(reset.round, 1);
+        assert_eq!(reset.head_sha.as_deref(), Some("head-2"));
+
+        // The same human parity on a human-keyed row.
+        let human_request = create(&pool, &Actor::Human, "head-3").await;
+        observe(&pool, true).await;
+        assert_eq!(get(&pool, human_request.id).await.status, CHANGES_REQUESTED);
+        let own_reset = re_request(&pool, human_request.id, "head-4", &Actor::Human).await;
+        assert_eq!(own_reset.status, IN_REVIEW);
+        assert_eq!(own_reset.round, 1);
+        assert_eq!(own_reset.head_sha.as_deref(), Some("head-4"));
+    }
+
+    #[tokio::test]
     async fn illegal_transitions_are_refused_with_the_allowed_actor() {
         let pool = test_pool().await;
         seed_repo(&pool, REPO).await;
