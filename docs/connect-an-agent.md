@@ -67,8 +67,10 @@ and size caps, are in [agent-submissions.md](agent-submissions.md).
 
 The repo ships an installable skill that teaches agents all of the above
 plus the day-to-day workflow (adding projects, refreshing, reading reviews,
-posting and responding to comments) so the setup steps become a checklist
-instead of prose. It follows the Agent Skills standard:
+posting and responding to comments, and the review-request fleet protocol:
+requesting review of their own work and picking up other agents'
+requests) so the setup steps become a checklist instead of prose. It
+follows the Agent Skills standard:
 
 ```sh
 npx skills add peteretelej/WorktreeView

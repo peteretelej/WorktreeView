@@ -6,15 +6,39 @@ description: Set up and drive WorktreeView, a local desktop app where developers
 # WorktreeView
 
 WorktreeView is a local desktop app (Tauri) that gives developers a review
-inbox over their Git worktrees. It runs a loopback API with two faces: an
-MCP endpoint at `POST /mcp` (the one agents use) and a raw JSON-RPC face at
-`POST /` for review submissions. Both need the same bearer token.
+inbox over their Git worktrees, where a human and several AI agents review
+together. It runs a loopback API with two faces: an MCP endpoint at
+`POST /mcp` (the one agents use) and a raw JSON-RPC face at `POST /` for
+review submissions. Both need the same bearer token.
 
-The app is human-owned. Agents read state, leave anchored comments, respond
-in threads, and trigger fetches. Agents never remove repositories (the API
-does not expose it), never run Git writes beyond the app's bounded fetch,
-and never drive the UI - the human sees agent comments appear live in the
-open review.
+The app is a neutral venue: it stores and shows review state but never
+aggregates findings, scores reviewers, or touches your Git state. Policy
+(who reviews what, blind first passes, when to escalate) lives in this
+skill; the backend refusals are the contract.
+
+## Concepts
+
+Read these before anything else; every workflow below builds on them.
+
+- **Multi-agent repo use.** One app instance serves a whole fleet: several
+  agents on the same machine can add repos, read reviews, comment, and
+  review each other's work. Reviewers run co-located; each agent keeps its
+  own clone or worktree and never drives Git through the app.
+- **Token identity.** Tokens authenticate agents; each agent or agent app
+  gets its own token, minted by the human (Settings -> Agent API). Your
+  token is your review identity: comments, submissions, and requests are
+  attributed to it. Do not share or spoof tokens. The discovery file's
+  built-in default token works for zero-config starts but renews every app
+  start; prefer a named token for lasting use.
+- **Request visibility.** Review requests are a shared, persistent queue:
+  any request on any open repo is visible to every agent through
+  `list_review_requests`, and to the human in the app's Attention view.
+  Discovery is poll-based (the API has no subscriptions), so poll on a
+  sparse cadence instead of looping.
+- **Requests may be human-initiated.** A request's requester can be an
+  agent token or the human (`requester: "human"`). Humans act at full
+  parity: they create requests, give verdicts, withdraw, and re-request,
+  claim-free. Treat a human request like any other review ask.
 
 ## 1. Install (manual, needs the human)
 
@@ -52,7 +76,8 @@ Two token options:
 - **Named token (stable)**: have the human mint one in Settings -> Agent
   API (name it after the agent). It survives restarts, gives the agent its
   own comment identity, and can be deleted independently. Prefer this for
-  any lasting integration.
+  any lasting integration, and it is required to take part in review
+  requests under a stable name.
 
 Configure the agent's MCP client with a Streamable HTTP entry at
 `http://127.0.0.1:<port>/mcp` and the header
@@ -85,6 +110,9 @@ All tools are stateless `tools/call`s carrying
 | `reply_comment` | Reply to a thread's root; optional `author_model`. |
 | `resolve_thread` | Resolve or reopen a thread (any agent may). |
 | `edit_own_comment` / `delete_own_comment` | Only comments authored by your token. |
+| `request_review` | Ask the fleet to review one identity at a recorded head. Your token becomes the requester. |
+| `list_review_requests` | The request queue. No filters: the cross-repo open feed (the agent attention feed). Optional `repo_path` / `status` filters. |
+| `update_review_request` | Advance one request: `claim`, `approve`, `request_changes`, `withdraw` (requester-only), `re_request` (requester-only, new head). |
 | `refresh_repo` | Run the app's bounded fetch for a repo, then it re-lists surfaces. |
 
 Review identities are `{repo_path, base_sha, target_key, target_kind}`:
@@ -93,31 +121,44 @@ take `repo_path` from `list_repos`, the other fields from
 `target_key` with `target_kind` `worktree`; pass the path back exactly as
 listed).
 
-Typical flows:
+Workflows:
 
 - **Add a project**: `add_repo` with the absolute path. The app sidebar
   picks it up live; call `refresh_repo` if the human wants remote state
   fetched. Do not re-add in a loop; it is idempotent.
-- **Review**: `list_review_targets` -> choose a target -> `list_comments`
-  to read what exists -> post your findings with
-  `create_comment` (line anchors need `side` and `start_line`; a range adds
-  `end_line`). The human sees them live in the open review.
-- **Respond**: read the thread with `list_comments`, `reply_comment` on the
-  root, `resolve_thread` when the point is addressed. Only edit or delete
-  comments your own token authored.
+- **Request a review of your work** (the coder side: requesting,
+  aggregating findings, re-requesting): follow
+  [requesting-review.md](requesting-review.md).
+- **Pick up and perform a review** (the reviewer side: pickup, claim,
+  submitting, etiquette): follow [performing-review.md](performing-review.md).
+- **Respond in threads**: read the thread with `list_comments`,
+  `reply_comment` on the root, `resolve_thread` when the point is
+  addressed. Only edit or delete comments your own token authored.
 - **Update remote state**: `refresh_repo` after pushing or when the human
   asks for fresh remote-tracking refs.
+
+Reference documentation (tool schemas, submission schema, error
+semantics): `docs/agent-submissions.md` in the app repo; connecting an
+agent: `docs/connect-an-agent.md`.
 
 ## Rules and limits
 
 - The comment body, anchor, severity, and `author_model` (max 200 chars)
-  are validated by the same rules the human app enforces.
+  are validated by the same rules the human app enforces. A request note
+  is capped at 2000 characters; round budgets are 1-3 (default 2).
 - Connections are served one request at a time with bounded body sizes
-  (3 MiB); tolerate queuing and keep calls small.
+  (3 MiB); tolerate queuing and keep calls small. This is why request
+  discovery polls on a sparse cadence.
 - The token authenticates; `author_model` is self-reported display
   metadata. Do not spoof another agent's name via tokens - mint your own.
 - Review flows never mutate Git state. `refresh_repo` runs the app's
-  bounded fetch; that is the only Git write that exists.
+  bounded fetch; that is the only Git write that exists. Request actions
+  touch only the app's store.
+- The app's refusals are the contract, not obstacles to route around: a
+  refused claim, verdict, withdraw, re-request, or exhausted round budget
+  is the lifecycle enforcing itself. Do not retry a refusal expecting a
+  different answer; change the situation (new head, requester action,
+  human takeover) instead.
 - A 401 means the token is wrong, deleted, or rotated: re-read the
   discovery file (or ask the human for a fresh named token). A connection
   refusal means the app is not running - ask the human to start it.

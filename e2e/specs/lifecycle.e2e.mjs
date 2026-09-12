@@ -152,10 +152,12 @@ describe("bundled desktop lifecycle", () => {
     await openSelectedRepository(fixture);
     await $(".worktree-row").waitForDisplayed();
     await expect($(`.worktree-row[title="${fixture}"]`)).toBeDisplayed();
-    await expect($(`.worktree-row[title="${fixture}"] .branch-title strong`)).toHaveText(branch);
     // The branch inventory pass runs cold alongside the rest of hydration;
-    // give the head-commit cell time to fill in. The text is read from the
-    // DOM: the driver reports empty text for plain spans.
+    // give the row's cells time to fill in. Text is read from the DOM: the
+    // driver reports empty text for the row's inline elements.
+    await browser.waitUntil(async () => await browser.execute((rowTitle, expected) => {
+      return document.querySelector(`.worktree-row[title="${rowTitle}"] .branch-title strong`)?.textContent ?? "";
+    }, fixture, branch) === branch, { timeout: 45_000, timeoutMsg: "worktree branch name did not render" });
     await browser.waitUntil(async () => await browser.execute((rowTitle, expected) => {
       return document.querySelector(`.worktree-row[title="${rowTitle}"] .row-commit-subject`)?.textContent ?? "";
     }, fixture, subject) === subject, { timeout: 45_000, timeoutMsg: "worktree head commit did not render" });
