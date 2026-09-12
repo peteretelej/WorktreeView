@@ -1267,13 +1267,60 @@ button:disabled {
 .nav-collapsed .nav-tab span,
 .nav-collapsed .search-trigger span,
 .nav-collapsed .search-trigger kbd,
-.nav-collapsed .nav-section-label,
 .nav-collapsed .sidebar-empty,
 .nav-collapsed .project-copy,
 .nav-collapsed .sidebar-footer span,
 .nav-collapsed .open-repository-button span,
-.nav-collapsed .project-row > svg {
+.nav-collapsed .project-row > svg,
+.nav-collapsed .sidebar-children,
+.nav-collapsed .nav-tab:disabled {
   display: none;
+}
+
+/* Section labels become hairline dividers so Pinned and Recent stay
+   separable in the rail. */
+.nav-collapsed .nav-section-label {
+  height: 1px;
+  margin: 6px 8px;
+  padding: 0;
+  overflow: hidden;
+  background: var(--border);
+  font-size: 0;
+}
+
+.nav-collapsed .project-row.active .project-avatar {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+/* Collapsed-rail tooltips: labels fly out to the right on hover or focus.
+   The JSX drops native title attributes in this state so they never double
+   up with these. */
+.nav-collapsed .project-row,
+.nav-collapsed .search-trigger,
+.nav-collapsed .open-repository-button,
+.nav-collapsed .nav-tab,
+.nav-collapsed .footer-button {
+  position: relative;
+}
+
+.nav-collapsed [data-tip]:hover::after,
+.nav-collapsed [data-tip]:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 40;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--elevated);
+  color: var(--foreground);
+  font-size: 11px;
+  white-space: nowrap;
+  box-shadow: var(--shadow-dropdown);
+  pointer-events: none;
 }
 
 .nav-collapsed .nav-tabs {

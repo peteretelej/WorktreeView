@@ -13,7 +13,9 @@ Click **Open repository...** in the sidebar and pick a local Git folder.
 The project appears in the sidebar under **Recent**; pin the ones you
 live in and they sort to the top. Your coding agents can also add a
 repository through the local API, and it shows up in the sidebar the
-same way. Find anything later with the search field (Ctrl+K).
+same way. Find anything later with the search field (Ctrl+K). The
+sidebar collapses to an icon rail with fly-out labels (Ctrl+B toggles
+it); the active project stays marked while collapsed.
 
 ## Read the project overview
 
