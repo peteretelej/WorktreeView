@@ -255,11 +255,11 @@ export function CommentStream({ comments, reversed = false, strip, onCollapse }:
   if (!comments.key) return null;
   return <aside className="comment-stream" aria-label="Comments">
     <div className="pane-heading">
-      <strong>Comments</strong>
+      {onCollapse ? <button className="comment-copy" type="button" aria-label="Hide Comments" title="Hide Comments" onClick={onCollapse}><PanelRightClose size={12} /></button> : <span />}
       <span className="pane-heading-actions">
+        <strong>Comments</strong>
         <span>{comments.threads.length}</span>
         <button className="comment-copy" type="button" aria-label="Copy all comments as markdown" title="Copy all comments as markdown" disabled={comments.visibleThreads.length === 0} onClick={() => copy(exportThreadsMarkdown(comments.visibleThreads, reversed))}>{<CopyMark copied={copied} />}</button>
-        {onCollapse && <button className="comment-copy" type="button" aria-label="Hide Comments" title="Hide Comments" onClick={onCollapse}><PanelRightClose size={12} /></button>}
       </span>
     </div>
     <div className="comment-stream-body">
