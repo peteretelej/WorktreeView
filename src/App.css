@@ -1578,6 +1578,41 @@ button:disabled {
 .scope-toggle button:last-child { border-right: 0; }
 .scope-toggle button.active { background: var(--primary-soft); color: var(--foreground); }
 .scope-fixed { display: inline-flex; height: 29px; align-items: center; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--muted); font-size: 10px; }
+/* The review header's request surface: badges, human actions, and the
+   inline request form share the header's compact chip idiom. */
+.request-surface { display: flex; flex-direction: column; border-top: 1px solid var(--border); background: var(--surface); }
+.request-bar { display: flex; align-items: flex-start; gap: 8px; padding: 6px 10px; }
+.request-list { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 4px; }
+.request-empty { color: var(--muted); font-size: 11px; }
+.request-bar-side { display: flex; flex: none; align-items: center; gap: 8px; }
+.request-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.request-chips { display: flex; min-width: 0; flex: 1; flex-wrap: wrap; align-items: center; gap: 4px; }
+.request-round { color: var(--muted); font: 10.5px var(--font-mono); }
+.request-note-display { overflow: hidden; min-width: 0; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.request-actions { display: flex; flex: none; align-items: center; gap: 4px; }
+.request-note-input { width: 150px; height: 24px; padding: 0 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--foreground); font-size: 11px; }
+.request-note-input:focus-visible { border-color: var(--primary); outline: none; }
+.request-action { display: inline-flex; height: 24px; align-items: center; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--foreground); cursor: pointer; font-size: 10.5px; }
+.request-action:hover { border-color: var(--primary); }
+.request-action:focus-visible { outline: 2px solid var(--primary); outline-offset: -1px; }
+.request-action:disabled { cursor: not-allowed; opacity: 0.55; }
+.request-action.danger { border-color: var(--danger); color: var(--danger); }
+.request-action.primary { border-color: var(--primary); background: var(--primary-soft); color: var(--primary); }
+.request-error { color: var(--danger); font-size: 11px; }
+.request-form { display: flex; flex-direction: column; gap: 8px; margin: 0 10px 10px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--elevated); }
+.request-form-head { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.request-form-head span { color: var(--muted); font-size: 11px; }
+.request-form-note { min-height: 52px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); color: var(--foreground); font-size: 12px; resize: vertical; }
+.request-form-note:focus-visible { border-color: var(--primary); outline: none; }
+.request-form-field { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.request-form-label { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; }
+.request-check { display: inline-flex; align-items: center; gap: 4px; color: var(--foreground); cursor: pointer; font-size: 11px; }
+.request-check input { accent-color: var(--primary); }
+.request-form-hint { color: var(--muted); font-size: 10.5px; }
+.request-rounds { height: 24px; }
+.request-rounds button { padding: 0 10px; font-size: 10.5px; }
+.request-form-error { margin: 0; color: var(--danger); font-size: 11px; }
+.request-form-actions { display: flex; justify-content: flex-end; gap: 6px; }
 /* Collapsed panes leave a slim reopen rail in their grid column. */
 .review-body { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: var(--files-col, 300px) minmax(0, 1fr) var(--comments-col, 300px); }
 .review-body.files-collapsed { --files-col: 44px; }

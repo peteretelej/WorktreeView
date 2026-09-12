@@ -6,10 +6,17 @@ import {
   attentionRows,
   attentionStatus,
   attentionTabCounts,
+  canReRequest,
+  canVerdict,
+  canWithdraw,
   groupedChangeLabel,
   isNarrowAttention,
+  requestStatusLabel,
   rowsForAttentionTab,
   sortAttentionRows,
+  validateRequestForm,
+  REQUEST_LENS_OPTIONS,
+  REQUEST_NOTE_LIMIT,
   type AttentionCategory,
   type AttentionQueue,
   type AttentionRow,
@@ -138,4 +145,59 @@ test("status chips read needs-human first and skip request-less rows", () => {
   assert.deepEqual(attentionStatus(row({ category: "requested", status: "requested" })), { label: "requested", tone: "status" });
   assert.deepEqual(attentionStatus(row({ category: "changes_requested", status: "changes_requested" })), { label: "changes requested", tone: "status" });
   assert.equal(attentionStatus(row({ category: "unresolved_findings", status: "" })), null);
+});
+
+test("verdicts speak only from in review", () => {
+  assert.equal(canVerdict("requested"), false);
+  assert.equal(canVerdict("in_review"), true);
+  assert.equal(canVerdict("changes_requested"), false);
+  assert.equal(canVerdict("approved"), false);
+  assert.equal(canVerdict("withdrawn"), false);
+});
+
+test("re-request restarts only in-budget changes_requested rounds", () => {
+  assert.equal(canReRequest({ status: "requested", needs_human: false }), false);
+  assert.equal(canReRequest({ status: "in_review", needs_human: false }), false);
+  assert.equal(canReRequest({ status: "changes_requested", needs_human: false }), true);
+  // Round budget exhausted: the needs-human state refuses further rounds.
+  assert.equal(canReRequest({ status: "changes_requested", needs_human: true }), false);
+});
+
+test("withdrawal exits any non-terminal request", () => {
+  assert.equal(canWithdraw("requested"), true);
+  assert.equal(canWithdraw("in_review"), true);
+  assert.equal(canWithdraw("changes_requested"), true);
+  assert.equal(canWithdraw("approved"), false);
+  assert.equal(canWithdraw("withdrawn"), false);
+});
+
+test("statuses label for chips without jargon", () => {
+  assert.equal(requestStatusLabel("in_review"), "in review");
+  assert.equal(requestStatusLabel("changes_requested"), "changes requested");
+  assert.equal(requestStatusLabel("requested"), "requested");
+});
+
+test("form validation gates on note presence and the note bound", () => {
+  const valid = { note: "Please review the auth paths.", lenses: ["security"], max_rounds: 2 };
+  assert.deepEqual(validateRequestForm(valid), {});
+  assert.deepEqual(validateRequestForm({ ...valid, note: "   " }).note, "A review request needs a non-empty note.");
+  assert.deepEqual(validateRequestForm({ ...valid, note: "".padEnd(REQUEST_NOTE_LIMIT + 1, "a") }).note, `The note exceeds ${REQUEST_NOTE_LIMIT} characters.`);
+  assert.equal(validateRequestForm({ ...valid, note: "a".repeat(REQUEST_NOTE_LIMIT) }).note, undefined);
+});
+
+test("form validation bounds the round budget", () => {
+  const valid = { note: "note", lenses: [], max_rounds: 1 };
+  assert.deepEqual(validateRequestForm(valid), {});
+  assert.match(validateRequestForm({ ...valid, max_rounds: 0 }).max_rounds ?? "", /between 1 and 3/);
+  assert.match(validateRequestForm({ ...valid, max_rounds: 4 }).max_rounds ?? "", /between 1 and 3/);
+  assert.match(validateRequestForm({ ...valid, max_rounds: 2.5 }).max_rounds ?? "", /between 1 and 3/);
+});
+
+test("form validation rejects unknown and duplicate lenses", () => {
+  const valid = { note: "note", lenses: ["security", "tests"], max_rounds: 2 };
+  assert.deepEqual(validateRequestForm(valid), {});
+  assert.match(validateRequestForm({ ...valid, lenses: ["style"] }).lenses ?? "", /Unknown lens 'style'/);
+  assert.match(validateRequestForm({ ...valid, lenses: ["security", "security"] }).lenses ?? "", /duplicated/);
+  // The checkbox vocabulary is the engine's lens set.
+  assert.deepEqual([...REQUEST_LENS_OPTIONS], ["security", "correctness", "design", "performance", "tests"]);
 });

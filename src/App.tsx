@@ -7,17 +7,17 @@ import { ArrowLeft, ArrowLeftRight, ArrowRight, Check, ChevronDown, ChevronRight
 import { createNavigationHistory, sameReviewTarget, type AppLocation, type BranchInventory, type BranchSummary, type ChangedFile, type CommitDetail, type CommitInfo, type GoneSurface, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type SurfaceListing, type Worktree } from "./navigation";
 import { allTreeDirPaths, buildFileTree, filterChangedFiles, flattenFileTree, splitFilePath } from "./fileTree";
 import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
-import { SettingsPage, applyTheme, defaultSettings, getSettings, persistSettings, type ChangedFilesView, type DiffLayout, type Settings } from "./settings";
+import { SettingsPage, applyTheme, defaultSettings, getSettings, listAgentTokens, persistSettings, type AgentToken, type ChangedFilesView, type DiffLayout, type Settings } from "./settings";
 import { DEFAULT_ZOOM, snapZoom, stepZoom, zoomShortcut } from "./zoom";
 import { changeRegions, deletionTicks, hunksWithExpandedGaps, parseHunkHeader, patchGaps, splitFileLines, type ChangeRegion, type DiffLine, type PatchGap } from "./diff";
 import { buildFileRows, buildPatchRows, imageMimeForPath, MAX_RENDERED_ROWS, type RowSpec } from "./stream";
 import { hunkSideSources, languageForPath, splitWhitespace, tokenizeHunk, type HighlightToken, type TokenLine } from "./highlight";
 import { filterGoneSurfaces, goneSurfaceLabel, pinnedSurfaces, reviewFileRoot, surfacePinIndex, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces";
-import { ATTENTION_TABS, attentionAge, attentionRows, attentionStatus, attentionTabCounts, groupedChangeLabel, isNarrowAttention, rowsForAttentionTab, type AttentionCategory, type AttentionQueue, type AttentionRow, type RequestChange } from "./requests.ts";
+import { ATTENTION_TABS, attentionAge, attentionRows, attentionStatus, attentionTabCounts, canReRequest, canVerdict, canWithdraw, groupedChangeLabel, isNarrowAttention, requestStatusLabel, rowsForAttentionTab, validateRequestForm, REQUEST_LENS_OPTIONS, REQUEST_NOTE_LIMIT, REQUEST_ROUNDS, type AttentionCategory, type AttentionQueue, type AttentionRow, type RequestAction, type RequestLens, type RequestChange, type ReviewRequestRow } from "./requests.ts";
 import { CommentStream, CommentThreadView, DraftComposer, InlineCommentComposer, inlineCards, selectableRow, useReviewComments, type CommentsApi } from "./comments.tsx";
 import { ReviewsStrip } from "./canvas.tsx";
 import { copyText } from "./clipboard";
-import type { CommentSelection, DisplaySide } from "./comments";
+import type { CommentSelection, DisplaySide, ReviewKey } from "./comments";
 import "./App.css";
 
 type Repo = { path: string; name: string; worktrees: Worktree[]; pinned_at: number | null };
@@ -1248,6 +1248,168 @@ function CommitRow({ title, children }: { title: string; children: React.ReactNo
   </div>;
 }
 
+// The review header's request surface for the open review identity:
+// status badges plus human verdict/withdraw/re-request actions and the
+// inline request form. Actions act on the local store and are always
+// available (no listener or token has to exist), matching the queue's
+// store-backed rendering; live updates ride the same
+// review-request-changed event the queue follows.
+function ReviewRequestBar({ identityKey, headSha }: { identityKey: ReviewKey; headSha: string }) {
+  const [rows, setRows] = useState<ReviewRequestRow[]>([]);
+  const [formOpen, setFormOpen] = useState(false);
+  const [error, setError] = useState("");
+  const identityRef = useRef(identityKey);
+  useEffect(() => { identityRef.current = identityKey; });
+  useEffect(() => {
+    setError("");
+    setFormOpen(false);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const listed = await invoke<ReviewRequestRow[]>("list_requests", { repoPath: identityKey.repoPath, baseSha: identityKey.baseSha, targetKey: identityKey.targetKey, targetKind: identityKey.targetKind });
+        if (!cancelled) setRows(listed);
+      } catch (caught) {
+        if (!cancelled) setError(errorMessage(caught));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [identityKey]);
+  // One refetch per matching mutation (agent tool or human command);
+  // failures keep the last payload, stale rather than gone.
+  useEffect(() => {
+    let disposed = false;
+    const subscription = listen<RequestChange>("review-request-changed", (event) => {
+      if (disposed) return;
+      const key = identityRef.current;
+      const change = event.payload;
+      if (key.repoPath !== change.repo_path || key.baseSha !== change.base_sha || key.targetKey !== change.target_key || key.targetKind !== change.target_kind) return;
+      void (async () => {
+        try {
+          const listed = await invoke<ReviewRequestRow[]>("list_requests", { repoPath: key.repoPath, baseSha: key.baseSha, targetKey: key.targetKey, targetKind: key.targetKind });
+          if (!disposed) setRows(listed);
+        } catch { /* keep the last payload */ }
+      })();
+    });
+    return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
+  }, []);
+  async function runAction(row: ReviewRequestRow, action: RequestAction, note: string) {
+    setError("");
+    try {
+      const updated = await invoke<ReviewRequestRow>("update_review_request", { id: row.id, action, note: note.trim() || null, headSha: action === "re_request" ? headSha : null });
+      setRows((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }
+  function absorbCreated(created: ReviewRequestRow) {
+    setRows((current) => current.some((row) => row.id === created.id) ? current.map((row) => (row.id === created.id ? created : row)) : [created, ...current]);
+    setFormOpen(false);
+  }
+  return <div className="request-surface">
+    <div className="request-bar">
+      <div className="request-list">
+        {rows.length === 0 && <span className="request-empty">No review requests</span>}
+        {rows.map((row) => <RequestRowView key={row.id} row={row} headSha={headSha} onAction={runAction} />)}
+      </div>
+      <div className="request-bar-side">
+        {error && <span className="request-error" role="status">{error}</span>}
+        <button className="request-action" type="button" aria-expanded={formOpen} onClick={() => setFormOpen((open) => !open)}>{formOpen ? "Close form" : "Request review"}</button>
+      </div>
+    </div>
+    {formOpen && <RequestForm identityKey={identityKey} headSha={headSha} onCreated={absorbCreated} />}
+  </div>;
+}
+
+function RequestRowView({ row, headSha, onAction }: { row: ReviewRequestRow; headSha: string; onAction: (row: ReviewRequestRow, action: RequestAction, note: string) => void }) {
+  const [note, setNote] = useState("");
+  const [armed, setArmed] = useState(false);
+  const withdrawArmed = armed && canWithdraw(row.status);
+  const actionable = canVerdict(row.status) || canReRequest(row) || canWithdraw(row.status);
+  function withdraw() {
+    if (withdrawArmed) {
+      setArmed(false);
+      void onAction(row, "withdraw", "");
+      return;
+    }
+    setArmed(true);
+    window.setTimeout(() => setArmed((current) => (current ? false : current)), 4000);
+  }
+  function act(action: RequestAction) {
+    void onAction(row, action, note);
+    setNote("");
+  }
+  return <div className="request-row">
+    <div className="request-chips">
+      <span className="status-chip clean">{requestStatusLabel(row.status)}</span>
+      {row.needs_human && <span className="status-chip attention-danger">needs human</span>}
+      {row.max_rounds > 0 && <code className="request-round" title={`Round ${row.round} of ${row.max_rounds}`}>{row.round}/{row.max_rounds}</code>}
+      <span className="comment-badge" title={`Requested by ${row.requester}`}>{row.requester}</span>
+      {row.reviewers.length > 0 && <span className="comment-badge" title={`Named reviewers: ${row.reviewers.join(", ")}`}>{row.reviewers.length === 1 ? row.reviewers[0] : `${row.reviewers.length} reviewers`}</span>}
+      {row.note && <span className="request-note-display" title={row.note}>{row.note}</span>}
+    </div>
+    {actionable && <div className="request-actions">
+      <input className="request-note-input" type="text" aria-label={`Optional note for the ${requestStatusLabel(row.status)} request`} placeholder="Optional note" maxLength={REQUEST_NOTE_LIMIT} value={note} onChange={(event) => setNote(event.currentTarget.value)} />
+      {canVerdict(row.status) && <button className="request-action" type="button" onClick={() => act("approve")}>Approve</button>}
+      {canVerdict(row.status) && <button className="request-action" type="button" onClick={() => act("request_changes")}>Request changes</button>}
+      {canReRequest(row) && <button className="request-action" type="button" disabled={!headSha} title={headSha ? "Re-request with the displayed head" : "The displayed head is unavailable"} onClick={() => act("re_request")}>Re-request</button>}
+      {canWithdraw(row.status) && <button className={`request-action ${withdrawArmed ? "danger" : ""}`} type="button" onClick={withdraw}>{withdrawArmed ? "Confirm withdraw" : "Withdraw"}</button>}
+    </div>}
+  </div>;
+}
+
+function RequestForm({ identityKey, headSha, onCreated }: { identityKey: ReviewKey; headSha: string; onCreated: (row: ReviewRequestRow) => void }) {
+  const [note, setNote] = useState("");
+  const [lenses, setLenses] = useState<RequestLens[]>([]);
+  const [reviewers, setReviewers] = useState<string[]>([]);
+  const [maxRounds, setMaxRounds] = useState<number>(REQUEST_ROUNDS.default);
+  const [tokens, setTokens] = useState<AgentToken[]>([]);
+  const [attempted, setAttempted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    listAgentTokens().then((next) => { if (!cancelled) setTokens(next); }).catch(() => { /* open pickup stays available */ });
+    return () => { cancelled = true; };
+  }, []);
+  const errors = validateRequestForm({ note, lenses, max_rounds: maxRounds });
+  const blocked = errors.note || errors.lenses || errors.max_rounds || (!headSha ? "The displayed head is unavailable, so a request cannot be recorded." : "");
+  const shownError = attempted ? blocked : "";
+  function toggleLens(lens: RequestLens) { setLenses((current) => current.includes(lens) ? current.filter((item) => item !== lens) : [...current, lens]); }
+  function toggleReviewer(name: string) { setReviewers((current) => current.includes(name) ? current.filter((item) => item !== name) : [...current, name]); }
+  async function submit() {
+    setAttempted(true);
+    if (blocked || submitting) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      onCreated(await invoke<ReviewRequestRow>("create_review_request", { repoPath: identityKey.repoPath, baseSha: identityKey.baseSha, targetKey: identityKey.targetKey, targetKind: identityKey.targetKind, note: note.trim(), lenses, reviewers, maxRounds, headSha }));
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+  return <form className="request-form" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+    <div className="request-form-head"><strong>Request review</strong><span>{headSha ? <>The displayed head <code title={headSha}>{shortToken(headSha)}</code> is recorded, exactly as an agent records its own.</> : "The displayed head is unavailable, so a request cannot be recorded."}</span></div>
+    <textarea className="request-form-note" aria-label="Request note" placeholder="What should reviewers focus on?" value={note} maxLength={REQUEST_NOTE_LIMIT} onChange={(event) => setNote(event.currentTarget.value)} />
+    {attempted && errors.note && <p className="request-form-error">{errors.note}</p>}
+    <div className="request-form-field" role="group" aria-label="Review lenses">{REQUEST_LENS_OPTIONS.map((lens) => <label key={lens} className="request-check"><input type="checkbox" checked={lenses.includes(lens)} onChange={() => toggleLens(lens)} />{lens}</label>)}</div>
+    <div className="request-form-field" role="group" aria-label="Named reviewers">
+      {tokens.map((token) => <label key={token.id} className="request-check"><input type="checkbox" checked={reviewers.includes(token.name)} onChange={() => toggleReviewer(token.name)} />{token.name}</label>)}
+      <span className="request-form-hint">{reviewers.length === 0 ? "No reviewers named; any agent can pick it up." : "Named reviewers must claim the request."}</span>
+    </div>
+    <div className="request-form-field">
+      <span className="request-form-label">Round budget</span>
+      <div className="scope-toggle request-rounds" role="group" aria-label="Round budget">{[REQUEST_ROUNDS.min, REQUEST_ROUNDS.default, REQUEST_ROUNDS.max].map((rounds) => <button key={rounds} type="button" className={maxRounds === rounds ? "active" : ""} aria-pressed={maxRounds === rounds} onClick={() => setMaxRounds(rounds)}>{rounds}</button>)}</div>
+    </div>
+    {shownError && <p className="request-form-error">{shownError}</p>}
+    {error && <p className="request-form-error" role="status">{error}</p>}
+    <div className="request-form-actions">
+      <button className="request-action primary" type="submit" disabled={submitting}>{submitting ? "Sending..." : "Send request"}</button>
+    </div>
+  </form>;
+}
+
 function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target, refs, base, scope, reversed, index, loading, selectedFile, patch, patchError, patchLoading, fileView, diffPrefs, diffToggles, comments, content, contentLoading, contentError, imageSrc, imageError, imageLoading, onEnsureContent, canBack, canForward, onHistoryBack, onHistoryForward, onBack, onBaseChange, onTargetChange, onPreset, onReverse, onFileView, onFile, panes, onPaneVisibility }: { repoPath: string; repoName: string; liveWorktree?: Worktree; worktrees?: Worktree[]; target: ReviewTarget; refs: RefInventory; base: string; scope: ReviewScope; reversed: boolean; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; fileView: ChangedFilesView; diffPrefs: DiffPreferences; diffToggles: React.ReactNode; comments: CommentsApi; content: FileContent | null; contentLoading: boolean; contentError: string; imageSrc: string | null; imageError: string; imageLoading: boolean; onEnsureContent: () => void; canBack: boolean; canForward: boolean; onHistoryBack: () => void; onHistoryForward: () => void; onBack: () => void; onBaseChange: (value: string) => void; onTargetChange: (target: ReviewTarget) => void; onPreset: (preset: WorktreeReviewPreset) => void; onReverse: () => void; onFileView: (view: ChangedFilesView) => void; onFile: (file: ChangedFile) => void; panes: { files: boolean; comments: boolean }; onPaneVisibility: (next: { files: boolean; comments: boolean }) => void }) {
   const targetName = target.kind === "worktree" ? target.worktree.branch : target.kind === "commit" ? target.sha : target.name;
   const allRefs = [...refs.heads, ...refs.remotes, ...refs.tags];
@@ -1299,6 +1461,7 @@ function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target, refs,
         <span className="review-counts"><code>{index?.error ? "Review index unavailable" : index ? `${files.length} files, +${index.additions} -${index.deletions}` : "Loading review index..."}</code></span>
         {comments.key && <button className="secondary-button" type="button" aria-label="Comment on review" title="Comment on review" onClick={() => comments.openComposer("review")}><MessageSquare size={13} /> Review</button>}
       </div>
+      {comments.key && <ReviewRequestBar identityKey={comments.key} headSha={index && !index.error ? index.target_sha : ""} />}
       <CommitRow key={targetName} title={commitTitle}>
         {target.kind === "commit" ? <>
           {summary?.body && <p className="commit-body">{summary.body}</p>}

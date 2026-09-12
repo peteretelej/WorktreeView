@@ -148,6 +148,37 @@ reviewers:
 
 ![One GitHub Copilot token posting as Security, Correctness, and Conventions reviewers](images/guide-agent-roles.webp)
 
+## Drive the review negotiation
+
+Every review header carries a request strip for the change you are
+looking at. It shows each open review request's status chip (requested,
+in review, changes requested, approved), its round `n/max`, and who
+asked for it, updating live as agents work. A red **needs human** chip
+marks a request stuck at its round budget or carrying an unresolved P0.
+
+As a human you act at full parity, and the actions touch only
+WorktreeView's local store, never your Git state:
+
+- **Approve** or **Request changes** a request that is in review, with
+  an optional note. Verdicts close the round; the first blocking
+  verdict within a round wins.
+- **Withdraw** any open request (the button asks for a confirming
+  second click, no dialogs).
+- **Re-request** a changes-requested review once you have pushed a new
+  head: the review records the head you are displaying, exactly as an
+  agent records its own, and the engine refuses a repeat of the refused
+  head or a round past the budget.
+
+The **Request review** button opens the inline form to start a request
+yourself: a note (required, up to 2000 characters), optional lenses
+(security, correctness, design, performance, tests), optional named
+reviewers chosen from your agent tokens (leave them unnamed and any
+agent can pick the review up), and a round budget of one to three
+rounds. Human-initiated requests land in the same attention queue and
+are visible to connected agents through the same API, so the negotiation
+runs between you and the fleet; the app itself never aggregates,
+scores, or decides for anyone.
+
 ## Read the attention queue
 
 The **Attention** tab in the sidebar is the cross-project to-do list:
@@ -155,8 +186,8 @@ every project's review activity lands in one queue, newest signal first.
 The tab carries a live count, and the queue splits into categories, each
 with its own tab and count:
 
-- **Review requested**: an agent asked for a review and no one has
-  picked it up yet.
+- **Review requested**: a review was asked for (by you or an agent) and
+  no one has picked it up yet.
 - **Changes requested**: a reviewer sent the work back; the requester
   owes fixes. The round column shows how many fix cycles remain
   (`n/max`).

@@ -34,10 +34,6 @@ const MAX_MAX_ROUNDS: i64 = 3;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Actor {
     Agent(i64),
-    // No caller face constructs the human actor yet (the human IPC
-    // commands land in a later phase); the engine's human parity is
-    // exercised through it in tests today.
-    #[allow(dead_code)]
     Human,
 }
 
@@ -578,6 +574,201 @@ pub(crate) async fn observe_submission_in_pool(
         fire_change(notify, &request);
     }
     Ok(())
+}
+
+// The human header's request row: the tool face's row fields plus the
+// Rust-derived needs-human flag, so the webview renders badges and
+// enablement guidance without re-deriving any engine rule.
+#[derive(Debug, Serialize)]
+pub(crate) struct RequestRow {
+    pub(crate) id: i64,
+    pub(crate) repo_path: String,
+    pub(crate) base_sha: String,
+    pub(crate) target_key: String,
+    pub(crate) target_kind: String,
+    pub(crate) status: String,
+    pub(crate) note: String,
+    pub(crate) lenses: Vec<String>,
+    pub(crate) reviewers: Vec<String>,
+    pub(crate) max_rounds: i64,
+    pub(crate) round: i64,
+    pub(crate) head_sha: Option<String>,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
+    pub(crate) requester: String,
+    pub(crate) age_ms: i64,
+    pub(crate) comment_count: i64,
+    pub(crate) unresolved_finding_counts: FindingCounts,
+    pub(crate) needs_human: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FindingCounts {
+    #[serde(rename = "P0")]
+    pub(crate) p0: i64,
+    #[serde(rename = "P1")]
+    pub(crate) p1: i64,
+    #[serde(rename = "P2")]
+    pub(crate) p2: i64,
+    #[serde(rename = "P3")]
+    pub(crate) p3: i64,
+}
+
+// The tool face's grouped identity join scoped to one review identity and
+// every non-withdrawn request on it, newest first.
+const IDENTITY_REQUESTS_QUERY: &str = "SELECT rq.id, rq.repo_path, rq.base_sha, rq.target_key, \
+     rq.target_kind, rq.status, rq.note, rq.lenses, rq.reviewers, \
+     rq.max_rounds, rq.round, rq.head_sha, rq.created_at, rq.updated_at, \
+     t.name AS requester_name, \
+     COUNT(c.id) AS comment_count, \
+     SUM(CASE WHEN c.severity = 'P0' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p0, \
+     SUM(CASE WHEN c.severity = 'P1' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p1, \
+     SUM(CASE WHEN c.severity = 'P2' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p2, \
+     SUM(CASE WHEN c.severity = 'P3' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p3 \
+     FROM review_requests AS rq \
+     LEFT JOIN reviews AS rv ON rv.repo_path = rq.repo_path AND rv.base_sha = rq.base_sha \
+       AND rv.target_key = rq.target_key AND rv.target_kind = rq.target_kind \
+     LEFT JOIN comments AS c ON c.review_id = rv.id \
+     LEFT JOIN agent_tokens AS t ON t.id = rq.requester_token_id \
+     WHERE rq.repo_path = ?1 AND rq.base_sha = ?2 AND rq.target_key = ?3 AND rq.target_kind = ?4 \
+       AND rq.status != 'withdrawn' \
+     GROUP BY rq.id ORDER BY rq.created_at DESC, rq.id DESC";
+
+const REQUEST_ROW_BY_ID_QUERY: &str = "SELECT rq.id, rq.repo_path, rq.base_sha, rq.target_key, \
+     rq.target_kind, rq.status, rq.note, rq.lenses, rq.reviewers, \
+     rq.max_rounds, rq.round, rq.head_sha, rq.created_at, rq.updated_at, \
+     t.name AS requester_name, \
+     COUNT(c.id) AS comment_count, \
+     SUM(CASE WHEN c.severity = 'P0' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p0, \
+     SUM(CASE WHEN c.severity = 'P1' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p1, \
+     SUM(CASE WHEN c.severity = 'P2' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p2, \
+     SUM(CASE WHEN c.severity = 'P3' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p3 \
+     FROM review_requests AS rq \
+     LEFT JOIN reviews AS rv ON rv.repo_path = rq.repo_path AND rv.base_sha = rq.base_sha \
+       AND rv.target_key = rq.target_key AND rv.target_kind = rq.target_kind \
+     LEFT JOIN comments AS c ON c.review_id = rv.id \
+     LEFT JOIN agent_tokens AS t ON t.id = rq.requester_token_id \
+     WHERE rq.id = ?1 \
+     GROUP BY rq.id";
+
+fn request_row_from_row(row: &sqlx::sqlite::SqliteRow, now: i64) -> Result<RequestRow, CommandError> {
+    let field = |error: sqlx::Error| {
+        CommandError::new(
+            "persistence",
+            format!("A stored review request could not be read: {error}"),
+        )
+    };
+    let parse_list = |column: &str, raw: String| {
+        serde_json::from_str::<Vec<String>>(&raw).map_err(|error| {
+            CommandError::new(
+                "persistence",
+                format!("The stored {column} could not be read: {error}"),
+            )
+        })
+    };
+    let created_at: i64 = row.try_get("created_at").map_err(field)?;
+    let unresolved = |name: &str| -> Result<i64, CommandError> { row.try_get(name).map_err(field) };
+    let requester_name: Option<String> = row.try_get("requester_name").map_err(field)?;
+    Ok(RequestRow {
+        id: row.try_get("id").map_err(field)?,
+        repo_path: row.try_get("repo_path").map_err(field)?,
+        base_sha: row.try_get("base_sha").map_err(field)?,
+        target_key: row.try_get("target_key").map_err(field)?,
+        target_kind: row.try_get("target_kind").map_err(field)?,
+        status: row.try_get("status").map_err(field)?,
+        note: row.try_get("note").map_err(field)?,
+        lenses: parse_list("lenses", row.try_get("lenses").map_err(field)?)?,
+        reviewers: parse_list("reviewers", row.try_get("reviewers").map_err(field)?)?,
+        max_rounds: row.try_get("max_rounds").map_err(field)?,
+        round: row.try_get("round").map_err(field)?,
+        head_sha: row.try_get("head_sha").map_err(field)?,
+        created_at,
+        updated_at: row.try_get("updated_at").map_err(field)?,
+        requester: requester_name.unwrap_or_else(|| "human".to_string()),
+        age_ms: (now - created_at).max(0),
+        comment_count: row.try_get("comment_count").map_err(field)?,
+        unresolved_finding_counts: FindingCounts {
+            p0: unresolved("unresolved_p0")?,
+            p1: unresolved("unresolved_p1")?,
+            p2: unresolved("unresolved_p2")?,
+            p3: unresolved("unresolved_p3")?,
+        },
+        needs_human: open_request_category(
+            &row.try_get::<String, _>("status").map_err(field)?,
+            row.try_get("round").map_err(field)?,
+            row.try_get("max_rounds").map_err(field)?,
+            unresolved("unresolved_p0")?,
+            unresolved("unresolved_p1")?,
+        ) == Some(CATEGORY_NEEDS_HUMAN),
+    })
+}
+
+// The open review header's list: every non-withdrawn request on the
+// identity, read-only with no Git on the path.
+pub(crate) async fn list_requests_in_pool(
+    pool: &SqlitePool,
+    repo_path: &str,
+    base_sha: &str,
+    target_key: &str,
+    target_kind: &str,
+) -> Result<Vec<RequestRow>, CommandError> {
+    let now = now_millis();
+    let rows = sqlx::query(IDENTITY_REQUESTS_QUERY)
+        .bind(repo_path)
+        .bind(base_sha)
+        .bind(target_key)
+        .bind(target_kind)
+        .fetch_all(pool)
+        .await?;
+    rows.iter()
+        .map(|row| request_row_from_row(row, now))
+        .collect()
+}
+
+// The mutated request's row for a create/update response, carrying the
+// same shape the header lists.
+pub(crate) async fn request_row_by_id(pool: &SqlitePool, id: i64) -> Result<RequestRow, CommandError> {
+    let now = now_millis();
+    sqlx::query(REQUEST_ROW_BY_ID_QUERY)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .map(|row| request_row_from_row(&row, now))
+        .transpose()?
+        .ok_or_else(unknown_request)
+}
+
+// The refreshed note on an update shares the create-time note bound, so
+// both caller faces refuse identically.
+pub(crate) fn validate_request_note(note: &str) -> Result<(), CommandError> {
+    if note.trim().is_empty() {
+        return Err(invalid_request(
+            "A review request needs a non-empty note.",
+        ));
+    }
+    if note.chars().count() > MAX_NOTE_CHARS {
+        return Err(invalid_request(format!(
+            "The note exceeds {MAX_NOTE_CHARS} characters."
+        )));
+    }
+    Ok(())
+}
+
+// Writes only the note column (lifecycle statuses stay engine-owned) and
+// returns the row's new updated_at.
+pub(crate) async fn refresh_request_note(
+    pool: &SqlitePool,
+    id: i64,
+    note: &str,
+) -> Result<i64, CommandError> {
+    let now = now_millis();
+    sqlx::query("UPDATE review_requests SET note = ?, updated_at = ? WHERE id = ?")
+        .bind(note)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(now)
 }
 
 // The attention queue's categories; the strings are the tab ids the
@@ -1758,6 +1949,102 @@ mod tests {
             .await
             .unwrap();
         assert!(load_request(&pool, request.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn list_requests_in_pool_lists_identity_rows_for_the_header() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+
+        // A withdrawn human row drops out; an approved row stays listed
+        // (only withdrawal leaves the list).
+        let claimed = create(&pool, &Actor::Agent(coder), "head-1").await;
+        claim(&pool, claimed.id, &Actor::Agent(coder)).await;
+        let human = create(&pool, &Actor::Human, "head-1").await;
+        assert_ne!(human.id, claimed.id, "dedup is per requester");
+        withdraw(&pool, human.id, &Actor::Human).await;
+        let latest = create(&pool, &Actor::Agent(coder), "head-2").await;
+        // A distinct requester: a same-requester create would refresh the
+        // never-claimed head-2 row in place instead of stacking a row.
+        let other = agent_token(&pool, "other-bot").await;
+        let settled = create(&pool, &Actor::Agent(other), "head-4").await;
+        claim(&pool, settled.id, &Actor::Agent(coder)).await;
+        verdict(&pool, settled.id, true, &Actor::Human).await;
+
+        let rows = list_requests_in_pool(&pool, REPO, BASE, KEY, KIND).await.unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![settled.id, latest.id, claimed.id],
+            "non-withdrawn rows only, newest first"
+        );
+        let in_review = rows.iter().find(|row| row.id == claimed.id).unwrap();
+        assert_eq!(in_review.status, IN_REVIEW);
+        assert_eq!(in_review.requester, "coder-bot");
+        assert!(!in_review.needs_human);
+        assert_eq!(in_review.round, 0);
+        assert_eq!(in_review.max_rounds, 2);
+        assert_eq!(in_review.head_sha.as_deref(), Some("head-1"));
+        assert_eq!(in_review.comment_count, 0);
+        assert_eq!(in_review.unresolved_finding_counts.p0, 0);
+        assert_eq!(
+            rows.iter().find(|row| row.id == settled.id).unwrap().status,
+            APPROVED
+        );
+
+        // An unresolved P0 on an in-review request reads as needs human,
+        // with the identity's counts riding every row on that identity.
+        seed_finding(&pool, BASE, "P0", false).await;
+        let rows = list_requests_in_pool(&pool, REPO, BASE, KEY, KIND).await.unwrap();
+        let flagged = rows.iter().find(|row| row.id == claimed.id).unwrap();
+        assert!(flagged.needs_human);
+        assert_eq!(flagged.comment_count, 1);
+        assert_eq!(flagged.unresolved_finding_counts.p0, 1);
+        // The approved row never flags needs-human on findings alone.
+        assert!(
+            !rows.iter().find(|row| row.id == settled.id).unwrap().needs_human,
+            "the needs-human rule stays the engine's"
+        );
+
+        // An exhausted round budget reads as needs human on its own
+        // identity (observations advance every open request at once, so
+        // this scenario uses a distinct base).
+        let mut tight = draft("head-b1");
+        tight.max_rounds = Some(1);
+        let exhausted = create_request_in_pool(
+            &pool, REPO, "base-b", KEY, KIND, &tight, &Actor::Agent(coder), &noop_notify(),
+        )
+        .await
+        .unwrap();
+        observe_on(&pool, "base-b", true).await;
+        re_request(&pool, exhausted.id, "head-b2", &Actor::Agent(coder)).await;
+        observe_on(&pool, "base-b", true).await;
+        let rows = list_requests_in_pool(&pool, REPO, "base-b", KEY, KIND).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, CHANGES_REQUESTED);
+        assert_eq!(rows[0].round, 1);
+        assert!(rows[0].needs_human);
+    }
+
+    #[tokio::test]
+    async fn the_update_note_shares_the_create_bound_and_refreshes_only_that_column() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let request = create(&pool, &Actor::Human, "head-1").await;
+
+        assert!(validate_request_note("   ").is_err());
+        assert!(validate_request_note(&"a".repeat(MAX_NOTE_CHARS + 1)).is_err());
+        assert!(validate_request_note(&"a".repeat(MAX_NOTE_CHARS)).is_ok());
+
+        let before = get(&pool, request.id).await;
+        let updated_at = refresh_request_note(&pool, request.id, "Refreshed note.")
+            .await
+            .unwrap();
+        let after = get(&pool, request.id).await;
+        assert_eq!(after.note, "Refreshed note.");
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.updated_at, updated_at);
+        assert!(after.updated_at >= before.updated_at);
     }
 
     #[tokio::test]

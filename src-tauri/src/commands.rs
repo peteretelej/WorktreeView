@@ -14,6 +14,11 @@ use crate::review::{
     ReviewIndex,
 };
 use crate::retrospection::{list_surfaces_in_pool, set_surface_pinned_in_pool, SurfaceListing};
+use crate::requests::{
+    create_request_in_pool, list_requests_in_pool, refresh_request_note, request_row_by_id,
+    re_request_in_pool, set_request_verdict_in_pool, validate_request_note,
+    withdraw_request_in_pool, RequestDraft, RequestRow,
+};
 use crate::reviews::{
     create_comment_in_pool, delete_comment_in_pool, edit_comment_in_pool, list_comments_in_pool,
     list_submissions_in_pool, match_comment_anchors_in_pool, reply_comment_in_pool,
@@ -329,6 +334,161 @@ pub(crate) async fn list_attention(
     list_attention_in_pool(&state.pool).await
 }
 
+// The human review-header surface acts as Actor::Human on the shared
+// request engine; the MCP face is not involved and gains no human caller.
+
+// Who performs a human request update; a snake_case string on the wire,
+// typed routing below.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RequestAction {
+    Approve,
+    RequestChanges,
+    Withdraw,
+    ReRequest,
+}
+
+// The human create's shared implementation: payload flattening plus the
+// Human routing, tested directly; the IPC command adds only typed state.
+pub(crate) async fn create_request_as_human(
+    pool: &sqlx::SqlitePool,
+    repo_path: &str,
+    base_sha: &str,
+    target_key: &str,
+    target_kind: &str,
+    note: String,
+    lenses: Option<Vec<String>>,
+    reviewers: Option<Vec<String>>,
+    max_rounds: Option<i64>,
+    head_sha: String,
+    notify: &crate::transport::RequestChangeSink,
+) -> Result<RequestRow, CommandError> {
+    let draft = RequestDraft {
+        note,
+        lenses: lenses.unwrap_or_default(),
+        reviewers: reviewers.unwrap_or_default(),
+        max_rounds,
+        head_sha,
+    };
+    let request = create_request_in_pool(
+        pool,
+        repo_path,
+        base_sha,
+        target_key,
+        target_kind,
+        &draft,
+        &crate::requests::Actor::Human,
+        notify,
+    )
+    .await?;
+    request_row_by_id(pool, request.id).await
+}
+
+// The human update's shared implementation: transition routing plus the
+// update-time note bound. Only a re-request takes a new head (the engine
+// enforces head difference); the optional note refresh rides any action.
+pub(crate) async fn update_request_in_pool(
+    pool: &sqlx::SqlitePool,
+    id: i64,
+    action: RequestAction,
+    note: Option<String>,
+    head_sha: Option<String>,
+    notify: &crate::transport::RequestChangeSink,
+) -> Result<RequestRow, CommandError> {
+    if !matches!(action, RequestAction::ReRequest) && head_sha.is_some() {
+        return Err(CommandError::new(
+            "invalid_request",
+            "Only a re-request takes a new head.",
+        ));
+    }
+    if let Some(note) = &note {
+        validate_request_note(note)?;
+    }
+    let actor = crate::requests::Actor::Human;
+    match action {
+        RequestAction::Approve => {
+            set_request_verdict_in_pool(pool, id, true, &actor, notify).await?;
+        }
+        RequestAction::RequestChanges => {
+            set_request_verdict_in_pool(pool, id, false, &actor, notify).await?;
+        }
+        RequestAction::Withdraw => {
+            withdraw_request_in_pool(pool, id, &actor, notify).await?;
+        }
+        RequestAction::ReRequest => {
+            // An absent head runs into the engine's non-empty check, so
+            // the requirement's message lives in one place.
+            let head = head_sha.as_deref().unwrap_or("");
+            re_request_in_pool(pool, id, head, &actor, notify).await?;
+        }
+    }
+    if let Some(note) = &note {
+        refresh_request_note(pool, id, note).await?;
+    }
+    request_row_by_id(pool, id).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_requests(
+    repo_path: String,
+    base_sha: String,
+    target_key: String,
+    target_kind: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<RequestRow>, CommandError> {
+    list_requests_in_pool(&state.pool, &repo_path, &base_sha, &target_key, &target_kind).await
+}
+
+#[tauri::command]
+pub(crate) async fn create_review_request(
+    repo_path: String,
+    base_sha: String,
+    target_key: String,
+    target_kind: String,
+    note: String,
+    lenses: Option<Vec<String>>,
+    reviewers: Option<Vec<String>>,
+    max_rounds: Option<i64>,
+    head_sha: String,
+    state: tauri::State<'_, AppState>,
+    deps: tauri::State<'_, TransportDeps>,
+) -> Result<RequestRow, CommandError> {
+    create_request_as_human(
+        &state.pool,
+        &repo_path,
+        &base_sha,
+        &target_key,
+        &target_kind,
+        note,
+        lenses,
+        reviewers,
+        max_rounds,
+        head_sha,
+        &deps.request_changes,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn update_review_request(
+    id: i64,
+    action: RequestAction,
+    note: Option<String>,
+    head_sha: Option<String>,
+    state: tauri::State<'_, AppState>,
+    deps: tauri::State<'_, TransportDeps>,
+) -> Result<RequestRow, CommandError> {
+    update_request_in_pool(
+        &state.pool,
+        id,
+        action,
+        note,
+        head_sha,
+        &deps.request_changes,
+    )
+    .await
+}
+
 #[tauri::command]
 pub(crate) async fn list_review_changes(
     path: String,
@@ -583,11 +743,33 @@ pub(crate) async fn match_comment_anchors(
 
 #[cfg(test)]
 mod tests {
-    use super::{refresh_repo, worktree_change_count, RefreshSink};
+    use super::{
+        create_request_as_human, refresh_repo, update_request_in_pool, worktree_change_count,
+        RequestAction, RefreshSink,
+    };
+    use crate::agents::create_agent_token_in_pool;
     use crate::overview::branch_inventory;
-    use crate::testutil::{test_git, test_path, test_repo};
+    use crate::requests::{create_request_in_pool, set_request_verdict_in_pool, Actor as RequestActor, RequestDraft};
+    use crate::testutil::{seed_repo, test_git, test_path, test_pool, test_repo};
+    use crate::transport::RequestChangeSink;
     use std::process::Command as StdCommand;
     use std::sync::{Arc, Mutex};
+
+    const REPO: &str = "/demo";
+
+    fn noop_notify() -> RequestChangeSink {
+        Arc::new(|_| {})
+    }
+
+    fn draft(head: &str) -> RequestDraft {
+        RequestDraft {
+            note: "Please review my changes.".into(),
+            lenses: Vec::new(),
+            reviewers: Vec::new(),
+            max_rounds: None,
+            head_sha: head.into(),
+        }
+    }
 
     // The no-op sink stands in for the app's event emit in the direct calls;
     // fetch_project (the IPC adapter) reads its sink from managed state.
@@ -694,5 +876,70 @@ mod tests {
             .output()
             .unwrap();
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    // The human header's update: typed routing through the shared
+    // transitions with Actor::Human, the update-time note bound, and the
+    // re-request-only head rule.
+    #[tokio::test]
+    async fn human_request_update_routes_transitions_and_refreshes_the_note() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = create_agent_token_in_pool(&pool, "coder-bot")
+            .await
+            .unwrap()
+            .token
+            .id;
+        let notify = noop_notify();
+
+        let created = create_request_as_human(
+            &pool, REPO, "base", "/demo", "worktree", "Please review my changes.".into(), None,
+            None, None, "head-1".into(), &notify,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.status, "requested");
+        assert_eq!(created.requester, "human");
+        assert_eq!(created.max_rounds, 2);
+
+        // A verdict before any reviewer claims is a transition violation.
+        let refused = update_request_in_pool(&pool, created.id, RequestAction::Approve, None, None, &notify).await;
+        assert_eq!(refused.unwrap_err().code, "invalid_transition");
+
+        crate::requests::claim_request_in_pool(&pool, created.id, &RequestActor::Agent(coder), &notify)
+            .await
+            .unwrap();
+
+        // A head rides only a re-request, refused before anything runs.
+        let refused = update_request_in_pool(&pool, created.id, RequestAction::Withdraw, None, Some("head-2".into()), &notify).await;
+        assert_eq!(refused.unwrap_err().code, "invalid_request");
+
+        // Approve with the optional refreshed note.
+        let approved = update_request_in_pool(&pool, created.id, RequestAction::Approve, Some("Looks good now.".into()), None, &notify).await.unwrap();
+        assert_eq!(approved.status, "approved");
+        assert_eq!(approved.note, "Looks good now.");
+
+        // Settled requests cannot be withdrawn.
+        let refused = update_request_in_pool(&pool, created.id, RequestAction::Withdraw, None, None, &notify).await;
+        assert_eq!(refused.unwrap_err().code, "invalid_transition");
+
+        // The changes_requested round: re-request needs a new head, and
+        // the refreshed note rides the re-request.
+        let second = create_request_in_pool(&pool, REPO, "base", "/demo", "worktree", &draft("head-2"), &RequestActor::Agent(coder), &notify).await.unwrap();
+        crate::requests::claim_request_in_pool(&pool, second.id, &RequestActor::Agent(coder), &notify).await.unwrap();
+        set_request_verdict_in_pool(&pool, second.id, false, &RequestActor::Human, &notify).await.unwrap();
+
+        let refused = update_request_in_pool(&pool, second.id, RequestAction::ReRequest, None, None, &notify).await;
+        assert_eq!(refused.unwrap_err().code, "invalid_request");
+        let refused = update_request_in_pool(&pool, second.id, RequestAction::ReRequest, None, Some("head-2".into()), &notify).await;
+        assert_eq!(refused.unwrap_err().code, "invalid_request");
+        let restarted = update_request_in_pool(&pool, second.id, RequestAction::ReRequest, Some("New round.".into()), Some("head-3".into()), &notify).await.unwrap();
+        assert_eq!(restarted.status, "in_review");
+        assert_eq!(restarted.round, 1);
+        assert_eq!(restarted.note, "New round.");
+
+        // The note bound refuses before the transition runs.
+        let refused = update_request_in_pool(&pool, second.id, RequestAction::Withdraw, Some("a".repeat(2001)), None, &notify).await;
+        assert_eq!(refused.unwrap_err().code, "invalid_request");
     }
 }
