@@ -2,11 +2,11 @@
 
 Agents collaborate with WorktreeView over one loopback listener with two
 faces: the stateless MCP face at `/mcp` (discovery, reads, comment
-collaboration, refresh ping) and the raw JSON-RPC face at `/` for
-delivering review submissions. This page is the client contract for both:
-the submission schema, the delivery transport (authentication, discovery
-file, the `post_review` and `refresh_repo` methods, arrival cue), and the
-MCP endpoint with its tool surface.
+collaboration, review requests, refresh ping) and the raw JSON-RPC face
+at `/` for delivering review submissions. This page is the client
+contract for both: the submission schema, the delivery transport
+(authentication, discovery file, the `post_review` and `refresh_repo`
+methods, arrival cue), and the MCP endpoint with its tool surface.
 
 ## Submission schema
 
@@ -367,6 +367,9 @@ the transport layer (HTTP 401, `-32001`).
 | `edit_own_comment` | `comment_id`, `body` | the updated comment | unknown comment; not your comment |
 | `delete_own_comment` | `comment_id` | `{ "deleted": true }`; a root delete also removes its replies | unknown comment; not your comment |
 | `add_repo` | `path` | the stored repo row; the open app's sidebar follows the announce | invalid path; not a Git repository |
+| `request_review` | `repo_path`, `base_sha`, `target_key`, `target_kind`, `note`, `head_sha`; optional `lenses`, `reviewers`, `max_rounds` | the stored request row with a `requester` display | unknown repo; empty or over-2000-character note; unknown or duplicate lens; unknown or duplicate reviewer; `max_rounds` outside 1-3; empty `head_sha`; same-head create against a `changes_requested` request |
+| `list_review_requests` | optional `repo_path`, `status` | array of request rows plus derived `age_ms`, `comment_count`, `unresolved_finding_counts` (per severity), and `requester` | unknown `status` value |
+| `update_review_request` | `id`, `action` (`claim`/`approve`/`request_changes`/`withdraw`/`re_request`); optional `note` and `head_sha`, both only with `re_request` (`head_sha` is required there) | the updated request row | unknown request id; actor-rule violations (claim gating, requester-only withdraw and re-request); round budget exhausted; `re_request` with the same `head_sha`; invalid refreshed `note` |
 | `refresh_repo` | `repo_path` | `{ "ok": true }` | unknown repo; fetch failure |
 
 Reads are find-only: a review identity with no comments yet answers an
@@ -378,6 +381,53 @@ carry no line content, so nothing is hashed at write time and drift
 matching does not apply to them, exactly like ingested findings.
 `list_comments` reports anchor data as stored; it does not recompute drift
 against live Git (that runs only on the human review path).
+
+### Review requests
+
+Agents coordinate review pickups through three tools over the request
+lifecycle: `request_review` asks for a review, `list_review_requests`
+reads the queue, and `update_review_request` advances one request (claim,
+verdict, withdraw, re-request). Every result row carries the review
+identity, the stored fields (`status`, `note`, `lenses`, `reviewers`,
+`max_rounds`, `round`, `head_sha`, timestamps), and a `requester` display
+(the token name, or `human` for human-keyed rows). All tools follow the
+shared envelope: unknown fields and malformed arguments are `-32602`
+before anything executes, and every refusal below is an `isError` result
+carrying the engine's message, never a JSON-RPC error.
+
+The actor rules the tools enforce (the same engine the human app drives):
+
+- `request_review` records your token as the requester and dedups per
+  identity: the same head on your open request updates its note and
+  lenses in place; the same head on a `changes_requested` request is
+  refused (record a new head and `re_request` instead); the same head on
+  an `approved` request returns that row unchanged. A new head on your
+  never-claimed request refreshes it in place instead of stacking a
+  duplicate pickup.
+- Claiming is the only named-list gate: when `reviewers` names tokens,
+  only those tokens can claim; when it is empty, any agent can claim the
+  open pickup. Humans never claim; their verdict is the signal.
+- Verdicts (`approve`, `request_changes`) are valid only while the
+  request is in review, from any agent token or the human, and they are
+  sticky within a round: later submissions cannot undo them; only the
+  requester's `re_request` resets them.
+- `withdraw` and `re_request` are requester-only for agents (a human can
+  act on any request). `re_request` requires a `head_sha` different from
+  the head that received the changes, increments the round, and may
+  carry a replacement `note`. A re-request past the round budget (1-3,
+  default 2) is refused: the request stays `changes_requested` at its
+  cap and a human needs to take over.
+
+Discovery is poll-based: the face has no subscriptions, so agents poll
+`list_review_requests` on a sparse cadence, and calling it with no
+filters is the attention feed: the cross-repo open queue (every status
+except `approved` and `withdrawn`) with derived `age_ms`, `comment_count`,
+and `unresolved_finding_counts` by severity, so one call answers "is
+anything waiting on me and how badly". The running app does not poll: it
+is pushed a `review-request-changed` event on every successful request
+mutation, so the human sees agent actions live. That event stays
+app-internal; the synchronous tool result remains the only thing a
+client depends on.
 
 ### Identity and ownership
 
@@ -403,7 +453,8 @@ comment mutation the running app refreshes the loaded review's comment
 stream, so an agent's create, reply, resolve, edit, or delete becomes
 visible to a human without a manual reload; after a completed
 `refresh_repo` the open repository's surfaces re-list, so a
-push-then-ping shows up the same way. Tool comments render under the
+push-then-ping shows up the same way; and successful request mutations
+reach the review header the same way. Tool comments render under the
 token's agent name with the agent badge, like ingested findings, and the
 stream's author filter separates them. This reactivity is app behavior,
 not client-facing surface: there is no event stream or subscription for

@@ -1,8 +1,3 @@
-// The engine's mutation surface is inert until its caller faces land (the
-// MCP tools and human IPC commands); the submission observation is the one
-// live path this phase.
-#![allow(dead_code)]
-
 use crate::store::now_millis;
 use crate::transport::{RequestChange, RequestChangeSink};
 use crate::CommandError;
@@ -39,6 +34,10 @@ const MAX_MAX_ROUNDS: i64 = 3;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Actor {
     Agent(i64),
+    // No caller face constructs the human actor yet (the human IPC
+    // commands land in a later phase); the engine's human parity is
+    // exercised through it in tests today.
+    #[allow(dead_code)]
     Human,
 }
 

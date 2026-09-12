@@ -86,6 +86,8 @@ pub(crate) type CommentSink = Arc<dyn Fn(CommentChange) + Send + Sync>;
 // and the human IPC commands) inherits emission without per-site wiring.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct RequestChange {
+    // The webview payload names the row's key `request_id`.
+    #[serde(rename = "request_id")]
     pub(crate) id: i64,
     pub(crate) repo_path: String,
     pub(crate) base_sha: String,
@@ -854,6 +856,31 @@ mod tests {
         let received: Arc<Mutex<Vec<SubmissionArrival>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&received);
         (Arc::new(move |arrival| sink.lock().unwrap().push(arrival)), received)
+    }
+
+    // The emitted payload is the webview's contract: the row's key is
+    // `request_id`, not the struct's internal `id` field name.
+    #[test]
+    fn request_change_serializes_with_the_webview_payload_keys() {
+        let change = RequestChange {
+            id: 3,
+            repo_path: "/demo".into(),
+            base_sha: "base".into(),
+            target_key: "/demo".into(),
+            target_kind: "worktree".into(),
+            status: "requested".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&change).unwrap(),
+            json!({
+                "request_id": 3,
+                "repo_path": "/demo",
+                "base_sha": "base",
+                "target_key": "/demo",
+                "target_kind": "worktree",
+                "status": "requested",
+            })
+        );
     }
 
     fn recording_refreshes() -> (RefreshSink, Arc<Mutex<Vec<String>>>) {

@@ -1,13 +1,18 @@
 use crate::agents::AgentIdentity;
 use crate::commands::{list_worktrees_in_path, refresh_repo};
 use crate::overview::branch_inventory;
+use crate::requests::{
+    claim_request_in_pool, create_request_in_pool, re_request_in_pool,
+    set_request_verdict_in_pool, withdraw_request_in_pool, Actor as RequestActor, RequestDraft,
+    ReviewRequest, APPROVED, CHANGES_REQUESTED, IN_REVIEW, REQUESTED, WITHDRAWN,
+};
 use crate::reviews::{
     create_unbound_comment_in_pool, delete_comment_in_pool, edit_comment_in_pool,
     list_comments_in_pool, list_submissions_in_pool, reply_comment_in_pool,
     MAX_AGENT_MODEL_CHARS,
     review_identity_of_comment, set_comment_resolved_in_pool, Actor,
 };
-use crate::store::{list_repo_rows_in_pool, open_repo_path};
+use crate::store::{list_repo_rows_in_pool, now_millis, open_repo_path};
 use crate::transport::{
     rpc_error, CommentChange, TransportState, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND,
     PARSE_ERROR,
@@ -17,6 +22,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sqlx::Row;
 use std::path::Path;
 
 // The one protocol revision this face speaks. Tools requests carry it in
@@ -43,6 +49,39 @@ const UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
 // The tool set is static per boot, so a generous private cache hint is
 // honest; no tool result can change without an app restart.
 const TOOL_CACHE_TTL_MS: u64 = 3_600_000;
+
+// The request statuses agents can filter by, mirroring the engine's
+// lifecycle vocabulary.
+const REQUEST_STATUSES: [&str; 5] = [
+    REQUESTED,
+    IN_REVIEW,
+    CHANGES_REQUESTED,
+    APPROVED,
+    WITHDRAWN,
+];
+
+// One grouped, indexed query over the identity join: each request joins its
+// identity's single review row and its comments, so the triage counts come
+// back with the stored fields and no Git runs on this path. The status
+// filter pins one exact status; without it the open queue applies
+// (everything except approved and withdrawn).
+const LIST_REVIEW_REQUESTS_QUERY: &str = "SELECT rq.id, rq.repo_path, rq.base_sha, rq.target_key, \
+     rq.target_kind, rq.requester_token_id, rq.status, rq.note, rq.lenses, rq.reviewers, \
+     rq.max_rounds, rq.round, rq.head_sha, rq.created_at, rq.updated_at, \
+     t.name AS requester_name, \
+     COUNT(c.id) AS comment_count, \
+     SUM(CASE WHEN c.severity = 'P0' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p0, \
+     SUM(CASE WHEN c.severity = 'P1' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p1, \
+     SUM(CASE WHEN c.severity = 'P2' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p2, \
+     SUM(CASE WHEN c.severity = 'P3' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p3 \
+     FROM review_requests AS rq \
+     LEFT JOIN reviews AS rv ON rv.repo_path = rq.repo_path AND rv.base_sha = rq.base_sha \
+       AND rv.target_key = rq.target_key AND rv.target_kind = rq.target_kind \
+     LEFT JOIN comments AS c ON c.review_id = rv.id \
+     LEFT JOIN agent_tokens AS t ON t.id = rq.requester_token_id \
+     WHERE (?1 IS NULL OR rq.repo_path = ?1) \
+       AND (rq.status = ?2 OR (?2 IS NULL AND rq.status NOT IN ('withdrawn', 'approved'))) \
+     GROUP BY rq.id ORDER BY rq.created_at DESC, rq.id DESC";
 
 fn server_info() -> Value {
     json!({ "name": "worktreeview", "version": env!("CARGO_PKG_VERSION") })
@@ -178,6 +217,48 @@ struct AddRepoArgs {
 #[serde(deny_unknown_fields)]
 struct RefreshRepoArgs {
     repo_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestReviewArgs {
+    repo_path: String,
+    base_sha: String,
+    target_key: String,
+    target_kind: String,
+    note: String,
+    head_sha: String,
+    lenses: Option<Vec<String>>,
+    reviewers: Option<Vec<String>>,
+    max_rounds: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListReviewRequestsArgs {
+    repo_path: Option<String>,
+    status: Option<String>,
+}
+
+// The transition vocabulary is a closed set: serde refuses any other value
+// as a shape error before anything executes.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum UpdateRequestAction {
+    Claim,
+    Approve,
+    RequestChanges,
+    Withdraw,
+    ReRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateReviewRequestArgs {
+    id: i64,
+    action: UpdateRequestAction,
+    note: Option<String>,
+    head_sha: Option<String>,
 }
 
 // The MCP face's entry: auth already ran once at the listener and `bytes`
@@ -358,6 +439,21 @@ fn tool_descriptors() -> Value {
             schema(review_identity(), &["repo_path", "base_sha", "target_key", "target_kind"]),
         ),
         tool(
+            "list_review_requests",
+            "List review requests with their stored fields and derived triage fields (age, comment count, unresolved finding counts by severity, requester). With no filters this is the open cross-repo queue: poll it on a sparse cadence to pick up work.",
+            schema(
+                json!({
+                    "repo_path": path_arg("Optional exact repository path as listed by list_repos; omit for every open repository."),
+                    "status": {
+                        "type": "string",
+                        "enum": ["requested", "in_review", "changes_requested", "approved", "withdrawn"],
+                        "description": "Optional exact status filter; omitting it answers the open queue (everything except approved and withdrawn).",
+                    },
+                }),
+                &[],
+            ),
+        ),
+        tool(
             "create_comment",
             "Create a comment on a review; the author is your agent token, so you can edit and delete it later. Anchor shapes: no file for review-level, file only for file-level, file with side and start_line for line-level.",
             schema(
@@ -451,6 +547,73 @@ fn tool_descriptors() -> Value {
             ),
         ),
         tool(
+            "request_review",
+            "Ask the fleet to review one review identity at a recorded head; your token becomes the requester. The same identity and head on your open request updates it in place instead of stacking duplicate pickups.",
+            schema(
+                json!({
+                    "repo_path": path_arg("Exact repository path as listed by list_repos."),
+                    "base_sha": path_arg("Resolved base SHA the review keys on."),
+                    "target_key": path_arg(
+                        "Worktree path for target_kind \"worktree\"; resolved target SHA for \"head\".",
+                    ),
+                    "target_kind": { "type": "string", "enum": ["worktree", "head"] },
+                    "note": {
+                        "type": "string",
+                        "maxLength": 2000,
+                        "description": "Non-empty note: what changed, why, and what kind of review you need.",
+                    },
+                    "head_sha": path_arg(
+                        "The head you want reviewed; a re-request must later record a different head.",
+                    ),
+                    "lenses": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["security", "correctness", "design", "performance", "tests"],
+                        },
+                        "description": "Optional focus areas; duplicates are refused.",
+                    },
+                    "reviewers": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional named agent tokens; when set, only these tokens can claim the review.",
+                    },
+                    "max_rounds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 3,
+                        "description": "Optional review round budget, default 2.",
+                    },
+                }),
+                &["repo_path", "base_sha", "target_key", "target_kind", "note", "head_sha"],
+            ),
+        ),
+        tool(
+            "update_review_request",
+            "Advance one review request through its lifecycle: claim it, give a verdict (approve or request_changes), withdraw your own request, or re-request with a new head after changes.",
+            schema(
+                json!({
+                    "id": {
+                        "type": "integer",
+                        "description": "The review request id from request_review or list_review_requests.",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["claim", "approve", "request_changes", "withdraw", "re_request"],
+                    },
+                    "note": {
+                        "type": "string",
+                        "maxLength": 2000,
+                        "description": "Replacement note; only valid with re_request.",
+                    },
+                    "head_sha": path_arg(
+                        "The new head; required with re_request and it must differ from the head that received the changes.",
+                    ),
+                }),
+                &["id", "action"],
+            ),
+        ),
+        tool(
             "refresh_repo",
             "Ask the app to refresh one open repository's remote-tracking refs (the same bounded fetch the refresh button runs).",
             schema(
@@ -494,6 +657,10 @@ async fn handle_tools_call(
             let args = tool_args(id, &arguments)?;
             list_submissions(state, args).await
         }
+        "list_review_requests" => {
+            let args = tool_args(id, &arguments)?;
+            list_review_requests(state, args).await
+        }
         "create_comment" => {
             let args = tool_args(id, &arguments)?;
             create_comment(state, args, &identity).await
@@ -517,6 +684,14 @@ async fn handle_tools_call(
         "refresh_repo" => {
             let args = tool_args(id, &arguments)?;
             refresh_repo_tool(state, args).await
+        }
+        "request_review" => {
+            let args = tool_args(id, &arguments)?;
+            request_review(state, args, &identity).await
+        }
+        "update_review_request" => {
+            let args = tool_args(id, &arguments)?;
+            update_review_request(state, args, &identity).await
         }
         _ => {
             return Err(rpc_error(
@@ -607,6 +782,236 @@ async fn list_submissions(state: &TransportState, args: ReviewIdentityArgs) -> T
     .await
     .map_err(|error| error.message)?;
     payload(submissions)
+}
+
+// The tool result's request row: the stored fields plus the requester
+// display. The engine owns every mutation; this only renders.
+fn request_row_value(request: &ReviewRequest, requester: &str) -> Value {
+    json!({
+        "id": request.id,
+        "repo_path": request.repo_path,
+        "base_sha": request.base_sha,
+        "target_key": request.target_key,
+        "target_kind": request.target_kind,
+        "status": request.status,
+        "note": request.note,
+        "lenses": request.lenses,
+        "reviewers": request.reviewers,
+        "max_rounds": request.max_rounds,
+        "round": request.round,
+        "head_sha": request.head_sha,
+        "created_at": request.created_at,
+        "updated_at": request.updated_at,
+        "requester": requester,
+    })
+}
+
+// The requester display: the token's name, or human for human-keyed rows
+// (a deleted requester token also lands here, since the store nulls the
+// key and the row keeps behaving as human-keyed).
+async fn requester_display(pool: &sqlx::SqlitePool, request: &ReviewRequest) -> String {
+    let name: Option<String> = match request.requester_token_id {
+        None => None,
+        Some(token_id) => sqlx::query_scalar("SELECT name FROM agent_tokens WHERE id = ?")
+            .bind(token_id)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None),
+    };
+    name.unwrap_or_else(|| "human".to_string())
+}
+
+// The refreshed note rides the re-request transition: the tool applies the
+// engine's create-time note bound so both entry points refuse identically,
+// and writes only the note column (lifecycle statuses stay engine-owned).
+const MAX_REQUEST_NOTE_CHARS: usize = 2000;
+
+fn validate_request_note(note: &str) -> Result<(), String> {
+    if note.trim().is_empty() {
+        return Err("A review request needs a non-empty note.".to_string());
+    }
+    if note.chars().count() > MAX_REQUEST_NOTE_CHARS {
+        return Err(format!(
+            "The note exceeds {MAX_REQUEST_NOTE_CHARS} characters."
+        ));
+    }
+    Ok(())
+}
+
+async fn refresh_request_note(pool: &sqlx::SqlitePool, id: i64, note: &str) -> Result<i64, String> {
+    let now = now_millis();
+    sqlx::query("UPDATE review_requests SET note = ?, updated_at = ? WHERE id = ?")
+        .bind(note)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map(|_| now)
+        .map_err(|error| format!("The note could not be stored: {error}"))
+}
+
+async fn request_review(
+    state: &TransportState,
+    args: RequestReviewArgs,
+    identity: &AgentIdentity,
+) -> ToolOutcome {
+    ensure_repo_open(state, &args.repo_path)
+        .await
+        .map_err(|error| error.message)?;
+    let draft = RequestDraft {
+        note: args.note,
+        lenses: args.lenses.unwrap_or_default(),
+        reviewers: args.reviewers.unwrap_or_default(),
+        max_rounds: args.max_rounds,
+        head_sha: args.head_sha,
+    };
+    let request = create_request_in_pool(
+        &state.pool,
+        &args.repo_path,
+        &args.base_sha,
+        &args.target_key,
+        &args.target_kind,
+        &draft,
+        &RequestActor::Agent(identity.token_id),
+        &state.request_changes,
+    )
+    .await
+    .map_err(|error| error.message)?;
+    let requester = requester_display(&state.pool, &request).await;
+    payload(request_row_value(&request, &requester))
+}
+
+async fn list_review_requests(state: &TransportState, args: ListReviewRequestsArgs) -> ToolOutcome {
+    if let Some(status) = args.status.as_deref() {
+        if !REQUEST_STATUSES.contains(&status) {
+            return Err(format!(
+                "Unknown status '{status}'; statuses are {REQUESTED}, {IN_REVIEW}, \
+                 {CHANGES_REQUESTED}, {APPROVED}, or {WITHDRAWN}."
+            ));
+        }
+    }
+    let now = now_millis();
+    let rows = sqlx::query(LIST_REVIEW_REQUESTS_QUERY)
+        .bind(args.repo_path)
+        .bind(args.status)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|error| format!("The review requests could not be listed: {error}"))?;
+    let listed: Vec<Value> = rows
+        .iter()
+        .map(|row| request_list_row(row, now))
+        .collect::<Result<Vec<_>, String>>()?;
+    payload(listed)
+}
+
+// One stored request plus its derived triage fields from the grouped query.
+fn request_list_row(row: &sqlx::sqlite::SqliteRow, now: i64) -> Result<Value, String> {
+    let field = |error: sqlx::Error| format!("A stored review request could not be read: {error}");
+    let parse_list = |column: &str, raw: String| {
+        serde_json::from_str::<Vec<String>>(&raw)
+            .map_err(|error| format!("The stored {column} could not be read: {error}"))
+    };
+    let lenses: String = row.try_get("lenses").map_err(field)?;
+    let reviewers: String = row.try_get("reviewers").map_err(field)?;
+    let created_at: i64 = row.try_get("created_at").map_err(field)?;
+    let unresolved = |name: &str| -> Result<i64, String> {
+        row.try_get(name).map_err(field)
+    };
+    let request = ReviewRequest {
+        id: row.try_get("id").map_err(field)?,
+        repo_path: row.try_get("repo_path").map_err(field)?,
+        base_sha: row.try_get("base_sha").map_err(field)?,
+        target_key: row.try_get("target_key").map_err(field)?,
+        target_kind: row.try_get("target_kind").map_err(field)?,
+        requester_token_id: row.try_get("requester_token_id").map_err(field)?,
+        status: row.try_get("status").map_err(field)?,
+        note: row.try_get("note").map_err(field)?,
+        lenses: parse_list("lenses", lenses)?,
+        reviewers: parse_list("reviewers", reviewers)?,
+        max_rounds: row.try_get("max_rounds").map_err(field)?,
+        round: row.try_get("round").map_err(field)?,
+        head_sha: row.try_get("head_sha").map_err(field)?,
+        created_at,
+        updated_at: row.try_get("updated_at").map_err(field)?,
+    };
+    let requester_name: Option<String> = row.try_get("requester_name").map_err(field)?;
+    let mut value = request_row_value(&request, &requester_name.unwrap_or_else(|| "human".into()));
+    let fields = value.as_object_mut().expect("request rows are objects");
+    fields.insert("age_ms".into(), json!((now - created_at).max(0)));
+    fields.insert(
+        "comment_count".into(),
+        json!(row.try_get::<i64, _>("comment_count").map_err(field)?),
+    );
+    fields.insert(
+        "unresolved_finding_counts".into(),
+        json!({
+            "P0": unresolved("unresolved_p0")?,
+            "P1": unresolved("unresolved_p1")?,
+            "P2": unresolved("unresolved_p2")?,
+            "P3": unresolved("unresolved_p3")?,
+        }),
+    );
+    Ok(value)
+}
+
+async fn update_review_request(
+    state: &TransportState,
+    args: UpdateReviewRequestArgs,
+    identity: &AgentIdentity,
+) -> ToolOutcome {
+    let actor = RequestActor::Agent(identity.token_id);
+    // The note refresh and the new head only mean something on a
+    // re-request; refuse them elsewhere instead of silently ignoring
+    // what the caller sent.
+    if !matches!(args.action, UpdateRequestAction::ReRequest) {
+        if args.note.is_some() {
+            return Err("Only a re-request refreshes the note.".to_string());
+        }
+        if args.head_sha.is_some() {
+            return Err("Only a re-request takes a new head.".to_string());
+        }
+    }
+    if let Some(note) = &args.note {
+        validate_request_note(note)?;
+    }
+    let request = match args.action {
+        UpdateRequestAction::Claim => {
+            claim_request_in_pool(&state.pool, args.id, &actor, &state.request_changes)
+                .await
+                .map_err(|error| error.message)?
+        }
+        UpdateRequestAction::Approve => {
+            set_request_verdict_in_pool(&state.pool, args.id, true, &actor, &state.request_changes)
+                .await
+                .map_err(|error| error.message)?
+        }
+        UpdateRequestAction::RequestChanges => {
+            set_request_verdict_in_pool(&state.pool, args.id, false, &actor, &state.request_changes)
+                .await
+                .map_err(|error| error.message)?
+        }
+        UpdateRequestAction::Withdraw => {
+            withdraw_request_in_pool(&state.pool, args.id, &actor, &state.request_changes)
+                .await
+                .map_err(|error| error.message)?
+        }
+        UpdateRequestAction::ReRequest => {
+            // An absent head runs into the engine's non-empty check, so
+            // the requirement's message lives in one place.
+            let head = args.head_sha.as_deref().unwrap_or("");
+            let mut request =
+                re_request_in_pool(&state.pool, args.id, head, &actor, &state.request_changes)
+                    .await
+                    .map_err(|error| error.message)?;
+            if let Some(note) = &args.note {
+                request.updated_at = refresh_request_note(&state.pool, args.id, note).await?;
+                request.note = note.clone();
+            }
+            request
+        }
+    };
+    let requester = requester_display(&state.pool, &request).await;
+    payload(request_row_value(&request, &requester))
 }
 
 // One announcement per successful agent comment mutation: the review
@@ -790,7 +1195,8 @@ mod tests {
     use crate::testutil::{seed_repo, test_pool, test_path, test_repo};
     use crate::transport::{
         discovery_path, handle, start, CommentChange, CommentSink, ListenerConfig, ListenerStatus,
-        McpStatusHandle, RefreshSink, RequestChangeSink, TransportDeps, UNAUTHORIZED,
+        McpStatusHandle, RefreshSink, RequestChange, RequestChangeSink, TransportDeps,
+        UNAUTHORIZED,
     };
     use axum::body::{to_bytes, Body};
     use axum::extract::State;
@@ -800,17 +1206,20 @@ mod tests {
     const OWNERSHIP_MESSAGE: &str =
         "Only the agent token that authored a comment can edit or delete it.";
     const UNKNOWN_REPO_MESSAGE: &str = "No repository with that path is open in WorktreeView.";
-    const TOOL_NAMES: [&str; 11] = [
+    const TOOL_NAMES: [&str; 14] = [
         "list_repos",
         "list_review_targets",
         "list_comments",
         "list_submissions",
+        "list_review_requests",
         "create_comment",
         "reply_comment",
         "resolve_thread",
         "edit_own_comment",
         "delete_own_comment",
         "add_repo",
+        "request_review",
+        "update_review_request",
         "refresh_repo",
     ];
 
@@ -828,6 +1237,15 @@ mod tests {
 
     fn recording_comment_changes() -> (CommentSink, Arc<Mutex<Vec<CommentChange>>>) {
         let received: Arc<Mutex<Vec<CommentChange>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received);
+        (
+            Arc::new(move |change| sink.lock().unwrap().push(change)),
+            received,
+        )
+    }
+
+    fn recording_request_changes() -> (RequestChangeSink, Arc<Mutex<Vec<RequestChange>>>) {
+        let received: Arc<Mutex<Vec<RequestChange>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&received);
         (
             Arc::new(move |change| sink.lock().unwrap().push(change)),
@@ -1696,6 +2114,750 @@ mod tests {
             .unwrap();
 
         assert_eq!(announced.lock().unwrap().len(), 0);
+    }
+
+    // One request created through the tool itself so requester rows are
+    // exactly what production writes.
+    async fn seed_request(
+        state: &TransportState,
+        token: &str,
+        repo_path: &str,
+        head: &str,
+    ) -> Value {
+        let payload = call_tool_raw(
+            state,
+            token,
+            "request_review",
+            json!({
+                "repo_path": repo_path,
+                "base_sha": "base",
+                "target_key": repo_path,
+                "target_kind": "worktree",
+                "note": "Please review.",
+                "head_sha": head,
+            }),
+        )
+        .await;
+        assert_eq!(payload["result"]["isError"], false);
+        result_text(&payload)
+    }
+
+    #[tokio::test]
+    async fn request_review_creates_dedups_and_reports_engine_refusals() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let (state, secret) = test_state(pool.clone()).await;
+        create_agent_token_in_pool(&pool, "reviewer-bot").await.unwrap();
+        let args = json!({
+            "repo_path": "/demo",
+            "base_sha": "base",
+            "target_key": "/demo",
+            "target_kind": "worktree",
+            "note": "Please review the loader change.",
+            "head_sha": "head-1",
+            "lenses": ["correctness", "tests"],
+            "reviewers": ["reviewer-bot"],
+            "max_rounds": 3,
+        });
+        let payload = call_tool_raw(&state, &secret, "request_review", args.clone()).await;
+        assert_eq!(payload["result"]["isError"], false);
+        let row = result_text(&payload);
+        assert_eq!(row["status"], "requested");
+        assert_eq!(row["round"], 0);
+        assert_eq!(row["max_rounds"], 3);
+        assert_eq!(row["lenses"], json!(["correctness", "tests"]));
+        assert_eq!(row["reviewers"], json!(["reviewer-bot"]));
+        assert_eq!(row["head_sha"], "head-1");
+        assert_eq!(row["requester"], "mcp-agent");
+        assert_eq!(row["note"], "Please review the loader change.");
+        let id = row["id"].as_i64().unwrap();
+
+        // The same identity, requester, and head updates the open request
+        // in place instead of stacking a duplicate pickup.
+        let mut updated = args.clone();
+        updated["note"] = json!("Updated note.");
+        let again = call_tool_raw(&state, &secret, "request_review", updated).await;
+        assert_eq!(again["result"]["isError"], false);
+        let deduped = result_text(&again);
+        assert_eq!(deduped["id"], json!(id));
+        assert_eq!(deduped["note"], "Updated note.");
+
+        // An unknown repo is an isError result carrying the shared message.
+        let unknown = call_tool_raw(
+            &state,
+            &secret,
+            "request_review",
+            json!({
+                "repo_path": "/missing",
+                "base_sha": "base",
+                "target_key": "/missing",
+                "target_kind": "worktree",
+                "note": "n",
+                "head_sha": "head-9",
+            }),
+        )
+        .await;
+        assert_eq!(unknown["result"]["isError"], true);
+        assert_eq!(unknown["result"]["content"][0]["text"], UNKNOWN_REPO_MESSAGE);
+
+        // The engine's create-time validation renders as isError results,
+        // never as JSON-RPC errors.
+        let base = args.clone();
+        let mut variant = |field: &str, value: Value| {
+            let mut args = base.clone();
+            args[field] = value;
+            args
+        };
+        for (args, message) in [
+            (variant("note", json!("   ")), "non-empty note"),
+            (
+                variant("note", json!("x".repeat(2001))),
+                "exceeds 2000 characters",
+            ),
+            (variant("lenses", json!(["style"])), "Unknown lens"),
+            (
+                variant("lenses", json!(["security", "security"])),
+                "duplicated",
+            ),
+            (
+                variant("reviewers", json!(["ghost-bot"])),
+                "does not name an agent token",
+            ),
+            (
+                variant("reviewers", json!(["reviewer-bot", "reviewer-bot"])),
+                "duplicated",
+            ),
+            (variant("max_rounds", json!(4)), "round budget"),
+            (variant("head_sha", json!("  ")), "non-empty head"),
+        ] {
+            let payload = call_tool_raw(&state, &secret, "request_review", args).await;
+            assert_eq!(payload["result"]["isError"], true, "{message}");
+            assert!(payload["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(message));
+            assert_eq!(
+                payload["error"],
+                Value::Null,
+                "execution failures are never JSON-RPC errors"
+            );
+        }
+
+        // The same head against a changes_requested request is refused: a
+        // new head and re_request is the way forward. The new head lands
+        // on the never-claimed row (refreshed in place, named list
+        // intact), so reviewer-bot is the one who can claim it.
+        let reviewer = create_agent_token_in_pool(&pool, "reviewer-bot").await.unwrap();
+        let second = seed_request(&state, &secret, "/demo", "head-2").await;
+        let second_id = second["id"].as_i64().unwrap();
+        assert_eq!(second_id, id, "a new head refreshes the open pickup");
+        let claimed = call_tool_raw(
+            &state,
+            &reviewer.secret,
+            "update_review_request",
+            json!({ "id": second_id, "action": "claim" }),
+        )
+        .await;
+        assert_eq!(claimed["result"]["isError"], false);
+        let changed = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": second_id, "action": "request_changes" }),
+        )
+        .await;
+        assert_eq!(changed["result"]["isError"], false);
+        let refused = call_tool_raw(
+            &state,
+            &secret,
+            "request_review",
+            json!({
+                "repo_path": "/demo",
+                "base_sha": "base",
+                "target_key": "/demo",
+                "target_kind": "worktree",
+                "note": "Please review.",
+                "head_sha": "head-2",
+            }),
+        )
+        .await;
+        assert_eq!(refused["result"]["isError"], true);
+        assert!(refused["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("re-request the review with a new head"));
+
+        // Missing and unknown fields stay -32602 shape errors and never
+        // execute.
+        let mut missing_note = args;
+        missing_note.as_object_mut().unwrap().remove("note");
+        let missing = call_tool_raw(&state, &secret, "request_review", missing_note).await;
+        assert_eq!(missing["error"]["code"], INVALID_PARAMS);
+        let unknown_field = call_tool_raw(
+            &state,
+            &secret,
+            "request_review",
+            json!({
+                "repo_path": "/demo",
+                "base_sha": "base",
+                "target_key": "/demo",
+                "target_kind": "worktree",
+                "note": "n",
+                "head_sha": "head-1",
+                "surprise": true,
+            }),
+        )
+        .await;
+        assert_eq!(unknown_field["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn request_tools_reject_unknown_fields_and_values_as_declared() {
+        let pool = test_pool().await;
+        let (state, secret) = test_state(pool).await;
+        // Unknown fields are shape errors for every new tool.
+        let unknown =
+            call_tool_raw(&state, &secret, "list_review_requests", json!({ "surprise": true }))
+                .await;
+        assert_eq!(unknown["error"]["code"], INVALID_PARAMS);
+        let unknown = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": 1, "action": "claim", "surprise": true }),
+        )
+        .await;
+        assert_eq!(unknown["error"]["code"], INVALID_PARAMS);
+        // The action vocabulary is part of the schema: an unknown action
+        // never executes.
+        let unknown = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": 1, "action": "close" }),
+        )
+        .await;
+        assert_eq!(unknown["error"]["code"], INVALID_PARAMS);
+        // The status filter is validated at execution time and reports as
+        // an isError result, like the other enum-valued fields.
+        let unknown = call_tool_raw(
+            &state,
+            &secret,
+            "list_review_requests",
+            json!({ "status": "closed" }),
+        )
+        .await;
+        assert_eq!(unknown["result"]["isError"], true);
+        assert!(unknown["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown status"));
+    }
+
+    #[tokio::test]
+    async fn list_review_requests_filters_and_derives_the_open_queue() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        seed_repo(&pool, "/other").await;
+        let (state, secret) = test_state(pool.clone()).await;
+
+        // The demo row is claimed so the later head-2 create starts a new
+        // row instead of refreshing a never-claimed one.
+        let demo = seed_request(&state, &secret, "/demo", "head-1").await;
+        let demo_id = demo["id"].as_i64().unwrap();
+        let claimed = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": demo_id, "action": "claim" }),
+        )
+        .await;
+        assert_eq!(claimed["result"]["isError"], false);
+
+        // The identity carries three comments: unresolved P1 and P3
+        // findings plus a resolved P2.
+        for (body, severity) in [("p1 finding", "P1"), ("p3 finding", "P3"), ("p2 finding", "P2")] {
+            let created = call_tool_raw(
+                &state,
+                &secret,
+                "create_comment",
+                json!({
+                    "repo_path": "/demo",
+                    "base_sha": "base",
+                    "target_key": "/demo",
+                    "target_kind": "worktree",
+                    "body": body,
+                    "severity": severity,
+                }),
+            )
+            .await;
+            assert_eq!(created["result"]["isError"], false, "{body}");
+        }
+        let p2_id: i64 = sqlx::query_scalar("SELECT id FROM comments WHERE body = 'p2 finding'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let resolved = call_tool_raw(
+            &state,
+            &secret,
+            "resolve_thread",
+            json!({ "root_comment_id": p2_id, "resolved": true }),
+        )
+        .await;
+        assert_eq!(resolved["result"]["isError"], false);
+
+        // A settled (approved) row on /other and a second open one.
+        let settled = seed_request(&state, &secret, "/other", "head-a").await;
+        let settled_id = settled["id"].as_i64().unwrap();
+        for action in ["claim", "approve"] {
+            let advanced = call_tool_raw(
+                &state,
+                &secret,
+                "update_review_request",
+                json!({ "id": settled_id, "action": action }),
+            )
+            .await;
+            assert_eq!(advanced["result"]["isError"], false, "{action}");
+        }
+        let open_other = seed_request(&state, &secret, "/other", "head-open").await;
+        assert_ne!(open_other["id"].as_i64().unwrap(), settled_id);
+
+        // A withdrawn row on /demo.
+        let withdrawn = seed_request(&state, &secret, "/demo", "head-2").await;
+        let withdrawn_id = withdrawn["id"].as_i64().unwrap();
+        let claimed = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": withdrawn_id, "action": "claim" }),
+        )
+        .await;
+        assert_eq!(claimed["result"]["isError"], false);
+        let gave_up = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": withdrawn_id, "action": "withdraw" }),
+        )
+        .await;
+        assert_eq!(gave_up["result"]["isError"], false);
+
+        // No filters: the cross-repo open queue, without approved and
+        // withdrawn rows.
+        let every = call_tool_raw(&state, &secret, "list_review_requests", json!({})).await;
+        assert_eq!(every["result"]["isError"], false);
+        let rows = result_text(&every).as_array().unwrap().clone();
+        assert_eq!(rows.len(), 2, "the open queue excludes settled rows");
+        assert!(rows.iter().any(|row| row["id"] == json!(demo_id)));
+        assert!(rows.iter().any(|row| row["id"] == open_other["id"]));
+        assert!(rows
+            .iter()
+            .all(|row| row["status"] != "approved" && row["status"] != "withdrawn"));
+
+        // The repo filter narrows to that repository's open queue; the
+        // combined filters AND; a status filter pins one exact status
+        // across repositories.
+        let for_other = call_tool_raw(
+            &state,
+            &secret,
+            "list_review_requests",
+            json!({ "repo_path": "/other" }),
+        )
+        .await;
+        let rows = result_text(&for_other).as_array().unwrap().clone();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["repo_path"], "/other");
+        let combined = call_tool_raw(
+            &state,
+            &secret,
+            "list_review_requests",
+            json!({ "repo_path": "/other", "status": "approved" }),
+        )
+        .await;
+        let rows = result_text(&combined).as_array().unwrap().clone();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], json!(settled_id));
+        let approved = call_tool_raw(
+            &state,
+            &secret,
+            "list_review_requests",
+            json!({ "status": "withdrawn" }),
+        )
+        .await;
+        let rows = result_text(&approved).as_array().unwrap().clone();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], json!(withdrawn_id));
+
+        // Derived fields ride with the stored ones: triage in one call.
+        let listed = rows.first().unwrap();
+        assert_eq!(listed["requester"], "mcp-agent");
+        assert_eq!(listed["comment_count"], 3);
+        assert_eq!(
+            listed["unresolved_finding_counts"],
+            json!({ "P0": 0, "P1": 1, "P2": 0, "P3": 1 })
+        );
+        let age = listed["age_ms"].as_i64().unwrap();
+        assert!(age >= 0 && age < 60_000, "unexpected age {age}");
+        assert_eq!(listed["note"], "Please review.");
+        let demo_row = result_text(&every)
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == json!(demo_id))
+            .unwrap()
+            .clone();
+        assert_eq!(demo_row["status"], "in_review");
+        assert_eq!(demo_row["round"], 0);
+    }
+
+    #[tokio::test]
+    async fn update_review_request_transitions_and_reports_violations() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let other = create_agent_token_in_pool(&pool, "other-agent").await.unwrap();
+        let (state, secret) = test_state(pool.clone()).await;
+
+        // Open pickup: any agent can claim an unnamed request.
+        let created = seed_request(&state, &secret, "/demo", "head-1").await;
+        let id = created["id"].as_i64().unwrap();
+        let claimed = call_tool_raw(
+            &state,
+            &other.secret,
+            "update_review_request",
+            json!({ "id": id, "action": "claim" }),
+        )
+        .await;
+        assert_eq!(claimed["result"]["isError"], false);
+        assert_eq!(result_text(&claimed)["status"], "in_review");
+        let changed = call_tool_raw(
+            &state,
+            &other.secret,
+            "update_review_request",
+            json!({ "id": id, "action": "request_changes" }),
+        )
+        .await;
+        assert_eq!(changed["result"]["isError"], false);
+        assert_eq!(result_text(&changed)["status"], "changes_requested");
+
+        // Re-request with the refused head is an isError; the requester's
+        // new-head re-request refreshes the note and bumps the round.
+        let same_head = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": id, "action": "re_request", "head_sha": "head-1" }),
+        )
+        .await;
+        assert_eq!(same_head["result"]["isError"], true);
+        assert!(same_head["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("different"));
+
+        // Re-request is requester-only for agents, and the refusal names
+        // the allowed actor.
+        let foreign = call_tool_raw(
+            &state,
+            &other.secret,
+            "update_review_request",
+            json!({ "id": id, "action": "re_request", "head_sha": "head-3" }),
+        )
+        .await;
+        assert_eq!(foreign["result"]["isError"], true);
+        assert!(foreign["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Only the requester can re-request"));
+
+        // Re-request with a new head and a note refresh resets the
+        // requester's sticky verdict and bumps the round.
+        let reset = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": id, "action": "re_request", "head_sha": "head-2", "note": "Rebased." }),
+        )
+        .await;
+        assert_eq!(reset["result"]["isError"], false);
+        let row = result_text(&reset);
+        assert_eq!(row["status"], "in_review");
+        assert_eq!(row["round"], 1);
+        assert_eq!(row["head_sha"], "head-2");
+        assert_eq!(row["note"], "Rebased.");
+
+        // The named reviewers list gates the claim for every other token.
+        let gated = call_tool_raw(
+            &state,
+            &secret,
+            "request_review",
+            json!({
+                "repo_path": "/demo",
+                "base_sha": "base",
+                "target_key": "/demo",
+                "target_kind": "worktree",
+                "note": "Named reviewers only.",
+                "head_sha": "head-named",
+                "reviewers": ["other-agent"],
+            }),
+        )
+        .await;
+        assert_eq!(gated["result"]["isError"], false);
+        let gated_id = result_text(&gated)["id"].as_i64().unwrap();
+        let outsider = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": gated_id, "action": "claim" }),
+        )
+        .await;
+        assert_eq!(outsider["result"]["isError"], true);
+        assert!(outsider["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Only the named reviewers"));
+        let named_claim = call_tool_raw(
+            &state,
+            &other.secret,
+            "update_review_request",
+            json!({ "id": gated_id, "action": "claim" }),
+        )
+        .await;
+        assert_eq!(named_claim["result"]["isError"], false);
+
+        // Withdrawal is requester-only for agents.
+        let foreign_withdraw = call_tool_raw(
+            &state,
+            &other.secret,
+            "update_review_request",
+            json!({ "id": id, "action": "withdraw" }),
+        )
+        .await;
+        assert_eq!(foreign_withdraw["result"]["isError"], true);
+        assert!(foreign_withdraw["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Only the requester"));
+
+        // Round budget: one re-request passes at max_rounds 1, the next is
+        // refused as an isError and the row stays at its cap.
+        let tight = call_tool_raw(
+            &state,
+            &secret,
+            "request_review",
+            json!({
+                "repo_path": "/demo",
+                "base_sha": "base",
+                "target_key": "/demo",
+                "target_kind": "worktree",
+                "note": "One round only.",
+                "head_sha": "head-t1",
+                "max_rounds": 1,
+            }),
+        )
+        .await;
+        assert_eq!(tight["result"]["isError"], false);
+        let tight_id = result_text(&tight)["id"].as_i64().unwrap();
+        let advance = |action| json!({ "id": tight_id, "action": action });
+        for action in ["claim", "request_changes"] {
+            let step = call_tool_raw(&state, &secret, "update_review_request", advance(action))
+                .await;
+            assert_eq!(step["result"]["isError"], false, "{action}");
+        }
+        let first_retry = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": tight_id, "action": "re_request", "head_sha": "head-t2" }),
+        )
+        .await;
+        assert_eq!(first_retry["result"]["isError"], false);
+        assert_eq!(result_text(&first_retry)["round"], 1);
+        let changed = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": tight_id, "action": "request_changes" }),
+        )
+        .await;
+        assert_eq!(changed["result"]["isError"], false);
+        let exhausted = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": tight_id, "action": "re_request", "head_sha": "head-t3" }),
+        )
+        .await;
+        assert_eq!(exhausted["result"]["isError"], true);
+        assert!(exhausted["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("round budget of 1"));
+
+        // An unknown request is an isError result with the engine's
+        // message, not a -32602.
+        let unknown = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": 9999, "action": "claim" }),
+        )
+        .await;
+        assert_eq!(unknown["result"]["isError"], true);
+        assert!(unknown["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("does not exist"));
+
+        // The note refresh and the new head only mean something on a
+        // re-request; a re-request without a head is refused.
+        let note_misuse = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": tight_id, "action": "claim", "note": "nope" }),
+        )
+        .await;
+        assert_eq!(note_misuse["result"]["isError"], true);
+        assert!(note_misuse["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Only a re-request refreshes the note"));
+        let head_misuse = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": tight_id, "action": "withdraw", "head_sha": "head-x" }),
+        )
+        .await;
+        assert_eq!(head_misuse["result"]["isError"], true);
+        assert!(head_misuse["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Only a re-request takes a new head"));
+        let headless = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": tight_id, "action": "re_request" }),
+        )
+        .await;
+        assert_eq!(headless["result"]["isError"], true);
+        assert!(headless["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("non-empty head"));
+        let long_note = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": tight_id, "action": "re_request", "head_sha": "head-t4", "note": "x".repeat(2001) }),
+        )
+        .await;
+        assert_eq!(long_note["result"]["isError"], true);
+        assert!(long_note["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("exceeds 2000 characters"));
+    }
+
+    #[tokio::test]
+    async fn request_tools_attribute_to_the_calling_token() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let (state, secret) = test_state(pool.clone()).await;
+        let other = create_agent_token_in_pool(&pool, "other-agent").await.unwrap();
+
+        let mine = seed_request(&state, &secret, "/demo", "head-1").await;
+        let theirs = seed_request(&state, &other.secret, "/demo", "head-1").await;
+        assert_ne!(mine["id"].as_i64().unwrap(), theirs["id"].as_i64().unwrap());
+        assert_eq!(mine["requester"], "mcp-agent");
+        assert_eq!(theirs["requester"], "other-agent");
+
+        // Dedup is per requester: my same-head create updates only my row.
+        let updated = call_tool_raw(
+            &state,
+            &secret,
+            "request_review",
+            json!({
+                "repo_path": "/demo",
+                "base_sha": "base",
+                "target_key": "/demo",
+                "target_kind": "worktree",
+                "note": "Mine again.",
+                "head_sha": "head-1",
+            }),
+        )
+        .await;
+        assert_eq!(updated["result"]["isError"], false);
+        assert_eq!(result_text(&updated)["id"], mine["id"]);
+        assert_eq!(result_text(&updated)["note"], "Mine again.");
+
+        let listed = call_tool_raw(
+            &state,
+            &secret,
+            "list_review_requests",
+            json!({ "repo_path": "/demo" }),
+        )
+        .await;
+        assert_eq!(listed["result"]["isError"], false);
+        let rows = result_text(&listed).as_array().unwrap().clone();
+        assert_eq!(rows.len(), 2);
+        let their_row = rows.iter().find(|row| row["id"] == theirs["id"]).unwrap();
+        assert_eq!(their_row["note"], "Please review.");
+        assert_eq!(their_row["requester"], "other-agent");
+    }
+
+    // Every successful request mutation announces exactly one change event
+    // through the state's sink; refused mutations announce nothing. The
+    // engine fires centrally, so the tools only thread the sink through.
+    #[tokio::test]
+    async fn request_mutations_announce_once_with_the_right_payload() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let (changes, announced) = recording_request_changes();
+        let secret = create_agent_token_in_pool(&pool, "mcp-agent")
+            .await
+            .unwrap()
+            .secret;
+        let state = TransportState {
+            pool: pool.clone(),
+            arrivals: Arc::new(|_| {}),
+            refreshes: noop_refreshes(),
+            comment_changes: noop_comment_changes(),
+            request_changes: changes,
+            status: dummy_status(),
+        };
+        let created = seed_request(&state, &secret, "/demo", "head-1").await;
+        let id = created["id"].as_i64().unwrap();
+        let claimed = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": id, "action": "claim" }),
+        )
+        .await;
+        assert_eq!(claimed["result"]["isError"], false);
+
+        // A refused mutation announces nothing.
+        let refused = call_tool_raw(
+            &state,
+            &secret,
+            "update_review_request",
+            json!({ "id": id, "action": "claim" }),
+        )
+        .await;
+        assert_eq!(refused["result"]["isError"], true);
+
+        let events = announced.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, id);
+        assert_eq!(events[0].repo_path, "/demo");
+        assert_eq!(events[0].base_sha, "base");
+        assert_eq!(events[0].target_key, "/demo");
+        assert_eq!(events[0].target_kind, "worktree");
+        assert_eq!(events[0].status, "requested");
+        assert_eq!(events[1].id, id);
+        assert_eq!(events[1].status, "in_review");
     }
 
     fn free_port() -> u16 {
