@@ -26,7 +26,7 @@ normalized domain data through narrow, typed Tauri commands.
   last-used timestamp. Deletion is immediate and refuses the current
   default token, which the listener's startup path provisions fresh
   per listener start, boot or restart (deleting the previous default in
-  the same transaction) and publishes only through the discovery file.
+  the same transaction) and publishes only through the config file.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
   (16 MiB per stream), a deadline (30 seconds for local probes, 300 for the
   fetch the refresh action runs), and kill-on-drop cancellation.
@@ -93,7 +93,7 @@ normalized domain data through narrow, typed Tauri commands.
   Settings (loopback `127.0.0.1:9888` by default) inside the app process;
   a bind failure is a normal condition that updates a shared status
   handle the `get_mcp_status` command reads and the Settings Agent API
-  section shows, never a startup failure, and it writes no discovery
+  section shows, never a startup failure, and it writes no config
   file or default token for a dead endpoint. Bearer authentication is
   evaluated only here, once per request, against the `agent_tokens`
   table; the resolved identity flows into every handler. Requests and
@@ -114,9 +114,9 @@ normalized domain data through narrow, typed Tauri commands.
   mutation on the MCP face a `comment-changed` event, all via injected
   sinks so the handler matrix is testable without an app; the webview
   never listens on a socket. On a successful bind the startup path
-  provisions the default token and writes the discovery file;
+  provisions the default token and writes the config file;
   exit shutdown is best-effort and removes the file only when still
-  owned. A stale discovery file may be left behind; clients tolerate
+  owned. A stale config file may be left behind; clients tolerate
   that by re-reading the file when their token is refused. The
   `restart_mcp` command (the Settings Agent API Restart action) stops
   the running listener and waits for its thread, freeing the socket,
@@ -223,12 +223,19 @@ store files to `worktreeview.sqlite3.bak`, overwriting any previous backup,
 and rebuilds the store; a store recording a migration version the running
 binary does not know also keeps its files untouched, but startup asks
 whether to set it aside as the same backup and rebuild, or to quit so the
-app can be updated instead. Debug builds (`npm run dev`) keep their own
-store per checkout, named from the checkout's target directory
+app can be updated instead. Everything lives in one app home under the
+user profile, `~/.worktreeview/` (the store and `config.json` carrying
+the endpoint's `{port, token}`), so agents and
+the Settings UI find it at the same documented path on every OS. Debug
+builds (`npm run dev`) use `~/.worktreeview-dev/` instead and keep their
+own store per checkout, named from the checkout's target directory
 (`worktreeview-dev-<label>-<hash>.sqlite3`); installed releases use
-`worktreeview.sqlite3`, and the endpoint discovery file's `-dev` suffix
-pairs each channel's registration the same way.
-`WORKTREEVIEW_DATA_DIR` relocates the data directory. Migrations are
+`worktreeview.sqlite3`, and the separate home pairs each channel's
+registration the same way unless a `WORKTREEVIEW_DATA_DIR` or `--home`
+override points both channels at the same directory.
+`WORKTREEVIEW_DATA_DIR` or a `--home <dir>` launch argument relocates the
+home. A first run after an upgrade copies the store once from the old
+per-OS app data directory, leaving it as a backup. Migrations are
 append-only
 (CONTRIBUTING.md), so divergence is not expected on normal upgrades; desktop
 e2e containers rebuild their database on every run. Review flows remain

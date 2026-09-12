@@ -6,7 +6,7 @@ import path from "node:path";
 const fixtureRoot = "/tmp/worktreeview-e2e-fixtures";
 const gitHome = "/tmp/worktreeview-e2e-git-home";
 const selector = "/tmp/worktreeview-e2e-selection";
-const discoveryPath = path.join("/tmp/worktreeview-e2e-data", "com.etelej.worktreeview", "agent-endpoint.json");
+const discoveryPath = path.join("/tmp/worktreeview-e2e-data", "config.json");
 const protocolVersion = "2026-07-28";
 
 function git(args, cwd) {
@@ -68,7 +68,7 @@ async function waitText(selector_, expected, label) {
 }
 
 // One stateless MCP tools/call against the app's loopback face, authorized
-// by the discovery file's default token (the same auth every face
+// by the config file's default token (the same auth every face
 // and token shares). Returns the parsed JSON payload of the tool result.
 async function callTool(endpoint, token, name, args) {
   const response = await fetch(endpoint, {

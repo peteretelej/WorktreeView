@@ -7,7 +7,7 @@ import path from "node:path";
 const fixtureRoot = "/tmp/worktreeview-e2e-fixtures";
 const gitHome = "/tmp/worktreeview-e2e-git-home";
 const selector = "/tmp/worktreeview-e2e-selection";
-const discoveryPath = path.join("/tmp/worktreeview-e2e-data", "com.etelej.worktreeview", "agent-endpoint.json");
+const discoveryPath = path.join("/tmp/worktreeview-e2e-data", "config.json");
 
 function git(args, cwd) {
   const forbidden = new Set(["clone", "fetch", "pull", "push"]);

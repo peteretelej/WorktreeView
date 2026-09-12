@@ -1171,9 +1171,9 @@ mod tests {
     use crate::agents::{create_agent_token_in_pool, delete_agent_token_in_pool};
     use crate::testutil::{seed_repo, test_pool, test_path, test_repo};
     use crate::transport::{
-        discovery_path, handle, start, CommentChange, CommentSink, ListenerConfig, ListenerStatus,
-        McpStatusHandle, RefreshSink, RequestChange, RequestChangeSink, TransportDeps,
-        UNAUTHORIZED,
+        endpoint_config_path, handle, start, CommentChange, CommentSink, ListenerConfig,
+        ListenerStatus, McpStatusHandle, RefreshSink, RequestChange, RequestChangeSink,
+        TransportDeps, UNAUTHORIZED,
     };
     use axum::body::{to_bytes, Body};
     use axum::extract::State;
@@ -2917,7 +2917,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let discovery: Value =
-            serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(&dir)).unwrap()).unwrap();
         let port = discovery["port"].as_u64().unwrap() as u16;
         let bearer = discovery["token"].as_str().unwrap().to_string();
 
@@ -2980,7 +2980,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let discovery: Value =
-            serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(&dir)).unwrap()).unwrap();
         let port = discovery["port"].as_u64().unwrap() as u16;
         let bearer = discovery["token"].as_str().unwrap().to_string();
 

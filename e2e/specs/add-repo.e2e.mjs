@@ -5,7 +5,7 @@ import path from "node:path";
 
 const fixtureRoot = "/tmp/worktreeview-e2e-fixtures";
 const gitHome = "/tmp/worktreeview-e2e-git-home";
-const discoveryPath = path.join("/tmp/worktreeview-e2e-data", "com.etelej.worktreeview", "agent-endpoint.json");
+const discoveryPath = path.join("/tmp/worktreeview-e2e-data", "config.json");
 const protocolVersion = "2026-07-28";
 
 function git(args, cwd) {
@@ -64,7 +64,7 @@ describe("desktop unattended repository setup", () => {
     // startup, before any repository is open.
     await browser.waitUntil(() => existsSync(discoveryPath), {
       timeout: 20_000,
-      timeoutMsg: "the discovery file never appeared",
+      timeoutMsg: "the config file never appeared",
     });
     const discovery = JSON.parse(readFileSync(discoveryPath, "utf8"));
     const endpoint = `http://127.0.0.1:${discovery.port}/mcp`;

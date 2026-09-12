@@ -100,7 +100,7 @@ by default) at app start, and again whenever the endpoint is restarted
 from that section; nothing is reachable from outside the
 machine unless the listen address is changed there. A bind failure, such
 as a port already in use, never blocks app startup: the Settings section
-shows the error and no discovery file is written. One caveat on
+shows the error and no config file is written. One caveat on
 restarting with an unchanged port: connections the endpoint closed
 recently can keep the port busy for a while after activity (up to a
 couple of minutes depending on the platform), so an immediate same-port
@@ -126,17 +126,17 @@ mutated by any agent.
 One designated default token is provisioned fresh at every listener
 start, an app start or a restart from Settings (exactly like the per-boot
 secret this token model replaced): its secret
-goes only into the discovery file, so zero-config discovery clients keep
+goes only into the config file, so zero-config discovery clients keep
 working across restarts without any secret persisting. The built-in default token
 cannot be deleted; it renews at the next start, replacing the previous
 default. Named tokens persist across restarts.
 
 ### Discovery
 
-After a successful bind the app writes `agent-endpoint.json` into its app
-data directory (Linux `$XDG_DATA_HOME/com.etelej.worktreeview`, macOS
-`~/Library/Application Support/com.etelej.worktreeview`, Windows
-`%APPDATA%\com.etelej.worktreeview`):
+After a successful bind the app writes `config.json` into its app home
+(`~/.worktreeview/` on every OS; `~` is the user profile, launch with
+`--home <dir>` or set `WORKTREEVIEW_DATA_DIR` to relocate it; dev
+builds use `~/.worktreeview-dev/`):
 
 ```json
 { "port": 54321, "token": "wv<64 lowercase hex chars>" }
@@ -147,12 +147,13 @@ followed by 32 random bytes hex-encoded, generated fresh per listener
 start and never persisted
 across restarts. When the endpoint is disabled in Settings, or its bind
 fails,
-no discovery file is written or refreshed. Debug builds write
-`agent-endpoint-dev.json` instead, so a dev instance and an installed
-release never claim each other's registration. Clients read the discovery
+no config file is written or refreshed. Debug builds use the separate dev
+home, so with default homes a dev instance and an installed
+release never claim each other's registration (a shared `--home` or
+`WORKTREEVIEW_DATA_DIR` override removes that separation). Clients read the config
 file on startup and re-read it whenever the endpoint refuses their token.
 Parallel dev instances (separate worktree checkouts) share that dev
-discovery file and the last-started instance owns it, so a submission can
+config file and the last-started instance owns it, so a submission can
 land in a different checkout's instance; per-checkout isolation of the
 registration is not part of this contract yet.
 
@@ -246,7 +247,7 @@ JSON-RPC-framed outcomes otherwise use 200.
 The schema's ingest caps are authoritative; the transport adds only a
 coarse 3 MiB pre-parse guard, so a schema-legal submission is never
 transport-rejected. A 401 means the presented secret is missing, wrong,
-or deleted. Discovery clients should first re-read the discovery file:
+or deleted. Discovery clients should first re-read the config file:
 each boot or endpoint restart renews the default token, and another
 instance may own the
 registration. Agents using a named token paste a new one from the
@@ -258,7 +259,7 @@ Connection refusal simply means the app is not running.
 The same listener serves a stateless MCP (Model Context Protocol) face at
 `POST /mcp`: the full agent tool surface over the same shared
 implementation the raw face uses. Authentication is the same single
-listener evaluation (same bearer tokens, same discovery file, same
+listener evaluation (same bearer tokens, same config file, same
 `401`/`-32001` shape); there is no second auth layer. The face implements
 the stateless subset of the MCP `2026-07-28` revision plus the
 legacy-client shim described under Stateless shape. It is validated

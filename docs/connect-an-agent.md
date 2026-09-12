@@ -9,22 +9,17 @@ from outside the machine unless the listen address is changed there.
 
 ## Discovery clients
 
-Clients that support the discovery file need no configuration: after a
-successful bind the app writes `agent-endpoint.json` into its app data
-directory, carrying the current `{port, token}`. The token it names is
-the built-in default, which renews at every app start and whenever the
+Clients that support the config file need no configuration: after a
+successful bind the app writes `config.json` into its app home,
+carrying the current `{port, token}`. The token it names is the
+built-in default, which renews at every app start and whenever the
 endpoint is restarted from the Settings Agent API section, so discovery
-clients keep working; the file is rewritten each time.
-Dev builds write `agent-endpoint-dev.json` instead, so the two channels
-never trade registrations.
-
-Where the file lives:
-
-| Platform | Path |
-| --- | --- |
-| Windows | `%APPDATA%\com.etelej.worktreeview\agent-endpoint.json` |
-| macOS | `~/Library/Application Support/com.etelej.worktreeview/agent-endpoint.json` |
-| Linux | `$XDG_DATA_HOME/com.etelej.worktreeview/agent-endpoint.json` (default `~/.local/share/com.etelej.worktreeview/`) |
+clients keep working; the file is rewritten each time. The app home is
+`~/.worktreeview/` on every OS (`~` is the user profile; launch with
+`--home <dir>` or set `WORKTREEVIEW_DATA_DIR` to relocate it). Dev
+builds use `~/.worktreeview-dev/` instead, so with default homes the two
+channels never trade registrations or stores (pointing both at the same
+override removes that separation).
 
 ## Manual configuration
 

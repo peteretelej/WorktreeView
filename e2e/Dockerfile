@@ -76,6 +76,7 @@ RUN for command in cargo rustc cc gcc g++ make; do \
 
 ENV HOME=/tmp/worktreeview-e2e-home \
     XDG_DATA_HOME=/tmp/worktreeview-e2e-data \
+    WORKTREEVIEW_DATA_DIR=/tmp/worktreeview-e2e-data \
     XDG_RUNTIME_DIR=/tmp/worktreeview-e2e-runtime \
     GDK_BACKEND=x11 \
     LIBGL_ALWAYS_SOFTWARE=1 \

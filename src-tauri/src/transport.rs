@@ -354,7 +354,7 @@ pub(crate) async fn handle(State(state): State<TransportState>, request: Request
                 &Value::Null,
                 StatusCode::UNAUTHORIZED,
                 UNAUTHORIZED,
-                "Missing, wrong, or deleted bearer token. Discovery clients: re-read the discovery file for the current boot.",
+                "Missing, wrong, or deleted bearer token. Discovery clients: re-read the config file for the current boot.",
             );
         }
     };
@@ -414,7 +414,7 @@ impl TransportHandle {
     }
 
     // Full stop for restarts: signal, then wait for the thread so the
-    // socket is released and discovery cleanup has run before a new
+    // socket is released and config cleanup has run before a new
     // listener may rebind the same address. Bounded by one idle poll
     // period plus the stall limit while an in-flight request finishes.
     pub(crate) fn stop(mut self) {
@@ -438,21 +438,18 @@ struct EndpointDiscovery {
     token: String,
 }
 
-pub(crate) fn discovery_path(data_dir: &Path) -> PathBuf {
-    // Matches the dev-suffixed store: the channels must not read or delete
-    // each other's endpoint registration.
-    let name = if cfg!(debug_assertions) {
-        "agent-endpoint-dev.json"
-    } else {
-        "agent-endpoint.json"
-    };
-    data_dir.join(name)
+// The endpoint payload is the whole config file today; later keys may join
+// it. One name for every channel: with their default homes, debug and
+// release builds do not share a directory, so they cannot read or delete
+// each other's registration.
+pub(crate) fn endpoint_config_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("config.json")
 }
 
-// A later-started instance may have overwritten the discovery file with its
+// A later-started instance may have overwritten the config file with its
 // own registration; removing that would orphan its endpoint, so only delete
 // a file that still describes this instance.
-fn remove_discovery_if_owned(path: &Path, port: u16, token: &str) {
+fn remove_endpoint_config_if_owned(path: &Path, port: u16, token: &str) {
     let Ok(payload) = std::fs::read(path) else {
         return;
     };
@@ -463,16 +460,16 @@ fn remove_discovery_if_owned(path: &Path, port: u16, token: &str) {
     }
 }
 
-fn write_discovery_file(path: &Path, port: u16, token: &str) -> Result<(), String> {
+fn write_endpoint_config(path: &Path, port: u16, token: &str) -> Result<(), String> {
     let payload = serde_json::to_vec(&EndpointDiscovery { port, token: token.to_string() })
-        .map_err(|error| format!("Could not serialize the endpoint discovery file: {error}"))?;
+        .map_err(|error| format!("Could not serialize the endpoint config file: {error}"))?;
     std::fs::write(path, payload)
-        .map_err(|error| format!("Could not write the endpoint discovery file: {error}"))?;
+        .map_err(|error| format!("Could not write the endpoint config file: {error}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
-            format!("Could not restrict the endpoint discovery file: {error}")
+            format!("Could not restrict the endpoint config file: {error}")
         })?;
     }
     Ok(())
@@ -646,10 +643,10 @@ async fn write_response(stream: &mut tokio::net::TcpStream, response: Response) 
 // One startup attempt for the agent endpoint, driven by the Settings MCP
 // keys. Nothing except a broken runtime/thread environment fails app
 // startup: a disabled listener serves nothing, and a failed bind is a
-// normal user-visible condition that never writes a discovery file or
+// normal user-visible condition that never writes a config file or
 // provisions a default token, so nothing advertises a dead endpoint.
 // On a successful bind the same startup path provisions the default
-// token and writes the discovery file with its secret. The status
+// token and writes the config file with its secret. The status
 // handle is shared across restarts and reset from the config on every
 // call.
 pub(crate) async fn start(
@@ -687,7 +684,7 @@ pub(crate) async fn start(
     log::info!("agent endpoint listening on {}:{}", config.address, port);
     // Provisioning and discovery come after the bind and stay one unit: if
     // either fails, the bound listener shuts and the error surfaces in the
-    // Settings MCP section without a discovery file advertising it.
+    // Settings MCP section without a config file advertising it.
     let default_secret = match provision_default_token_in_pool(&state.pool).await {
         Ok(secret) => secret,
         Err(error) => {
@@ -698,8 +695,8 @@ pub(crate) async fn start(
             return Ok(None);
         }
     };
-    let discovery = discovery_path(&data_dir);
-    if let Err(error) = write_discovery_file(&discovery, port, &default_secret) {
+    let config_path = endpoint_config_path(&data_dir);
+    if let Err(error) = write_endpoint_config(&config_path, port, &default_secret) {
         status.set(false, Some(error));
         return Ok(None);
     }
@@ -715,12 +712,12 @@ pub(crate) async fn start(
         Ok(runtime) => runtime,
         Err(error) => {
             let message = format!("Could not start the agent endpoint runtime: {error}");
-            remove_discovery_if_owned(&discovery, port, &default_secret);
+            remove_endpoint_config_if_owned(&config_path, port, &default_secret);
             status.set(false, Some(message.clone()));
             return Err(message);
         }
     };
-    let failure_discovery = discovery.clone();
+    let failure_config = config_path.clone();
     let failure_secret = default_secret.clone();
     let failure_status = status.clone();
     let failure_port = port;
@@ -729,7 +726,7 @@ pub(crate) async fn start(
         .spawn(move || {
                 let _ = runtime.block_on(async move {
                     let Ok(listener) = tokio::net::TcpListener::from_std(listener) else {
-                        remove_discovery_if_owned(&discovery, port, &default_secret);
+                        remove_endpoint_config_if_owned(&config_path, port, &default_secret);
                         state.status.set(false, Some("Could not adopt the bound listener socket.".into()));
                         return;
                     };
@@ -751,14 +748,14 @@ pub(crate) async fn start(
                             Err(_) => continue,
                         }
                     }
-                    remove_discovery_if_owned(&discovery, port, &default_secret);
+                    remove_endpoint_config_if_owned(&config_path, port, &default_secret);
                     state.status.set(false, None);
                 });
         })
         .map_err(|error| {
-            // A dead thread must not leave a discovery file advertising the
+            // A dead thread must not leave a config file advertising the
             // bound endpoint or a status claiming it is running.
-            remove_discovery_if_owned(&failure_discovery, failure_port, &failure_secret);
+            remove_endpoint_config_if_owned(&failure_config, failure_port, &failure_secret);
             let message = format!("Could not start the agent endpoint thread: {error}");
             failure_status.set(false, Some(message.clone()));
             message
@@ -930,11 +927,11 @@ mod tests {
     }
 
     #[test]
-    fn discovery_file_round_trips_port_and_token() {
+    fn config_file_round_trips_port_and_token() {
         let dir = crate::testutil::test_path("transport-discovery");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = discovery_path(&dir);
-        write_discovery_file(&path, 45123, "abc123").unwrap();
+        let path = endpoint_config_path(&dir);
+        write_endpoint_config(&path, 45123, "abc123").unwrap();
         let parsed: EndpointDiscovery =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(parsed, EndpointDiscovery { port: 45123, token: "abc123".into() });
@@ -942,7 +939,7 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "the discovery file must be owner-only");
+            assert_eq!(mode & 0o777, 0o600, "the config file must be owner-only");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -951,15 +948,15 @@ mod tests {
     // a stale file is survivable (clients re-read on refusal), an orphaned
     // live endpoint is not.
     #[test]
-    fn discovery_file_is_removed_only_when_owned() {
+    fn config_file_is_removed_only_when_owned() {
         let dir = crate::testutil::test_path("transport-discovery-owned");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = discovery_path(&dir);
-        write_discovery_file(&path, 45123, "abc123").unwrap();
+        let path = endpoint_config_path(&dir);
+        write_endpoint_config(&path, 45123, "abc123").unwrap();
 
-        remove_discovery_if_owned(&path, 1, "other-token");
+        remove_endpoint_config_if_owned(&path, 1, "other-token");
         assert!(path.exists(), "a foreign registration must survive");
-        remove_discovery_if_owned(&path, 45123, "abc123");
+        remove_endpoint_config_if_owned(&path, 45123, "abc123");
         assert!(!path.exists(), "an owned registration is removed");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1174,7 +1171,7 @@ mod tests {
     }
 
     // The listener binds the configured address and port, provisions the
-    // default token, and writes the discovery file whose secret is the
+    // default token, and writes the config file whose secret is the
     // only copy of that default.
     #[tokio::test(flavor = "multi_thread")]
     async fn start_uses_the_configured_port_and_provisions_the_default() {
@@ -1199,7 +1196,7 @@ mod tests {
         assert_eq!(status.error, None);
 
         let discovery: EndpointDiscovery =
-            serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(&dir)).unwrap()).unwrap();
         assert_eq!(discovery.port, port);
         // The discovery secret authenticates: it is the provisioned default.
         let identity = crate::agents::authenticate_token_in_pool(&pool, &discovery.token).await;
@@ -1216,10 +1213,10 @@ mod tests {
     }
 
     // A bind collision is a normal condition: the app keeps running, the
-    // error surfaces in the status, and no discovery file or default token
+    // error surfaces in the status, and no config file or default token
     // is written for the failed listener.
     #[tokio::test]
-    async fn bind_failure_is_not_fatal_and_writes_no_discovery() {
+    async fn bind_failure_is_not_fatal_and_writes_no_config() {
         let pool = test_pool().await;
         let dir = crate::testutil::test_path("transport-start-collision");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1239,7 +1236,7 @@ mod tests {
         let status = status.lock_status().clone();
         assert!(!status.running);
         assert!(status.error.is_some());
-        assert!(!discovery_path(&dir).exists());
+        assert!(!endpoint_config_path(&dir).exists());
         let defaults: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM agent_tokens WHERE is_default = 1")
                 .fetch_one(&pool)
@@ -1251,7 +1248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_listener_starts_nothing_and_writes_no_discovery() {
+    async fn disabled_listener_starts_nothing_and_writes_no_config() {
         let pool = test_pool().await;
         let dir = crate::testutil::test_path("transport-start-disabled");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1269,7 +1266,7 @@ mod tests {
         let status = status.lock_status().clone();
         assert!(!status.enabled && !status.running);
         assert!(status.error.is_none());
-        assert!(!discovery_path(&dir).exists());
+        assert!(!endpoint_config_path(&dir).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1304,7 +1301,7 @@ mod tests {
     }
 
     // End-to-end over a real loopback socket: start() binds, provisions the
-    // default token, writes the discovery file with the bound port and its
+    // default token, writes the config file with the bound port and its
     // secret, and the served handler answers an authorized POST. This is
     // the desktop e2e's transport path without a Tauri app. The test
     // runtime stays multi-thread so the pool's connection workers stay
@@ -1327,7 +1324,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let discovery: EndpointDiscovery =
-            serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(&dir)).unwrap()).unwrap();
 
         let body = rpc_body(json!(1), "post_review", review_params("/demo"));
         let response = send_over_socket(discovery.port, &discovery.token, body).join().unwrap();
@@ -1346,7 +1343,7 @@ mod tests {
 
     // The raw face's second method round-trips over the live socket: an
     // authorized refresh_repo against an open repo answers ok:true, and the
-    // startup default from the discovery file authenticates it.
+    // startup default from the config file authenticates it.
     #[tokio::test(flavor = "multi_thread")]
     async fn started_endpoint_serves_refresh_repo_over_a_live_socket() {
         let pool = test_pool().await;
@@ -1365,7 +1362,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let discovery: EndpointDiscovery =
-            serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(&dir)).unwrap()).unwrap();
 
         let body = rpc_body(
             json!(2),
@@ -1388,7 +1385,7 @@ mod tests {
 
     // A restart stops the idle listener without any inbound connection,
     // rebinds the same port, renews the default (the old secret stops
-    // authenticating), rewrites the discovery file, and reports through
+    // authenticating), rewrites the config file, and reports through
     // the same status handle while the owner carries the new listener.
     #[tokio::test(flavor = "multi_thread")]
     async fn restart_rebinds_the_same_port_and_renews_the_default() {
@@ -1406,7 +1403,7 @@ mod tests {
             .unwrap();
         owner.0.lock().await.replace(first);
         let first_discovery: EndpointDiscovery =
-            serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(&dir)).unwrap()).unwrap();
 
         let status_after =
             restart(pool.clone(), &deps, config, status.clone(), &owner).await.unwrap();
@@ -1415,7 +1412,7 @@ mod tests {
         assert_eq!(status_after.error, None);
         assert_eq!(status.lock_status().running, true, "the shared status handle follows the restart");
         let second_discovery: EndpointDiscovery =
-            serde_json::from_slice(&std::fs::read(discovery_path(&dir)).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(&dir)).unwrap()).unwrap();
         assert_eq!(second_discovery.port, port);
         assert_ne!(second_discovery.token, first_discovery.token);
         assert!(

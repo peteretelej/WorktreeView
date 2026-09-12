@@ -2,6 +2,7 @@ mod agents;
 mod cache;
 mod commands;
 mod git;
+mod home;
 mod mcp;
 mod overview;
 mod requests;
@@ -312,7 +313,7 @@ pub fn run() {
     app.run(|app_handle, event| {
         if let tauri::RunEvent::Exit = event {
             // Best-effort: stop the loopback listener so the server task
-            // removes the discovery file; nothing joins the task. A
+            // removes the config file; nothing joins the task. A
             // restart holding the owner lock is skipped rather than
             // waited on: the exiting process takes the listener down
             // regardless.
@@ -369,14 +370,18 @@ fn checkout_label(exe_dir: &Path) -> Option<String> {
 }
 
 fn initialize(app: &tauri::App) -> Result<(), String> {
-    let data_dir = match std::env::var("WORKTREEVIEW_DATA_DIR") {
-        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir.trim()),
-        _ => app.path().app_data_dir().map_err(|error| {
-            format!("Could not resolve application data directory: {error}")
-        })?,
-    };
+    let home_root = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Could not resolve the user home directory: {error}"))?;
+    let data_dir = home::resolve_home(
+        home::home_arg_from(std::env::args_os()).as_deref(),
+        std::env::var(home::HOME_ENV_VAR).ok().as_deref(),
+        &home_root,
+        cfg!(debug_assertions),
+    );
     std::fs::create_dir_all(&data_dir)
-        .map_err(|error| format!("Could not create application data directory: {error}"))?;
+        .map_err(|error| format!("Could not create application home directory: {error}"))?;
     // Every parallel dev checkout gets its own store: the binary runs from
     // that checkout's target directory, so a per-checkout name keeps two
     // worktrees (which may carry different schema versions) from trading
@@ -393,6 +398,12 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
     } else {
         "worktreeview.sqlite3".to_string()
     };
+    // Upgrades from pre-home releases find their store in the old per-OS
+    // app data directory and move it in once; the old directory stays as a
+    // backup. Nothing to migrate is the normal case for fresh installs.
+    if let Ok(legacy_dir) = app.path().app_data_dir() {
+        home::migrate_legacy_store(&legacy_dir, &data_dir, &db_name);
+    }
     let db_path = data_dir.join(db_name);
     let options = SqliteConnectOptions::new()
         .filename(&db_path)

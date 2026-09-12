@@ -87,14 +87,14 @@ repository cannot mutate it or execute code it defines.
   in Settings and never blocks startup) and serves the raw JSON-RPC
   methods `post_review` and `refresh_repo` plus the stateless MCP face at
   `POST /mcp`, all over bearer-token authentication. Tokens are per-agent
-  rows; the discovery file in the app data directory carries the current
+  rows; the config file in the app home carries the current
   boot's default token. Beyond loopback the token is the real
   authentication boundary; locally it still guards accidents. Transport
   internals (HTTP semantics, head and body caps, the hyper h1 bypass)
   are described in [architecture.md](architecture.md); the protocol
   surface is specified in [agent-submissions.md](agent-submissions.md).
 - The local threat model is unchanged: any process running as the user
-  can already read the app's store and the discovery file, so the token
+  can already read the app's store and the config file, so the token
   guards against stale clients and accidents, not against user-level
   processes.
 - Remote and SSH review are still not implemented; they wait until their

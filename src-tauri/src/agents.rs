@@ -195,7 +195,7 @@ pub(crate) async fn authenticate_token_in_pool(pool: &SqlitePool, secret: &str) 
 // The listener's start provisioning: deletes the previous default (plus
 // any revoked rows left by older builds) and inserts a fresh one in one
 // transaction, so the table never accumulates dead defaults. The returned
-// secret goes only into the discovery file written by the same startup path.
+// secret goes only into the config file written by the same startup path.
 pub(crate) async fn provision_default_token_in_pool(pool: &SqlitePool) -> Result<String, CommandError> {
     let secret = generate_token()
         .map_err(|error| CommandError::new("persistence", error))?;

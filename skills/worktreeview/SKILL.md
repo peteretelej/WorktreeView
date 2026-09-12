@@ -55,21 +55,18 @@ From source instead: `git clone` the repo, `npm install`, then
 `npm run tauri build` (installer) or `npm run dev` (development run).
 
 Launch the app once. On startup it binds the API listener (default
-`127.0.0.1:9888`, configurable in Settings -> Agent API) and writes the
-discovery file.
+`127.0.0.1:9888`, configurable in Settings -> Agent API) and writes its
+config file.
 
 ## 2. Connect the agent to the MCP endpoint
 
-Read the discovery file for the current `{port, token}`:
-
-- Windows: `%APPDATA%\com.etelej.worktreeview\agent-endpoint-dev.json`
-  (dev builds) or `agent-endpoint.json` (installed builds)
-- macOS: `~/Library/Application Support/com.etelej.worktreeview/`
-- Linux: `$XDG_DATA_HOME/com.etelej.worktreeview/`
+Read the app config file for the current `{port, token}` at
+`~/.worktreeview/config.json` on every OS (`~` is the user profile; dev
+builds use `~/.worktreeview-dev/config.json` instead).
 
 Two token options:
 
-- **Zero-config**: use the discovery file's `token`. It is the built-in
+- **Zero-config**: use the config file's `token`. It is the built-in
   default token and renews at every app start and whenever the endpoint is
   restarted from Settings, so re-read the file whenever a request answers
   401.
@@ -160,5 +157,5 @@ agent: `docs/connect-an-agent.md`.
   different answer; change the situation (new head, requester action,
   human takeover) instead.
 - A 401 means the token is wrong, deleted, or rotated: re-read the
-  discovery file (or ask the human for a fresh named token). A connection
+  config file (or ask the human for a fresh named token). A connection
   refusal means the app is not running - ask the human to start it.
