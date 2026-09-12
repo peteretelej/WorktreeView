@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Copy, Trash2 } from "lucide-react";
+import { Check, Copy, PanelRightClose, Trash2 } from "lucide-react";
 import type { DiffLine } from "./diff.ts";
 import type { ReviewIdentity } from "./navigation.ts";
 import { copyText } from "./clipboard.ts";
@@ -250,7 +250,7 @@ export function CommentThreadView({ thread, status, comments, reversed = false }
   </div>;
 }
 
-export function CommentStream({ comments, reversed = false, strip }: { comments: CommentsApi; reversed?: boolean; strip?: ReactNode }) {
+export function CommentStream({ comments, reversed = false, strip, onCollapse }: { comments: CommentsApi; reversed?: boolean; strip?: ReactNode; onCollapse?: () => void }) {
   const { copied, copy } = useCopied();
   if (!comments.key) return null;
   return <aside className="comment-stream" aria-label="Comments">
@@ -259,6 +259,7 @@ export function CommentStream({ comments, reversed = false, strip }: { comments:
       <span className="pane-heading-actions">
         <span>{comments.threads.length}</span>
         <button className="comment-copy" type="button" aria-label="Copy all comments as markdown" title="Copy all comments as markdown" disabled={comments.visibleThreads.length === 0} onClick={() => copy(exportThreadsMarkdown(comments.visibleThreads, reversed))}>{<CopyMark copied={copied} />}</button>
+        {onCollapse && <button className="comment-copy" type="button" aria-label="Hide Comments" title="Hide Comments" onClick={onCollapse}><PanelRightClose size={12} /></button>}
       </span>
     </div>
     <div className="comment-stream-body">

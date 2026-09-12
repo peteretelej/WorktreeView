@@ -1410,7 +1410,12 @@ button:disabled {
 .scope-toggle button:last-child { border-right: 0; }
 .scope-toggle button.active { background: var(--primary-soft); color: var(--foreground); }
 .scope-fixed { display: inline-flex; height: 29px; align-items: center; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--muted); font-size: 10px; }
-.review-body { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: 300px minmax(0, 1fr); }
+/* Collapsed panes leave a slim reopen rail in their grid column. */
+.review-body { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: var(--files-col, 300px) minmax(0, 1fr) var(--comments-col, 300px); }
+.review-body.files-collapsed { --files-col: 44px; }
+.review-body.comments-collapsed { --comments-col: 44px; }
+.pane-rail { display: flex; min-height: 0; flex-direction: column; align-items: center; padding: 4px 0; border-right: 1px solid var(--border); background: var(--surface); }
+.pane-rail.right { border-right: 0; border-left: 1px solid var(--border); }
 .file-index { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--border); background: var(--surface); }
 .pane-heading { display: flex; height: 36px; flex: none; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .pane-heading span { font: 10px var(--font-mono); }
@@ -1562,7 +1567,7 @@ button:disabled {
 }
 
 @media (max-width: 760px) {
-  .review-body { grid-template-columns: minmax(180px, 38%) minmax(0, 1fr); }
+  .review-body { --files-col: minmax(180px, 38%); --comments-col: 44px; }
   .review-bar { flex-wrap: wrap; }
 }
 
@@ -1630,7 +1635,6 @@ button:disabled {
 }
 
 /* Comment layer: merged stream, inline threads, and composers. */
-.review-body.comments-visible { grid-template-columns: 300px minmax(0, 1fr) 300px; }
 .comment-stream { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-left: 1px solid var(--border); background: var(--surface); }
 .comment-stream-body { min-height: 0; flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
 .pane-heading-actions { display: flex; align-items: center; gap: 6px; }
@@ -1759,7 +1763,7 @@ button:disabled {
 .html-block iframe { width: 100%; height: 240px; border: 1px solid var(--border); border-radius: 4px; background: var(--background); }
 
 @media (max-width: 1100px) {
-  .review-body.comments-visible { grid-template-columns: minmax(180px, 32%) minmax(0, 1fr) minmax(220px, 30%); }
+  .review-body { --files-col: minmax(180px, 32%); --comments-col: minmax(220px, 30%); }
 }
 
 /* Submission arrival cue: a fixed badge announcing accepted agent

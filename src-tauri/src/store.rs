@@ -106,6 +106,8 @@ pub struct Settings {
     pub line_wrap: bool,
     pub syntax_visible: bool,
     pub inline_comments_visible: bool,
+    pub files_pane_visible: bool,
+    pub comments_pane_visible: bool,
     pub changed_files_view: ChangedFilesView,
     pub zoom: f64,
     pub mcp_enabled: bool,
@@ -131,6 +133,8 @@ impl Default for Settings {
             line_wrap: false,
             syntax_visible: true,
             inline_comments_visible: true,
+            files_pane_visible: true,
+            comments_pane_visible: true,
             changed_files_view: ChangedFilesView::Tree,
             zoom: 1.0,
             mcp_enabled: true,
@@ -350,6 +354,16 @@ pub(crate) async fn get_settings_in_pool(pool: &SqlitePool) -> Result<Settings, 
                     settings.inline_comments_visible = flag;
                 }
             }
+            "files_pane_visible" => {
+                if let Some(flag) = settings_bool_from_value(&value) {
+                    settings.files_pane_visible = flag;
+                }
+            }
+            "comments_pane_visible" => {
+                if let Some(flag) = settings_bool_from_value(&value) {
+                    settings.comments_pane_visible = flag;
+                }
+            }
             "changed_files_view" => {
                 if let Some(view) = ChangedFilesView::from_value(&value) {
                     settings.changed_files_view = view;
@@ -401,6 +415,14 @@ pub(crate) async fn set_settings_in_pool(
         (
             "inline_comments_visible",
             settings_bool_value(settings.inline_comments_visible).to_string(),
+        ),
+        (
+            "files_pane_visible",
+            settings_bool_value(settings.files_pane_visible).to_string(),
+        ),
+        (
+            "comments_pane_visible",
+            settings_bool_value(settings.comments_pane_visible).to_string(),
         ),
         (
             "changed_files_view",
@@ -532,6 +554,8 @@ mod tests {
             line_wrap: true,
             syntax_visible: true,
             inline_comments_visible: false,
+            files_pane_visible: false,
+            comments_pane_visible: false,
             changed_files_view: ChangedFilesView::List,
             zoom: 1.25,
             mcp_enabled: false,

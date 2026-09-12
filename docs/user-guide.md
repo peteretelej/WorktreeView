@@ -101,6 +101,10 @@ inline comments clears the diff for a plain read of the code while
 threads stay available in the Comments pane. Appearance, zoom, layout,
 and whitespace preferences live in Settings.
 
+Both review side panes collapse: **Changed files** and **Comments** each
+carry a hide control in their heading, `Ctrl B` toggles the file list, and
+a slim rail brings a hidden pane back. Visibility is remembered.
+
 ## Comment on a review
 
 Click a line number in the diff and a **Comment** chip appears under it;
