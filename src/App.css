@@ -367,7 +367,7 @@ kbd {
   border-radius: 3px;
   background: var(--surface-2);
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .project-list {
@@ -1534,7 +1534,7 @@ button:disabled {
 .sidebar-link-row { display: flex; width: calc(100% - 4px); min-height: 28px; align-items: center; gap: 6px; margin-left: 4px; padding: 4px 6px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); cursor: pointer; font: 10px var(--font-mono); text-align: left; }
 .sidebar-link-row:hover { background: var(--surface-2); color: var(--primary); }
 .sidebar-link-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gone-badge, .main-badge, .detached-badge, .stale-badge, .in-worktree-badge { flex: none; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 8px; text-transform: uppercase; }
+.gone-badge, .main-badge, .detached-badge, .stale-badge, .in-worktree-badge { flex: none; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 9px; text-transform: uppercase; }
 .main-badge { color: var(--primary); border-color: var(--primary); }
 .detached-badge { color: var(--info); }
 .stale-badge { color: var(--warn); border-color: var(--warn); }
@@ -1549,10 +1549,10 @@ button:disabled {
 .commit-row:focus-visible { outline: 1px solid var(--primary); outline-offset: -1px; }
 .commit-row.selected { background: var(--primary-soft); color: var(--foreground); }
 .commit-subject { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.commit-meta { display: flex; overflow: hidden; align-items: center; gap: 6px; font: 9px var(--font-mono); white-space: nowrap; }
+.commit-meta { display: flex; overflow: hidden; align-items: center; gap: 6px; font: 10px var(--font-mono); white-space: nowrap; }
 .commit-meta code { flex: none; color: var(--primary); }
 .commit-meta span { overflow: hidden; text-overflow: ellipsis; }
-.commit-ref { flex: none; overflow: hidden; max-width: 140px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 8px; text-overflow: ellipsis; }
+.commit-ref { flex: none; overflow: hidden; max-width: 140px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 9px; text-overflow: ellipsis; }
 .commits-load-more { flex: none; margin: 4px 6px; padding: 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--foreground); cursor: pointer; font-size: 10px; }
 .commits-load-more:disabled { cursor: not-allowed; opacity: 0.55; }
 .nav-collapsed .commits-bar { display: none; }
@@ -1647,7 +1647,7 @@ button:disabled {
 .comment-card.comment-resolved { opacity: 0.72; }
 .comment-head { display: flex; align-items: center; gap: 6px; min-height: 20px; margin-bottom: 5px; color: var(--muted); font-size: 10px; }
 .comment-author { color: var(--foreground); font-weight: 600; font-size: 11px; }
-.comment-model { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 9px var(--font-mono); }
+.comment-model { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10px var(--font-mono); }
 .comment-badge { padding: 1px 5px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; }
 .comment-badge.severity-P0 { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
 .comment-badge.severity-P1 { border-color: var(--danger); color: var(--danger); }
