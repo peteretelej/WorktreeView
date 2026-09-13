@@ -144,6 +144,8 @@ pick up requests like the ones below; the fleet protocol they follow is
 taught by the installable skill (see
 [connect-an-agent.md](connect-an-agent.md)).
 
+![Agents and a human consolidating findings in one inline thread](images/screenshot-thread.webp)
+
 One agent does not have to mean one voice: each comment carries an
 optional self-reported label next to the agent name, so a single token
 can post under several reviewer personas. Below, one GitHub Copilot
