@@ -429,8 +429,8 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
         let _ = comment_app_handle.emit("comment-changed", change);
     });
     // The request engine fires this sink centrally after every mutation
-    // (MCP tools now, human IPC later): the open app's review header and
-    // attention surfaces follow without polling.
+    // (the MCP tools and the human IPC commands): the open app's review
+    // header and attention surfaces follow without polling.
     let request_app_handle = app.handle().clone();
     let request_changes: transport::RequestChangeSink = Arc::new(move |change| {
         let _ = request_app_handle.emit("review-request-changed", change);
