@@ -1864,8 +1864,10 @@ button:disabled {
 .comment-card.comment-state-outdated { border-color: var(--danger); }
 .comment-card.comment-resolved { opacity: 0.72; }
 .comment-head { display: flex; align-items: center; gap: 6px; min-height: 20px; margin-bottom: 5px; color: var(--muted); font-size: 10px; }
-.comment-author { color: var(--foreground); font-weight: 600; font-size: 11px; }
-.comment-model { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10px var(--font-mono); }
+/* One-line heads: the name takes up to 60% of the row and ellipsizes
+   rather than wrapping; the model chip absorbs the remaining squeeze. */
+.comment-author { flex: 0 1 auto; max-width: 60%; min-width: 0; overflow: hidden; color: var(--foreground); font-weight: 600; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.comment-model { flex: 0 1 auto; min-width: 0; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10px var(--font-mono); }
 .comment-badge { padding: 1px 5px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; }
 .comment-badge.severity-P0 { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
 .comment-badge.severity-P1 { border-color: var(--danger); color: var(--danger); }

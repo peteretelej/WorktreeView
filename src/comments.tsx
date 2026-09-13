@@ -166,7 +166,7 @@ function CommentCard({ comment, status, reversed = false, actions }: { comment: 
   const { copied, copy } = useCopied();
   return <article className={`comment-card comment-state-${state ?? "none"} ${comment.resolved_at !== null ? "comment-resolved" : ""}`}>
     <header className="comment-head">
-      <span className="comment-author">{comment.author_name}</span>
+      <span className="comment-author" title={comment.author_name}>{comment.author_name}</span>
       {comment.author_kind === "agent" && <span className="comment-badge">agent</span>}
       {comment.author_model && <span className="comment-model" title={comment.author_model}>{comment.author_model}</span>}
       {comment.severity && <span className={`comment-badge comment-severity severity-${comment.severity}`} title={severityLabel(comment.severity)}>{comment.severity}</span>}
