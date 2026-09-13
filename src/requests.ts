@@ -187,8 +187,7 @@ export type RequestFormErrors = { note?: string; lenses?: string; max_rounds?: s
 export function validateRequestForm(input: RequestFormInput): RequestFormErrors {
   const errors: RequestFormErrors = {};
   const note = input.note.trim();
-  if (!note) errors.note = "A review request needs a non-empty note.";
-  else if ([...note].length > REQUEST_NOTE_LIMIT) errors.note = `The note exceeds ${REQUEST_NOTE_LIMIT} characters.`;
+  if ([...note].length > REQUEST_NOTE_LIMIT) errors.note = `The note exceeds ${REQUEST_NOTE_LIMIT} characters.`;
   const seen = new Set<string>();
   for (const lens of input.lenses) {
     if (!(REQUEST_LENS_OPTIONS as readonly string[]).includes(lens)) errors.lenses = `Unknown lens '${lens}'; lenses are ${REQUEST_LENS_OPTIONS.join(", ")}.`;

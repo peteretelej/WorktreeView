@@ -226,7 +226,7 @@ struct RequestReviewArgs {
     base_sha: String,
     target_key: String,
     target_kind: String,
-    note: String,
+    note: Option<String>,
     head_sha: String,
     lenses: Option<Vec<String>>,
     reviewers: Option<Vec<String>>,
@@ -560,7 +560,7 @@ fn tool_descriptors() -> Value {
                     "note": {
                         "type": "string",
                         "maxLength": 2000,
-                        "description": "Non-empty note: what changed, why, and what kind of review you need.",
+                        "description": "Optional note: what changed, why, and what kind of review you need.",
                     },
                     "head_sha": path_arg(
                         "The head you want reviewed; a re-request must later record a different head.",
@@ -585,7 +585,7 @@ fn tool_descriptors() -> Value {
                         "description": "Optional review round budget, default 2.",
                     },
                 }),
-                &["repo_path", "base_sha", "target_key", "target_kind", "note", "head_sha"],
+                &["repo_path", "base_sha", "target_key", "target_kind", "head_sha"],
             ),
         ),
         tool(
@@ -827,9 +827,6 @@ async fn requester_display(pool: &sqlx::SqlitePool, request: &ReviewRequest) -> 
 const MAX_REQUEST_NOTE_CHARS: usize = 2000;
 
 fn validate_request_note(note: &str) -> Result<(), String> {
-    if note.trim().is_empty() {
-        return Err("A review request needs a non-empty note.".to_string());
-    }
     if note.chars().count() > MAX_REQUEST_NOTE_CHARS {
         return Err(format!(
             "The note exceeds {MAX_REQUEST_NOTE_CHARS} characters."
@@ -859,7 +856,7 @@ async fn request_review(
         .await
         .map_err(|error| error.message)?;
     let draft = RequestDraft {
-        note: args.note,
+        note: args.note.unwrap_or_default(),
         lenses: args.lenses.unwrap_or_default(),
         reviewers: args.reviewers.unwrap_or_default(),
         max_rounds: args.max_rounds,
@@ -2209,7 +2206,6 @@ mod tests {
             args
         };
         for (args, message) in [
-            (variant("note", json!("   ")), "non-empty note"),
             (
                 variant("note", json!("x".repeat(2001))),
                 "exceeds 2000 characters",
@@ -2287,12 +2283,23 @@ mod tests {
             .unwrap()
             .contains("re-request the review with a new head"));
 
-        // Missing and unknown fields stay -32602 shape errors and never
-        // execute.
-        let mut missing_note = args;
+        // A note is optional now: the missing-note create lands on a fresh
+        // identity with an empty note. Other missing required fields and
+        // unknown fields stay -32602 shape errors and never execute.
+        let mut missing_note = args.clone();
         missing_note.as_object_mut().unwrap().remove("note");
+        missing_note["base_sha"] = json!("base-optional");
         let missing = call_tool_raw(&state, &secret, "request_review", missing_note).await;
-        assert_eq!(missing["error"]["code"], INVALID_PARAMS);
+        assert_eq!(missing["result"]["isError"], false);
+        assert_eq!(missing["error"], Value::Null);
+        let row: Value =
+            serde_json::from_str(missing["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(row["note"], json!(""));
+        let mut missing_head = args;
+        missing_head.as_object_mut().unwrap().remove("head_sha");
+        let missing_required = call_tool_raw(&state, &secret, "request_review", missing_head).await;
+        assert_eq!(missing_required["error"]["code"], INVALID_PARAMS);
         let unknown_field = call_tool_raw(
             &state,
             &secret,

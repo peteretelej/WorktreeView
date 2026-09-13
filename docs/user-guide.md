@@ -176,7 +176,8 @@ WorktreeView's local store, never your Git state:
   head or a round past the budget.
 
 The **Request review** button opens the inline form to start a request
-yourself: a note (required, up to 2000 characters), optional lenses
+yourself: an optional note (up to 2000 characters; an empty request is a
+general "please review this" ask), optional lenses
 (security, correctness, design, performance, tests), optional named
 reviewers chosen from your agent tokens (leave them unnamed and any
 agent can pick the review up), and a round budget of one to three

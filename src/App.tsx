@@ -1393,7 +1393,7 @@ function RequestForm({ identityKey, headSha, onCreated }: { identityKey: ReviewK
   }
   return <form className="request-form" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     <div className="request-form-head"><strong>Request review</strong><span>{headSha ? <>The displayed head <code title={headSha}>{shortToken(headSha)}</code> is recorded, exactly as an agent records its own.</> : "The displayed head is unavailable, so a request cannot be recorded."}</span></div>
-    <textarea className="request-form-note" aria-label="Request note" placeholder="What should reviewers focus on?" value={note} maxLength={REQUEST_NOTE_LIMIT} onChange={(event) => setNote(event.currentTarget.value)} />
+    <textarea className="request-form-note" aria-label="Request note" placeholder="Optional: what should reviewers focus on?" value={note} maxLength={REQUEST_NOTE_LIMIT} onChange={(event) => setNote(event.currentTarget.value)} />
     {attempted && errors.note && <p className="request-form-error">{errors.note}</p>}
     <div className="request-form-field" role="group" aria-label="Review lenses">{REQUEST_LENS_OPTIONS.map((lens) => <label key={lens} className="request-check"><input type="checkbox" checked={lenses.includes(lens)} onChange={() => toggleLens(lens)} />{lens}</label>)}</div>
     <div className="request-form-field" role="group" aria-label="Named reviewers">

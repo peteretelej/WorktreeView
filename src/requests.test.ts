@@ -177,10 +177,11 @@ test("statuses label for chips without jargon", () => {
   assert.equal(requestStatusLabel("requested"), "requested");
 });
 
-test("form validation gates on note presence and the note bound", () => {
+test("form validation treats the note as optional and gates on the note bound", () => {
   const valid = { note: "Please review the auth paths.", lenses: ["security"], max_rounds: 2 };
   assert.deepEqual(validateRequestForm(valid), {});
-  assert.deepEqual(validateRequestForm({ ...valid, note: "   " }).note, "A review request needs a non-empty note.");
+  assert.deepEqual(validateRequestForm({ ...valid, note: "" }), {});
+  assert.deepEqual(validateRequestForm({ ...valid, note: "   " }), {});
   assert.deepEqual(validateRequestForm({ ...valid, note: "".padEnd(REQUEST_NOTE_LIMIT + 1, "a") }).note, `The note exceeds ${REQUEST_NOTE_LIMIT} characters.`);
   assert.equal(validateRequestForm({ ...valid, note: "a".repeat(REQUEST_NOTE_LIMIT) }).note, undefined);
 });

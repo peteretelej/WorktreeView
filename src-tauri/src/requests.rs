@@ -95,11 +95,6 @@ fn validate_identity(target_key: &str, target_kind: &str) -> Result<(), CommandE
 }
 
 fn validate_draft(draft: &RequestDraft) -> Result<(), CommandError> {
-    if draft.note.trim().is_empty() {
-        return Err(invalid_request(
-            "A review request needs a non-empty note.",
-        ));
-    }
     if draft.note.chars().count() > MAX_NOTE_CHARS {
         return Err(invalid_request(format!(
             "The note exceeds {MAX_NOTE_CHARS} characters."
@@ -740,13 +735,9 @@ pub(crate) async fn request_row_by_id(pool: &SqlitePool, id: i64) -> Result<Requ
 }
 
 // The refreshed note on an update shares the create-time note bound, so
-// both caller faces refuse identically.
+// both caller faces refuse identically. A note is optional: an empty ask
+// is a general review request.
 pub(crate) fn validate_request_note(note: &str) -> Result<(), CommandError> {
-    if note.trim().is_empty() {
-        return Err(invalid_request(
-            "A review request needs a non-empty note.",
-        ));
-    }
     if note.chars().count() > MAX_NOTE_CHARS {
         return Err(invalid_request(format!(
             "The note exceeds {MAX_NOTE_CHARS} characters."
@@ -1687,9 +1678,11 @@ mod tests {
             "invalid_request"
         );
 
+        // An empty note is a valid general ask and stores as given.
         let mut empty_note = draft("head-1");
         empty_note.note = "   ".into();
-        assert_eq!(attempt(empty_note).await.unwrap_err().code, "invalid_request");
+        let empty = attempt(empty_note).await.unwrap();
+        assert_eq!(get(&pool, empty).await.note, "   ");
 
         let mut unknown_lens = draft("head-1");
         unknown_lens.lenses = vec!["style".into()];
@@ -2033,7 +2026,7 @@ mod tests {
         seed_repo(&pool, REPO).await;
         let request = create(&pool, &Actor::Human, "head-1").await;
 
-        assert!(validate_request_note("   ").is_err());
+        assert!(validate_request_note("   ").is_ok());
         assert!(validate_request_note(&"a".repeat(MAX_NOTE_CHARS + 1)).is_err());
         assert!(validate_request_note(&"a".repeat(MAX_NOTE_CHARS)).is_ok());
 
