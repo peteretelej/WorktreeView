@@ -399,7 +399,8 @@ The actor rules the tools enforce (the same engine the human app drives):
 
 - `request_review` records your token as the requester and dedups per
   identity: the same head on your open request updates its note and
-  lenses in place; the same head on a `changes_requested` request is
+  lenses in place (an omitted note keeps the stored note); the same head
+  on a `changes_requested` request is
   refused (record a new head and `re_request` instead); the same head on
   an `approved` request returns that row unchanged. A new head on your
   never-claimed request refreshes it in place instead of stacking a

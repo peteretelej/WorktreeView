@@ -856,7 +856,7 @@ async fn request_review(
         .await
         .map_err(|error| error.message)?;
     let draft = RequestDraft {
-        note: args.note.unwrap_or_default(),
+        note: args.note,
         lenses: args.lenses.unwrap_or_default(),
         reviewers: args.reviewers.unwrap_or_default(),
         max_rounds: args.max_rounds,

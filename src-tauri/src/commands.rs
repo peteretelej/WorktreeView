@@ -365,7 +365,9 @@ pub(crate) async fn create_request_as_human(
     notify: &crate::transport::RequestChangeSink,
 ) -> Result<RequestRow, CommandError> {
     let draft = RequestDraft {
-        note,
+        // The form has no "absent" state, so an empty box means the human
+        // expressed no note: it inserts empty and preserves on a refresh.
+        note: if note.trim().is_empty() { None } else { Some(note) },
         lenses: lenses.unwrap_or_default(),
         reviewers: reviewers.unwrap_or_default(),
         max_rounds,
@@ -780,7 +782,7 @@ mod tests {
 
     fn draft(head: &str) -> RequestDraft {
         RequestDraft {
-            note: "Please review my changes.".into(),
+            note: Some("Please review my changes.".into()),
             lenses: Vec::new(),
             reviewers: Vec::new(),
             max_rounds: None,

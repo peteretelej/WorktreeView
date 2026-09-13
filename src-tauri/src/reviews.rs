@@ -2092,7 +2092,7 @@ mod tests {
             .token
             .id;
         let request_draft = crate::requests::RequestDraft {
-            note: "Please review.".into(),
+            note: Some("Please review.".into()),
             lenses: Vec::new(),
             reviewers: Vec::new(),
             max_rounds: None,

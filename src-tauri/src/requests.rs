@@ -57,10 +57,12 @@ pub(crate) struct ReviewRequest {
 }
 
 // The create payload. Strict validation here is the one rule set every
-// caller face shares; Phase 2's MCP schema mirrors it.
+// caller face shares; Phase 2's MCP schema mirrors it. An absent note is
+// a general ask: it inserts empty and preserves the stored note when a
+// create refreshes an existing request.
 #[derive(Debug, Clone)]
 pub(crate) struct RequestDraft {
-    pub(crate) note: String,
+    pub(crate) note: Option<String>,
     pub(crate) lenses: Vec<String>,
     pub(crate) reviewers: Vec<String>,
     pub(crate) max_rounds: Option<i64>,
@@ -95,10 +97,12 @@ fn validate_identity(target_key: &str, target_kind: &str) -> Result<(), CommandE
 }
 
 fn validate_draft(draft: &RequestDraft) -> Result<(), CommandError> {
-    if draft.note.chars().count() > MAX_NOTE_CHARS {
-        return Err(invalid_request(format!(
-            "The note exceeds {MAX_NOTE_CHARS} characters."
-        )));
+    if let Some(note) = &draft.note {
+        if note.chars().count() > MAX_NOTE_CHARS {
+            return Err(invalid_request(format!(
+                "The note exceeds {MAX_NOTE_CHARS} characters."
+            )));
+        }
     }
     if draft.head_sha.trim().is_empty() {
         return Err(invalid_request(
@@ -296,7 +300,7 @@ pub(crate) async fn create_request_in_pool(
         .find(|request| request.status == REQUESTED || request.status == IN_REVIEW)
     {
         sqlx::query(
-            "UPDATE review_requests SET note = ?, lenses = ?, updated_at = ? WHERE id = ?",
+            "UPDATE review_requests SET note = COALESCE(?, note), lenses = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&draft.note)
         .bind(json_array(&draft.lenses)?)
@@ -342,8 +346,10 @@ pub(crate) async fn create_request_in_pool(
         None
     };
     if let Some(existing) = refreshable {
-        sqlx::query("UPDATE review_requests SET note = ?, head_sha = ?, updated_at = ? WHERE id = ?")
-            .bind(&draft.note)
+        sqlx::query(
+            "UPDATE review_requests SET note = COALESCE(?, note), head_sha = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&draft.note)
             .bind(&draft.head_sha)
             .bind(now_millis())
             .bind(existing.id)
@@ -367,7 +373,7 @@ pub(crate) async fn create_request_in_pool(
     .bind(target_kind)
     .bind(requester_token_id)
     .bind(REQUESTED)
-    .bind(&draft.note)
+    .bind(draft.note.as_deref().unwrap_or(""))
     .bind(json_array(&draft.lenses)?)
     .bind(json_array(&draft.reviewers)?)
     .bind(max_rounds)
@@ -1188,7 +1194,7 @@ mod tests {
 
     fn draft(head: &str) -> RequestDraft {
         RequestDraft {
-            note: "Please review my changes.".into(),
+            note: Some("Please review my changes.".into()),
             lenses: Vec::new(),
             reviewers: Vec::new(),
             max_rounds: None,
@@ -1546,7 +1552,7 @@ mod tests {
         // Same head on requested: update note and lenses in place.
         let request = create(&pool, &Actor::Agent(coder), "head-1").await;
         let mut updated = draft("head-1");
-        updated.note = "Updated note.".into();
+        updated.note = Some("Updated note.".into());
         updated.lenses = vec!["correctness".into()];
         let refreshed = create_request_in_pool(
             &pool, REPO, BASE, KEY, KIND, &updated, &Actor::Agent(coder), &noop_notify(),
@@ -1561,7 +1567,7 @@ mod tests {
         // Same head on in_review: the same in-place update.
         claim(&pool, request.id, &Actor::Agent(reviewer)).await;
         let mut in_review_update = draft("head-1");
-        in_review_update.note = "Still waiting.".into();
+        in_review_update.note = Some("Still waiting.".into());
         let refreshed = create_request_in_pool(
             &pool, REPO, BASE, KEY, KIND, &in_review_update, &Actor::Agent(coder), &noop_notify(),
         )
@@ -1618,7 +1624,7 @@ mod tests {
         assert_eq!(never_claimed.status, REQUESTED);
         assert_eq!(never_claimed.round, 0);
         let mut moved = draft("head-6");
-        moved.note = "Rebased.".into();
+        moved.note = Some("Rebased.".into());
         let refreshed = create_request_in_pool(
             &pool, REPO, BASE, KEY, KIND, &moved, &Actor::Agent(coder), &noop_notify(),
         )
@@ -1670,19 +1676,25 @@ mod tests {
 
         // The 2000-character note boundary.
         let mut boundary = draft("head-boundary");
-        boundary.note = "x".repeat(2000);
+        boundary.note = Some("x".repeat(2000));
         assert!(attempt(boundary.clone()).await.is_ok());
-        boundary.note = "x".repeat(2001);
+        boundary.note = Some("x".repeat(2001));
         assert_eq!(
             attempt(boundary).await.unwrap_err().code,
             "invalid_request"
         );
 
-        // An empty note is a valid general ask and stores as given.
+        // An expressed note stores as given, even whitespace-only.
         let mut empty_note = draft("head-1");
-        empty_note.note = "   ".into();
+        empty_note.note = Some("   ".into());
         let empty = attempt(empty_note).await.unwrap();
         assert_eq!(get(&pool, empty).await.note, "   ");
+
+        // An absent note on the same head re-ask preserves the stored note.
+        let mut silent = draft("head-1");
+        silent.note = None;
+        let silent_id = attempt(silent).await.unwrap();
+        assert_eq!(get(&pool, silent_id).await.note, "   ");
 
         let mut unknown_lens = draft("head-1");
         unknown_lens.lenses = vec!["style".into()];
@@ -2064,7 +2076,7 @@ mod tests {
 
         // Same-head dedup update: one more fire.
         let mut updated = draft("head-1");
-        updated.note = "Updated.".into();
+        updated.note = Some("Updated.".into());
         create_request_in_pool(
             &pool, REPO, BASE, KEY, KIND, &updated, &Actor::Agent(coder), &notify,
         )
