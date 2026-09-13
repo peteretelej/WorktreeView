@@ -999,16 +999,26 @@ pub(crate) async fn ingest_submission_in_pool(
         .findings
         .iter()
         .any(|finding| crate::requests::is_blocking_severity(&finding.priority));
-    crate::requests::observe_submission_in_pool(
+    // Storage committed, so the client contract is fulfilled: observation
+    // is the request side effect, and failing the call now would answer an
+    // error for a stored submission, inviting a retry that duplicates it.
+    if let Err(error) = crate::requests::observe_submission_in_pool(
         pool,
         repo_path,
         base_sha,
         target_key,
         target_kind,
         blocking,
+        author_token_id,
         request_changes,
     )
-    .await?;
+    .await
+    {
+        log::warn!(
+            "submission {submission_id} stored but request observation failed: {}",
+            error.message
+        );
+    }
     Ok(submission_id)
 }
 

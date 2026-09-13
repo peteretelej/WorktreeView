@@ -252,6 +252,26 @@ async fn set_status(pool: &SqlitePool, id: i64, status: &str) -> Result<(), sqlx
     Ok(())
 }
 
+// A transition whose status precondition rides the UPDATE: two racing
+// writers cannot both apply, and the loser sees zero rows instead of
+// silently overwriting the winner.
+async fn set_status_guarded(
+    pool: &SqlitePool,
+    id: i64,
+    expected: &str,
+    status: &str,
+) -> Result<bool, sqlx::Error> {
+    let result =
+        sqlx::query("UPDATE review_requests SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+            .bind(status)
+            .bind(now_millis())
+            .bind(id)
+            .bind(expected)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 fn requester_key(actor: &Actor) -> Option<i64> {
     match actor {
         Actor::Human => None,
@@ -299,11 +319,18 @@ pub(crate) async fn create_request_in_pool(
         .iter()
         .find(|request| request.status == REQUESTED || request.status == IN_REVIEW)
     {
+        // A re-ask restates the ask; a field the caller omitted (empty
+        // note, empty arrays, absent budget) keeps its stored value.
         sqlx::query(
-            "UPDATE review_requests SET note = COALESCE(?, note), lenses = ?, updated_at = ? WHERE id = ?",
+            "UPDATE review_requests SET note = COALESCE(?, note), \
+             lenses = COALESCE(NULLIF(?, '[]'), lenses), \
+             reviewers = COALESCE(NULLIF(?, '[]'), reviewers), \
+             max_rounds = COALESCE(?, max_rounds), updated_at = ? WHERE id = ?",
         )
         .bind(&draft.note)
         .bind(json_array(&draft.lenses)?)
+        .bind(json_array(&draft.reviewers)?)
+        .bind(draft.max_rounds)
         .bind(now_millis())
         .bind(existing.id)
         .execute(pool)
@@ -346,15 +373,23 @@ pub(crate) async fn create_request_in_pool(
         None
     };
     if let Some(existing) = refreshable {
+        // Same omission rule as the same-head refresh: omitted fields keep
+        // their stored values; the head always moves.
         sqlx::query(
-            "UPDATE review_requests SET note = COALESCE(?, note), head_sha = ?, updated_at = ? WHERE id = ?",
+            "UPDATE review_requests SET note = COALESCE(?, note), head_sha = ?, \
+             lenses = COALESCE(NULLIF(?, '[]'), lenses), \
+             reviewers = COALESCE(NULLIF(?, '[]'), reviewers), \
+             max_rounds = COALESCE(?, max_rounds), updated_at = ? WHERE id = ?",
         )
         .bind(&draft.note)
-            .bind(&draft.head_sha)
-            .bind(now_millis())
-            .bind(existing.id)
-            .execute(pool)
-            .await?;
+        .bind(&draft.head_sha)
+        .bind(json_array(&draft.lenses)?)
+        .bind(json_array(&draft.reviewers)?)
+        .bind(draft.max_rounds)
+        .bind(now_millis())
+        .bind(existing.id)
+        .execute(pool)
+        .await?;
         let updated = require_request(pool, existing.id).await?;
         fire_change(notify, &updated);
         return Ok(updated);
@@ -424,7 +459,9 @@ pub(crate) async fn claim_request_in_pool(
             )));
         }
     }
-    set_status(pool, request.id, IN_REVIEW).await?;
+    if !set_status_guarded(pool, request.id, REQUESTED, IN_REVIEW).await? {
+        return Err(invalid_transition("Only a requested review can be claimed."));
+    }
     let claimed = require_request(pool, request.id).await?;
     fire_change(notify, &claimed);
     Ok(claimed)
@@ -433,7 +470,8 @@ pub(crate) async fn claim_request_in_pool(
 // Explicit verdicts close a round and are valid only from in review, for
 // any agent token or the human. There is no approved -> changes_requested
 // edge: within a round the first blocking verdict wins, so a verdict after
-// approved starts nothing.
+// approved starts nothing. The status precondition rides the UPDATE, so
+// two racing writers cannot both apply.
 pub(crate) async fn set_request_verdict_in_pool(
     pool: &SqlitePool,
     request_id: i64,
@@ -450,7 +488,11 @@ pub(crate) async fn set_request_verdict_in_pool(
         )));
     }
     let status = if approve { APPROVED } else { CHANGES_REQUESTED };
-    set_status(pool, request.id, status).await?;
+    if !set_status_guarded(pool, request.id, IN_REVIEW, status).await? {
+        return Err(invalid_transition(
+            "The review already reached a verdict in this round.",
+        ));
+    }
     let updated = require_request(pool, request.id).await?;
     fire_change(notify, &updated);
     Ok(updated)
@@ -488,16 +530,21 @@ pub(crate) async fn withdraw_request_in_pool(
 // The requester's reset, the only edge out of changes_requested: the round
 // increments and the new head must differ from the one that received the
 // changes. A refused re-request past the budget leaves the row untouched;
-// needs-human is then changes_requested with round >= max_rounds.
+// needs-human is then changes_requested with round >= max_rounds. An
+// expressed note rides the same UPDATE; an absent note keeps the stored one.
 pub(crate) async fn re_request_in_pool(
     pool: &SqlitePool,
     request_id: i64,
     head_sha: &str,
+    note: Option<&str>,
     actor: &Actor,
     notify: &RequestChangeSink,
 ) -> Result<ReviewRequest, CommandError> {
     if head_sha.trim().is_empty() {
         return Err(invalid_request("A re-request needs a non-empty head."));
+    }
+    if let Some(note) = note {
+        validate_request_note(note)?;
     }
     let request = require_request(pool, request_id).await?;
     if request.status != CHANGES_REQUESTED {
@@ -528,16 +575,24 @@ pub(crate) async fn re_request_in_pool(
             "A re-request needs a head different from the one that received the changes.",
         ));
     }
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE review_requests \
-         SET status = ?, round = round + 1, head_sha = ?, updated_at = ? WHERE id = ?",
+         SET status = ?, round = round + 1, head_sha = ?, note = COALESCE(?, note), updated_at = ? \
+         WHERE id = ? AND status = ?",
     )
     .bind(IN_REVIEW)
     .bind(head_sha)
+    .bind(note)
     .bind(now_millis())
     .bind(request.id)
+    .bind(CHANGES_REQUESTED)
     .execute(pool)
     .await?;
+    if result.rows_affected() == 0 {
+        return Err(invalid_transition(
+            "Only a review with requested changes can be re-requested.",
+        ));
+    }
     let updated = require_request(pool, request.id).await?;
     fire_change(notify, &updated);
     Ok(updated)
@@ -549,7 +604,8 @@ pub(crate) async fn re_request_in_pool(
 // claimed first (round unchanged), then the submission's verdict applies:
 // blocking sets changes_requested, clean approves a request now in review.
 // Submissions on changes_requested, approved, or withdrawn requests change
-// no status, so those requests are not in the open set at all.
+// no status, so those requests are not in the open set at all. The
+// submitter's own requests are skipped: a verdict needs a second party.
 pub(crate) async fn observe_submission_in_pool(
     pool: &SqlitePool,
     repo_path: &str,
@@ -557,6 +613,7 @@ pub(crate) async fn observe_submission_in_pool(
     target_key: &str,
     target_kind: &str,
     blocking: bool,
+    submitter_token_id: Option<i64>,
     notify: &RequestChangeSink,
 ) -> Result<(), CommandError> {
     let open: Vec<ReviewRequest> = sqlx::query(REQUEST_OPEN_ON_IDENTITY)
@@ -571,7 +628,16 @@ pub(crate) async fn observe_submission_in_pool(
         .collect::<Result<Vec<_>, _>>()?;
     let status = if blocking { CHANGES_REQUESTED } else { APPROVED };
     for mut request in open {
-        set_status(pool, request.id, status).await?;
+        if let Some(submitter) = submitter_token_id {
+            if request.requester_token_id == Some(submitter) {
+                continue;
+            }
+        }
+        // A lost race means another writer advanced the request first;
+        // first-writer-wins is the sticky-verdict rule, not a failure.
+        if !set_status_guarded(pool, request.id, &request.status, status).await? {
+            continue;
+        }
         request.status = status.to_string();
         fire_change(notify, &request);
     }
@@ -1249,13 +1315,13 @@ mod tests {
         head: &str,
         actor: &Actor,
     ) -> ReviewRequest {
-        re_request_in_pool(pool, request_id, head, actor, &noop_notify())
+        re_request_in_pool(pool, request_id, head, None, actor, &noop_notify())
             .await
             .unwrap()
     }
 
     async fn observe(pool: &SqlitePool, blocking: bool) {
-        observe_submission_in_pool(pool, REPO, BASE, KEY, KIND, blocking, &noop_notify())
+        observe_submission_in_pool(pool, REPO, BASE, KEY, KIND, blocking, None, &noop_notify())
             .await
             .unwrap()
     }
@@ -1431,6 +1497,7 @@ mod tests {
             &pool,
             gated.id,
             "head-9",
+            None,
             &Actor::Agent(outsider),
             &noop_notify(),
         )
@@ -1441,6 +1508,7 @@ mod tests {
             &pool,
             gated.id,
             "head-9",
+            None,
             &Actor::Agent(outsider),
             &noop_notify(),
         )
@@ -1471,7 +1539,7 @@ mod tests {
             set_request_verdict_in_pool(&pool, withdrawn.id, false, &Actor::Human, &noop_notify())
                 .await,
             withdraw_request_in_pool(&pool, withdrawn.id, &Actor::Human, &noop_notify()).await,
-            re_request_in_pool(&pool, withdrawn.id, "head-11", &Actor::Human, &noop_notify()).await,
+            re_request_in_pool(&pool, withdrawn.id, "head-11", None, &Actor::Human, &noop_notify()).await,
         ] {
             assert_eq!(attempt.unwrap_err().code, "invalid_transition");
         }
@@ -1791,6 +1859,7 @@ mod tests {
             &pool,
             request.id,
             "head-4",
+            None,
             &Actor::Agent(coder),
             &noop_notify(),
         )
@@ -1819,6 +1888,7 @@ mod tests {
             &pool,
             tight.id,
             "head-tight-3",
+            None,
             &Actor::Agent(coder),
             &noop_notify(),
         )
@@ -1851,6 +1921,7 @@ mod tests {
             &pool,
             wide.id,
             "head-wide-4",
+            None,
             &Actor::Agent(coder),
             &noop_notify(),
         )
@@ -1873,7 +1944,7 @@ mod tests {
         // A blocking submission advances both concurrent open requests,
         // one fire each.
         let (notify, fires) = recording_notify();
-        observe_submission_in_pool(&pool, REPO, BASE, KEY, KIND, true, &notify)
+        observe_submission_in_pool(&pool, REPO, BASE, KEY, KIND, true, None, &notify)
             .await
             .unwrap();
         assert_eq!(fires.lock().unwrap().len(), 2);
@@ -1884,7 +1955,7 @@ mod tests {
         // while beta keeps its sticky changes_requested.
         re_request(&pool, alpha.id, "head-3", &Actor::Agent(first)).await;
         let (notify, fires) = recording_notify();
-        observe_submission_in_pool(&pool, REPO, BASE, KEY, KIND, false, &notify)
+        observe_submission_in_pool(&pool, REPO, BASE, KEY, KIND, false, None, &notify)
             .await
             .unwrap();
         assert_eq!(fires.lock().unwrap().len(), 1);
@@ -1894,7 +1965,7 @@ mod tests {
 
         // Submissions on terminal requests change no status.
         let (notify, fires) = recording_notify();
-        observe_submission_in_pool(&pool, REPO, BASE, KEY, KIND, true, &notify)
+        observe_submission_in_pool(&pool, REPO, BASE, KEY, KIND, true, None, &notify)
             .await
             .unwrap();
         assert!(fires.lock().unwrap().is_empty());
@@ -1903,7 +1974,7 @@ mod tests {
 
         // An identity without requests observes as a no-op.
         let (notify, fires) = recording_notify();
-        observe_submission_in_pool(&pool, REPO, "other-base", KEY, KIND, true, &notify)
+        observe_submission_in_pool(&pool, REPO, "other-base", KEY, KIND, true, None, &notify)
             .await
             .unwrap();
         assert!(fires.lock().unwrap().is_empty());
@@ -1919,6 +1990,29 @@ mod tests {
         let approved = get(&pool, request.id).await;
         assert_eq!(approved.status, APPROVED);
         assert_eq!(approved.round, 0, "the implicit claim never bumps the round");
+    }
+
+    #[tokio::test]
+    async fn the_requesters_own_submission_never_settles_their_request() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+        let request = create(&pool, &Actor::Agent(coder), "head-1").await;
+
+        let (notify, fires) = recording_notify();
+        observe_submission_in_pool(&pool, REPO, BASE, KEY, KIND, false, Some(coder), &notify)
+            .await
+            .unwrap();
+        assert!(fires.lock().unwrap().is_empty());
+        assert_eq!(get(&pool, request.id).await.status, REQUESTED);
+
+        // A second party's clean submission still approves it.
+        let reviewer = agent_token(&pool, "reviewer-bot").await;
+        observe_submission_in_pool(&pool, REPO, BASE, KEY, KIND, false, Some(reviewer), &notify)
+            .await
+            .unwrap();
+        assert_eq!(get(&pool, request.id).await.status, APPROVED);
+        assert_eq!(fires.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -2097,7 +2191,7 @@ mod tests {
         assert_eq!(fires.lock().unwrap().len(), 4);
         assert_eq!(fires.lock().unwrap()[3].status, CHANGES_REQUESTED);
 
-        re_request_in_pool(&pool, request.id, "head-2", &Actor::Agent(coder), &notify)
+        re_request_in_pool(&pool, request.id, "head-2", None, &Actor::Agent(coder), &notify)
             .await
             .unwrap();
         assert_eq!(fires.lock().unwrap().len(), 5);
@@ -2118,7 +2212,7 @@ mod tests {
         assert_eq!(fires.lock().unwrap().len(), 6, "a satisfied ask is not a mutation");
 
         // Terminal requests never fire.
-        observe_submission_in_pool(&pool, REPO, BASE, KEY, KIND, false, &notify)
+        observe_submission_in_pool(&pool, REPO, BASE, KEY, KIND, false, None, &notify)
             .await
             .unwrap();
         assert_eq!(fires.lock().unwrap().len(), 6);
@@ -2179,7 +2273,7 @@ mod tests {
     }
 
     async fn observe_on(pool: &SqlitePool, base: &str, blocking: bool) {
-        observe_submission_in_pool(pool, REPO, base, KEY, KIND, blocking, &noop_notify())
+        observe_submission_in_pool(pool, REPO, base, KEY, KIND, blocking, None, &noop_notify())
             .await
             .unwrap()
     }
