@@ -7,8 +7,17 @@ consent, so third-party code only enters under Apache-2.0 terms.
 
 - GitHub Releases: the primary distribution channel once the first version
   is tagged.
-- Microsoft Store: planned. The README carries a placeholder to replace
-  with the listing link at submission time.
+- Microsoft Store: packaged MSIX submissions through Partner Center
+  (product `9PM1BN0JZDB3`, reserved as an "MSIX or PWA app", so the Store
+  hosts and signs the package). `npm run package:store` builds the app and
+  produces the unsigned upload MSIX. For a local test build, generate the
+  dev certificate once (`winapp cert generate --manifest
+  packaging/msix/Package.appxmanifest --output devcert.pfx`, then
+  `winapp cert install devcert.pfx` from an elevated shell) and run
+  `npm run package:store -- --cert devcert.pfx`. The manifest in
+  `packaging/msix/` carries the identity Partner Center assigned and must
+  match it verbatim. The README carries a placeholder to replace with the
+  listing link at submission time.
 - npm: the `worktreeview` package name and org are claimed. The published
   v0.0.1 exists to hold the name (prerelease tag; see
   `npm/worktreeview/PUBLISHING.md`) and is not the desktop app. Tauri

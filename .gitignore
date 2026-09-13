@@ -26,3 +26,6 @@ artifacts/tauri-e2e/
 
 # throwaway desktop-e2e fixture repos
 .e2e-fixture/
+
+# local MSIX signing certificates (never committed)
+devcert.pfx

@@ -28,6 +28,7 @@
     "check": "tsc --noEmit && tsc -p tsconfig.node.json",
     "preview": "vite preview",
     "set-version": "node scripts/set-version.mjs",
+    "package:store": "node scripts/package-store.mjs",
     "tauri": "tauri",
     "test:desktop": "bash scripts/test-desktop.sh",
     "test:unit": "node --test src/navigation.test.ts src/fileTree.test.ts src/reviewPresets.test.ts src/surfaces.test.ts src/requests.test.ts src/diff.test.ts src/stream.test.ts src/zoom.test.ts src/highlight.test.ts src/comments.test.ts src/markdown.test.ts src/markdownEdit.test.ts src/canvas.test.ts"

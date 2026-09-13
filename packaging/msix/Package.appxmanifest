@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Microsoft Store package manifest. Identity, publisher, and display
+  publisher are the values Partner Center assigned the reserved product
+  (Store ID 9PM1BN0JZDB3) and must match it verbatim. Version is
+  substituted by scripts/package-store.mjs from package.json; the value
+  here is a placeholder that never ships.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
+  <Identity
+    Name="PeterEtelej.WorktreeView"
+    Publisher="CN=87AFADE7-3FB2-497A-A3A6-EC5BCB0AEC41"
+    Version="0.0.0.0"
+    ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>WorktreeView</DisplayName>
+    <PublisherDisplayName>Peter Etelej</PublisherDisplayName>
+    <Logo>assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26200.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Applications>
+    <Application
+      Id="App"
+      Executable="worktreeview.exe"
+      EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="WorktreeView"
+        Description="A local review inbox for Git worktrees, branches, and commits where humans and AI coding agents review together."
+        BackgroundColor="transparent"
+        Square150x150Logo="assets\Square150x150Logo.png"
+        Square44x44Logo="assets\Square44x44Logo.png" />
+    </Application>
+  </Applications>
+  <Capabilities>
+    <!-- Full trust: the app spawns the native Git CLI and serves a
+         loopback endpoint for agents. -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>
