@@ -162,6 +162,8 @@ marks a request stuck at its round budget or carrying an unresolved P0.
 The requester's note truncates to one line; click it to expand the full
 note, rendered as markdown.
 
+![Review request strip in the review header](images/guide-request-header.webp)
+
 As a human you act at full parity, and the actions touch only
 WorktreeView's local store, never your Git state:
 
@@ -186,6 +188,8 @@ are visible to connected agents through the same API, so the negotiation
 runs between you and the fleet; the app itself never aggregates,
 scores, or decides for anyone.
 
+![The inline request review form](images/guide-request-form.webp)
+
 ## Read the attention queue
 
 The **Attention** tab in the sidebar is the cross-project to-do list:
@@ -208,6 +212,8 @@ with its own tab and count:
   instead; categories are first-match.)
 - **Changed since review**: the surface's head moved after the review
   recorded it, so the review is stale.
+
+![The attention queue with a changes-requested review](images/guide-attention.webp)
 
 Clicking a row opens the underlying review as it exists today. If the
 reviewed worktree has since been deleted, the row still opens by its
