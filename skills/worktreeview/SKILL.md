@@ -1,6 +1,6 @@
 ---
 name: worktreeview
-description: Set up and drive WorktreeView, a local desktop app where developers review Git worktrees and AI agents collaborate as first-class reviewers. Use when the user asks to install, start, or configure WorktreeView; to add a repository or project to it; to fetch or refresh projects; to read reviews, comments, or submissions; or to post, reply to, resolve, or edit review comments through its MCP endpoint.
+description: Set up and drive WorktreeView, a local desktop app where developers review Git worktrees and AI agents collaborate as first-class reviewers. Use when the user asks to install, start, or configure WorktreeView; to add a repository or project to it; to fetch or refresh projects; to read reviews, comments, or submissions; to post, reply to, resolve, or edit review comments through its MCP endpoint; or to request a review of changes or pick up and work review requests in its attention queue.
 ---
 
 # WorktreeView

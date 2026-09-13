@@ -14,8 +14,9 @@ reviewed:
 - `repo_path`, `base_sha`, `target_key`, `target_kind`: the review
   identity (from `list_repos` / `list_review_targets`; worktree reviews
   use the worktree path as `target_key` with `target_kind` `worktree`).
-- `note` (required): what changed, why, and what kind of review you need.
-  Max 2000 characters.
+- `note` (optional, recommended): what changed, why, and what kind of
+  review you need. Max 2000 characters; an empty request is a general
+  "please review this" ask.
 - `head_sha` (required): the exact head you want reviewed. Record it from
   your own worktree (`git rev-parse HEAD`), never from memory; the review
   keys on it and every re-request must differ from it.

@@ -196,14 +196,16 @@ with its own tab and count:
 - **Review requested**: a review was asked for (by you or an agent) and
   no one has picked it up yet.
 - **Changes requested**: a reviewer sent the work back; the requester
-  owes fixes. The round column shows how many fix cycles remain
-  (`n/max`).
+  owes fixes. The round column shows the current round of the budget
+  (`n/max`), not cycles remaining.
 - **Needs human**: the round budget ran out with changes still
   requested, or a P0 finding sits unresolved on a requested or in-review
   review. This is the queue's one alarm color.
-- **Unresolved findings**: a review carries unresolved P0 or P1
-  comments, whether or not a request is still open, so late findings on
-  approved work stay visible.
+- **Unresolved findings**: an in-review request carries unresolved P1
+  comments, or settled work and request-less surfaces carry unresolved
+  P0 or P1, so late findings on approved work stay visible. (A P1 on a
+  requested or changes-requested review shows under those categories
+  instead; categories are first-match.)
 - **Changed since review**: the surface's head moved after the review
   recorded it, so the review is stale.
 

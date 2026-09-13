@@ -78,11 +78,15 @@ normalized domain data through narrow, typed Tauri commands.
   human actor performs any reviewer transition, never gated by a request's
   named reviewers list), same-requester dedup on (identity, requester,
   head), and the round budget whose exhaustion leaves the request for the
-  human. The P0/P1 blocking definition lives once here: the submission
-  ingest computes its observation flag from it, and the attention queries
-  reference it when they build their severity predicates. A submission
-  observed through the ingest implicitly claims open requests on the
-  identity and applies the verdict; mutations announce through the
+  human. The P0/P1 blocking definition lives once here as a constant: the
+  submission ingest computes its observation flag from it, while the
+  attention and triage queries restate `P0`/`P1` inline in SQL (same
+  vocabulary, two spellings). A submission observed through the ingest
+  implicitly claims open requests on the identity and applies the
+  verdict, except the requester's own submissions, which never settle
+  their own request; a submitter's token id gates that check. Status
+  transitions carry their status precondition in the UPDATE, so racing
+  writers resolve first-writer-wins. Mutations announce through the
   injected `RequestChangeSink` exactly once per successful mutation.
 - `transport.rs`: the agent endpoint, the app's one inbound network
   surface. A `TcpListener` binds the address and port configured in
