@@ -21,6 +21,7 @@ export type CommitDetail = { sha: string; author: string; date: string; subject:
 export type AppLocation =
   | { kind: "inbox" }
   | { kind: "settings" }
+  | { kind: "attention" }
   | { kind: "review"; identity: ReviewIdentity; selectedFile: ChangedFile | null }
   | { kind: "commit-history"; repoPath: string; startPointLabel: string; startRef: string | null; worktreePath: string | null; selectedCommit: CommitInfo | null; selectedFile: ChangedFile | null };
 
