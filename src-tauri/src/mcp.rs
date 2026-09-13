@@ -2124,7 +2124,7 @@ mod tests {
         let pool = test_pool().await;
         seed_repo(&pool, "/demo").await;
         let (state, secret) = test_state(pool.clone()).await;
-        create_agent_token_in_pool(&pool, "reviewer-bot").await.unwrap();
+        let reviewer = create_agent_token_in_pool(&pool, "reviewer-bot").await.unwrap();
         let args = json!({
             "repo_path": "/demo",
             "base_sha": "base",
@@ -2223,7 +2223,6 @@ mod tests {
         // new head and re_request is the way forward. The new head lands
         // on the never-claimed row (refreshed in place, named list
         // intact), so reviewer-bot is the one who can claim it.
-        let reviewer = create_agent_token_in_pool(&pool, "reviewer-bot").await.unwrap();
         let second = seed_request(&state, &secret, "/demo", "head-2").await;
         let second_id = second["id"].as_i64().unwrap();
         assert_eq!(second_id, id, "a new head refreshes the open pickup");
