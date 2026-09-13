@@ -340,7 +340,7 @@ pub(crate) async fn list_attention(
 
 // Who performs a human request update; a snake_case string on the wire,
 // typed routing below.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RequestAction {
     Approve,
@@ -364,6 +364,16 @@ pub(crate) async fn create_request_as_human(
     head_sha: String,
     notify: &crate::transport::RequestChangeSink,
 ) -> Result<RequestRow, CommandError> {
+    // Same open-repo gate as the agent face: without it a stale or wrong
+    // path surfaces as a raw foreign-key error from the INSERT.
+    let open: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM repos WHERE path = ?").bind(repo_path).fetch_optional(pool).await?;
+    if open.is_none() {
+        return Err(CommandError::new(
+            "invalid_request",
+            "No repository with that path is open in WorktreeView.",
+        ));
+    }
     let draft = RequestDraft {
         // The form has no "absent" state, so an empty box means the human
         // expressed no note: it inserts empty and preserves on a refresh.
@@ -420,13 +430,16 @@ pub(crate) async fn update_request_in_pool(
         }
         RequestAction::ReRequest => {
             // An absent head runs into the engine's non-empty check, so
-            // the requirement's message lives in one place.
+            // the requirement's message lives in one place. The note rides
+            // the same guarded UPDATE; an absent note keeps the stored one.
             let head = head_sha.as_deref().unwrap_or("");
-            re_request_in_pool(pool, id, head, &actor, notify).await?;
+            re_request_in_pool(pool, id, head, note.as_deref(), &actor, notify).await?;
         }
     }
-    if let Some(note) = &note {
-        refresh_request_note(pool, id, note).await?;
+    if action != RequestAction::ReRequest {
+        if let Some(note) = &note {
+            refresh_request_note(pool, id, note).await?;
+        }
     }
     request_row_by_id(pool, id).await
 }

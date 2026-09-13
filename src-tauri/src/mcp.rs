@@ -548,7 +548,7 @@ fn tool_descriptors() -> Value {
         ),
         tool(
             "request_review",
-            "Ask the fleet to review one review identity at a recorded head; your token becomes the requester. The same identity and head on your open request updates it in place instead of stacking duplicate pickups.",
+            "Ask the fleet to review one review identity at a recorded head; your token becomes the requester. The same identity and head on your open request updates it in place instead of stacking duplicate pickups, and optional fields you omit keep their stored values.",
             schema(
                 json!({
                     "repo_path": path_arg("Exact repository path as listed by list_repos."),
@@ -808,43 +808,21 @@ fn request_row_value(request: &ReviewRequest, requester: &str) -> Value {
 
 // The requester display: the token's name, or human for human-keyed rows
 // (a deleted requester token also lands here, since the store nulls the
-// key and the row keeps behaving as human-keyed).
-async fn requester_display(pool: &sqlx::SqlitePool, request: &ReviewRequest) -> String {
+// key and the row keeps behaving as human-keyed). A store failure is an
+// error, not a silent "human": attribution is fleet-visible.
+async fn requester_display(
+    pool: &sqlx::SqlitePool,
+    request: &ReviewRequest,
+) -> Result<String, String> {
     let name: Option<String> = match request.requester_token_id {
         None => None,
         Some(token_id) => sqlx::query_scalar("SELECT name FROM agent_tokens WHERE id = ?")
             .bind(token_id)
             .fetch_optional(pool)
             .await
-            .unwrap_or(None),
+            .map_err(|error| format!("The requester could not be read: {error}"))?,
     };
-    name.unwrap_or_else(|| "human".to_string())
-}
-
-// The refreshed note rides the re-request transition: the tool applies the
-// engine's create-time note bound so both entry points refuse identically,
-// and writes only the note column (lifecycle statuses stay engine-owned).
-const MAX_REQUEST_NOTE_CHARS: usize = 2000;
-
-fn validate_request_note(note: &str) -> Result<(), String> {
-    if note.chars().count() > MAX_REQUEST_NOTE_CHARS {
-        return Err(format!(
-            "The note exceeds {MAX_REQUEST_NOTE_CHARS} characters."
-        ));
-    }
-    Ok(())
-}
-
-async fn refresh_request_note(pool: &sqlx::SqlitePool, id: i64, note: &str) -> Result<i64, String> {
-    let now = now_millis();
-    sqlx::query("UPDATE review_requests SET note = ?, updated_at = ? WHERE id = ?")
-        .bind(note)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
-        .await
-        .map(|_| now)
-        .map_err(|error| format!("The note could not be stored: {error}"))
+    Ok(name.unwrap_or_else(|| "human".to_string()))
 }
 
 async fn request_review(
@@ -874,7 +852,7 @@ async fn request_review(
     )
     .await
     .map_err(|error| error.message)?;
-    let requester = requester_display(&state.pool, &request).await;
+    let requester = requester_display(&state.pool, &request).await?;
     payload(request_row_value(&request, &requester))
 }
 
@@ -969,7 +947,7 @@ async fn update_review_request(
         }
     }
     if let Some(note) = &args.note {
-        validate_request_note(note)?;
+        crate::requests::validate_request_note(note).map_err(|error| error.message)?;
     }
     let request = match args.action {
         UpdateRequestAction::Claim => {
@@ -994,20 +972,22 @@ async fn update_review_request(
         }
         UpdateRequestAction::ReRequest => {
             // An absent head runs into the engine's non-empty check, so
-            // the requirement's message lives in one place.
+            // the requirement's message lives in one place. The note rides
+            // the same guarded UPDATE; an absent note keeps the stored one.
             let head = args.head_sha.as_deref().unwrap_or("");
-            let mut request =
-                re_request_in_pool(&state.pool, args.id, head, &actor, &state.request_changes)
-                    .await
-                    .map_err(|error| error.message)?;
-            if let Some(note) = &args.note {
-                request.updated_at = refresh_request_note(&state.pool, args.id, note).await?;
-                request.note = note.clone();
-            }
-            request
+            re_request_in_pool(
+                &state.pool,
+                args.id,
+                head,
+                args.note.as_deref(),
+                &actor,
+                &state.request_changes,
+            )
+            .await
+            .map_err(|error| error.message)?
         }
     };
-    let requester = requester_display(&state.pool, &request).await;
+    let requester = requester_display(&state.pool, &request).await?;
     payload(request_row_value(&request, &requester))
 }
 
