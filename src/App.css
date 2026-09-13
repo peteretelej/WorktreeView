@@ -849,6 +849,9 @@ h2 {
   color: var(--danger);
 }
 
+/* Narrow mode drops the Age column: the header carries the same class as
+   the rows so both grids switch to the six-column template together. */
+.attention-narrow .table-header.attention-head,
 .attention-narrow .attention-row {
   grid-template-columns: minmax(90px, 150px) minmax(120px, 1fr) minmax(80px, 120px) 100px 48px 40px;
 }

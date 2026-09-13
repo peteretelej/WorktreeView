@@ -918,7 +918,9 @@ function App() {
         return;
       }
     }
-    const head = row.head_sha ?? row.target_key;
+    // A worktree row without a live worktree falls back to its recorded
+    // head; with none recorded there is nothing reviewable to open.
+    const head = row.head_sha ?? (row.target_kind === "head" ? row.target_key : null);
     if (head) void openReview({ kind: "commit", sha: head, parents: [], defaultBaseAncestor: false }, row.repo_path, { base: row.base_sha });
   }
   // Activating an arrival opens the review the submission targeted: the
@@ -1155,7 +1157,7 @@ function AttentionQueueView({ queue, endpointEnabled, tab, onTab, onOpenRow }: {
     {!endpointEnabled && <p className="attention-endpoint-note">The agent endpoint is off, so agents cannot reach this queue. Reviews already delivered still appear.</p>}
     <div className="overview-tabs" role="tablist" aria-label="Attention categories">{ATTENTION_TABS.map((item) => <button key={item.id} role="tab" type="button" aria-selected={tab === item.id} className={`overview-tab ${tab === item.id ? "active" : ""}`} onClick={() => onTab(item.id)}>{item.label}<span className="tab-count">{counts[item.id]}</span></button>)}</div>
     {rows.length === 0 ? <Empty icon={<Inbox size={24} />} title="Nothing needs attention" detail="Review requests and findings land here as agents work." /> : <>
-      <div className="table-header attention-head" aria-hidden="true"><span>Project</span><span>Change</span><span>Requester</span><span>Status</span><span>Round</span><span>Findings</span>{!narrow && <span>Age</span>}</div>
+      <div className={`table-header attention-head ${narrow ? "attention-narrow" : ""}`} aria-hidden="true"><span>Project</span><span>Change</span><span>Requester</span><span>Status</span><span>Round</span><span>Findings</span>{!narrow && <span>Age</span>}</div>
       <div className={`worktree-list attention-list ${narrow ? "attention-narrow" : ""}`}>{visible.map((row) => {
         const status = attentionStatus(row);
         const openRow = () => onOpenRow(row);
@@ -1297,8 +1299,10 @@ function ReviewRequestBar({ identityKey, headSha }: { identityKey: ReviewKey; he
     try {
       const updated = await invoke<ReviewRequestRow>("update_review_request", { id: row.id, action, note: note.trim() || null, headSha: action === "re_request" ? headSha : null });
       setRows((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      return true;
     } catch (caught) {
       setError(errorMessage(caught));
+      return false;
     }
   }
   function absorbCreated(created: ReviewRequestRow) {
@@ -1320,7 +1324,7 @@ function ReviewRequestBar({ identityKey, headSha }: { identityKey: ReviewKey; he
   </div>;
 }
 
-function RequestRowView({ row, headSha, onAction }: { row: ReviewRequestRow; headSha: string; onAction: (row: ReviewRequestRow, action: RequestAction, note: string) => void }) {
+function RequestRowView({ row, headSha, onAction }: { row: ReviewRequestRow; headSha: string; onAction: (row: ReviewRequestRow, action: RequestAction, note: string) => Promise<boolean> }) {
   const [note, setNote] = useState("");
   const [armed, setArmed] = useState(false);
   const [noteOpen, setNoteOpen] = useState(false);
@@ -1336,8 +1340,9 @@ function RequestRowView({ row, headSha, onAction }: { row: ReviewRequestRow; hea
     window.setTimeout(() => setArmed((current) => (current ? false : current)), 4000);
   }
   function act(action: RequestAction) {
-    void onAction(row, action, note);
-    setNote("");
+    // A refused action keeps the typed note so it can be corrected and
+    // retried instead of retyped.
+    void onAction(row, action, note).then((done) => { if (done) setNote(""); });
   }
   return <div className="request-row">
     <div className="request-chips">
@@ -1350,7 +1355,7 @@ function RequestRowView({ row, headSha, onAction }: { row: ReviewRequestRow; hea
     </div>
     {row.note && noteOpen && <div className="request-note-detail" id={`request-note-detail-${row.id}`}><CommentBody text={row.note} /></div>}
     {actionable && <div className="request-actions">
-      <input className="request-note-input" type="text" aria-label={`Optional note for the ${requestStatusLabel(row.status)} request`} placeholder="Optional note" maxLength={REQUEST_NOTE_LIMIT} value={note} onChange={(event) => setNote(event.currentTarget.value)} />
+      <input className="request-note-input" type="text" aria-label={`Optional note for the ${requestStatusLabel(row.status)} request`} placeholder="Optional note" maxLength={REQUEST_NOTE_LIMIT} value={note} onChange={(event) => setNote(event.currentTarget.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && (event.key === "k" || event.key === "b")) event.stopPropagation(); }} />
       {canVerdict(row.status) && <button className="request-action" type="button" onClick={() => act("approve")}>Approve</button>}
       {canVerdict(row.status) && <button className="request-action" type="button" onClick={() => act("request_changes")}>Request changes</button>}
       {canReRequest(row) && <button className="request-action" type="button" disabled={!headSha} title={headSha ? "Re-request with the displayed head" : "The displayed head is unavailable"} onClick={() => act("re_request")}>Re-request</button>}
@@ -1393,7 +1398,7 @@ function RequestForm({ identityKey, headSha, onCreated }: { identityKey: ReviewK
   }
   return <form className="request-form" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     <div className="request-form-head"><strong>Request review</strong><span>{headSha ? <>The displayed head <code title={headSha}>{shortToken(headSha)}</code> is recorded, exactly as an agent records its own.</> : "The displayed head is unavailable, so a request cannot be recorded."}</span></div>
-    <textarea className="request-form-note" aria-label="Request note" placeholder="Optional: what should reviewers focus on?" value={note} maxLength={REQUEST_NOTE_LIMIT} onChange={(event) => setNote(event.currentTarget.value)} />
+    <textarea className="request-form-note" aria-label="Request note" placeholder="Optional: what should reviewers focus on?" value={note} maxLength={REQUEST_NOTE_LIMIT} onChange={(event) => setNote(event.currentTarget.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && (event.key === "k" || event.key === "b")) event.stopPropagation(); }} />
     {attempted && errors.note && <p className="request-form-error">{errors.note}</p>}
     <div className="request-form-field" role="group" aria-label="Review lenses">{REQUEST_LENS_OPTIONS.map((lens) => <label key={lens} className="request-check"><input type="checkbox" checked={lenses.includes(lens)} onChange={() => toggleLens(lens)} />{lens}</label>)}</div>
     <div className="request-form-field" role="group" aria-label="Named reviewers">
