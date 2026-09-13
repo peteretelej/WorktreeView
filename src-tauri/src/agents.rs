@@ -90,6 +90,19 @@ pub(crate) async fn create_agent_token_in_pool(
             format!("The token name exceeds {MAX_TOKEN_NAME_CHARS} characters."),
         ));
     }
+    // Names are the review-request claim vocabulary, so live tokens must
+    // stay uniquely named; revoked names may be reused.
+    let taken: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM agent_tokens WHERE name = ? AND revoked_at IS NULL")
+            .bind(name)
+            .fetch_optional(pool)
+            .await?;
+    if taken.is_some() {
+        return Err(CommandError::new(
+            "invalid_agent_token",
+            format!("A token named {name} already exists; token names must be unique."),
+        ));
+    }
     let secret = generate_token()
         .map_err(|error| CommandError::new("persistence", error))?;
     let hash = hash_secret(&secret);

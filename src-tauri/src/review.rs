@@ -365,13 +365,12 @@ pub(crate) async fn commit_detail(path: String, rev: String) -> Result<CommitDet
     let owned_args = vec![
         "log".into(),
         "-1".into(),
-        // One record, two separators by strength: the body starts at a NUL
-        // (commit messages never carry one) so nothing in the message can
-        // shift the earlier fields, and the subject trails the fixed fields
-        // so a separator inside it reassembles by joining the tail. The date
-        // rides as git's own default rendering (the C locale keeps the
-        // abbreviations stable).
-        "--format=%H%x1f%an%x1f%cd%x1f%P%x1f%s%x00%b".into(),
+        // Every field separates on NUL: git forbids NUL in identities and
+        // subject lines, so a separator byte cannot appear inside an early
+        // field and shift the record, and splitn keeps any remainder in the
+        // body. The date rides as git's own default rendering (the C locale
+        // keeps the abbreviations stable).
+        "--format=%H%x00%an%x00%cd%x00%P%x00%s%x00%b".into(),
         sha.clone(),
     ];
     let args = git_args(&owned_args);
@@ -391,9 +390,8 @@ fn parse_commit_detail(output: &[u8], sha: &str) -> Result<CommitDetail, Command
     };
     let text = std::str::from_utf8(output).map_err(|_| malformed())?;
     let record = text.trim_end_matches('\n');
-    let (head, body) = record.split_once('\0').ok_or_else(malformed)?;
-    let fields: Vec<&str> = head.split('\u{1f}').collect();
-    if fields.len() < 5 {
+    let fields: Vec<&str> = record.splitn(6, '\0').collect();
+    if fields.len() < 6 {
         return Err(malformed());
     }
     let parents: Vec<String> = fields[3].split_whitespace().map(str::to_string).collect();
@@ -409,9 +407,9 @@ fn parse_commit_detail(output: &[u8], sha: &str) -> Result<CommitDetail, Command
         sha: sha.to_string(),
         author: fields[1].to_string(),
         date: fields[2].to_string(),
-        subject: fields[4..].join("\u{1f}"),
+        subject: fields[4].to_string(),
         parents,
-        body: body.trim_end().to_string(),
+        body: fields[5].trim_end().to_string(),
     })
 }
 
