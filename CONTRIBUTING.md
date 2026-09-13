@@ -63,6 +63,17 @@ Port 1420 remains the default. On Linux, `npm run dev:lab` frees a stale
 server and starts the frontend in one step. Inspect the local environment
 with `npm run tauri info`.
 
+To run a fully isolated instance (demo captures, parallel profiles), point
+its data directory anywhere with `WORKTREEVIEW_DATA_DIR`:
+
+```sh
+WORKTREEVIEW_DATA_DIR=/some/dir npm run dev
+```
+
+The store, settings, tokens, and endpoint discovery file all live there,
+so the instance shares nothing with the installed app or other dev
+checkouts.
+
 ### Store migrations
 
 Schema migrations in `src-tauri/migrations` are append-only: never edit or
