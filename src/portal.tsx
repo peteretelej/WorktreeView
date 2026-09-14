@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Copy, FolderGit2, GitBranch, Inbox, ListTree, MessageSquare, Search } from "lucide-react";
+import { Bot, Check, Copy, FolderGit2, GitBranch, Inbox, ListTree, MessageSquare, Search, User } from "lucide-react";
 import { attentionAge, isNarrowAttention } from "./requests.ts";
 import { copyText } from "./clipboard.ts";
 import { CommentThreadView, type CommentsApi } from "./comments.tsx";
@@ -11,6 +11,7 @@ import {
   activityKindFamily,
   activityKindLabel,
   projectOptions,
+  reviewEventText,
   reviewsStateCounts,
   reviewsStatusChip,
   rowsForProject,
@@ -68,35 +69,36 @@ export function PortalReviewsTab({ payload, repoNames, reviewsState, reviewsProj
   }, []);
   const narrow = paneWidth > 0 && isNarrowAttention(paneWidth);
   const now = Date.now();
-  return <section className="inbox-pane attention-pane reviews-pane" ref={paneRef} aria-labelledby="reviews-heading">
-    <div className="section-heading"><div className="project-heading"><h1 id="reviews-heading">Reviews</h1></div></div>
+  return <section className="inbox-pane attention-pane reviews-pane" ref={paneRef} aria-label="Reviews">
     <div className="reviews-filter-row">
       <div className="overview-tabs" role="tablist" aria-label="Review states">{REVIEWS_STATE_FILTERS.map((chip) => <button key={chip.id} role="tab" type="button" aria-selected={reviewsState === chip.id} className={`overview-tab ${reviewsState === chip.id ? "active" : ""}`} onClick={() => onState(chip.id)}>{chip.label}<span className="tab-count">{counts[chip.id]}</span></button>)}</div>
       <label className="overview-filter-input reviews-project"><select aria-label="Filter by project" value={reviewsProject} onChange={(event) => onProject(event.currentTarget.value)}><option value="">All projects</option>{projects.map((path) => <option key={path} value={path}>{repoNames.get(path) ?? path}</option>)}</select></label>
-      <div className="overview-filter-input"><Search size={12} /><input type="text" aria-label="Search reviews" placeholder="Search label, sha, requester, note" value={reviewsSearch} onChange={(event) => onSearch(event.currentTarget.value)} /></div>
+      <div className="overview-filter-input"><Search size={12} /><input type="text" aria-label="Search reviews" placeholder="Branch, sha, requester, note" value={reviewsSearch} onChange={(event) => onSearch(event.currentTarget.value)} /></div>
     </div>
     {payload?.error ? <ReviewsEmpty title="Reviews could not be loaded" detail={payload.error} /> : payload === null || (payload.loading && rows.length === 0) ? <ReviewsEmpty title="Loading reviews..." detail="Reading stored review activity." /> : rows.length === 0 ? <ReviewsEmpty title="No review activity yet" detail="Reviews appear here once a request, comment, or submission is recorded." /> : <>
-      <div className={`table-header attention-head ${narrow ? "attention-narrow" : ""}`} aria-hidden="true"><span>Project</span><span>Change</span><span>Requester</span><span>Status</span><span>Round</span><span>Findings</span>{!narrow && <span>Age</span>}</div>
+      <div className={`table-header attention-head ${narrow ? "attention-narrow" : ""}`} aria-hidden="true"><span>Project</span><span>Change</span><span>Requester</span><span>Status</span><span>Round</span><span>Findings</span>{!narrow && <span>Last event</span>}{!narrow && <span className="attention-age">Age</span>}</div>
       <div className={`worktree-list attention-list ${narrow ? "attention-narrow" : ""}`}>{visible.map((row) => {
         const chip = reviewsStatusChip(row);
         const openRow = () => onOpenRow(row);
         const p0 = row.unresolved_finding_counts.P0;
         const p1 = row.unresolved_finding_counts.P1;
-        const chipClass = chip.tone === "stale" ? "reviews-stale" : chip.tone === "settled" ? "clean" : chip.tone === "quiet" ? "reviews-quiet" : "";
+        const chipClass = chip.tone === "ok" ? "reviews-ok" : chip.tone === "warn" ? "reviews-warn" : chip.tone === "muted" ? "reviews-muted" : "";
+        const event = reviewEventText(row, now);
         return <div key={`${row.repo_path}:${row.base_sha}:${row.target_key}:${row.target_kind}`} className="attention-row" role="button" tabIndex={0} onClick={openRow} onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openRow(); } }}>
           <div className="attention-project"><strong title={row.repo_path}>{repoNames.get(row.repo_path) ?? row.repo_path}</strong></div>
           <div className="attention-change"><strong>{row.change_label}</strong><span className="attention-meta">{row.target_kind === "head"
             ? <code title={row.target_key}>{shortSha(row.target_key)}</code>
-            : <><span className="path-text" title={row.target_key}>{row.target_key}</span>{row.head_sha && <code title={`Head as last recorded: ${row.head_sha}`}>{shortSha(row.head_sha)}</code>}</>}
-            {row.comment_count > 0 && <span>{row.comment_count} {row.comment_count === 1 ? "comment" : "comments"}</span>}
-            {row.submission_count > 0 && <span>{row.submission_count} {row.submission_count === 1 ? "submission" : "submissions"}</span>}
+            : <span title={row.target_key}>worktree</span>}
             {narrow && <span className="attention-age">{attentionAge(row.age_basis, now)}</span>}</span></div>
-          <div className="attention-requester">{row.requester && <span className="comment-badge" title={`Latest request by ${row.requester}`}>{row.requester}</span>}</div>
+          <div className="attention-requester">{row.requester
+            ? <span className={`comment-badge requester-badge requester-${row.requester_kind}`} title={row.requester_kind === "human" ? `Requested by ${row.requester}` : `Requested by agent ${row.requester}`}>{row.requester_kind === "human" ? <User size={10} /> : <Bot size={10} />}{row.requester}</span>
+            : <span className="attention-none">none</span>}</div>
           <div className="attention-status"><span className={`status-chip ${chipClass}`}>{chip.label}</span></div>
           <div className="attention-round">{row.max_rounds > 0 && <code title={`Round ${row.round} of ${row.max_rounds}`}>{row.round}/{row.max_rounds}</code>}</div>
-          <div className="attention-findings">{narrow
+          <div className="attention-findings reviews-findings">{narrow
             ? p0 + p1 > 0 && <span className="comment-badge severity-P1" aria-label={`${p0 + p1} blocking findings`}>{p0 + p1}</span>
-            : <>{p0 > 0 && <span className="comment-badge severity-P0" aria-label={`${p0} P0 findings`}>{p0} P0</span>}{p1 > 0 && <span className="comment-badge severity-P1" aria-label={`${p1} P1 findings`}>{p1} P1</span>}</>}</div>
+            : <>{p0 > 0 && <span className="finding-p0" aria-label={`${p0} P0 findings`}>{p0} P0</span>}{p0 > 0 && p1 > 0 && <span> · </span>}{p1 > 0 && <span className="finding-p1" aria-label={`${p1} P1 findings`}>{p1} P1</span>}{p0 + p1 === 0 && <span className="finding-none">0</span>}</>}</div>
+          {!narrow && <div className="attention-event" title={event}>{event}</div>}
           {!narrow && <div className="attention-age">{attentionAge(row.age_basis, now)}</div>}
         </div>;
       })}</div>
@@ -143,8 +145,7 @@ export function PortalThreadsTab({ payload, repoNames, threadsState, threadsVoic
   const activeChip = THREADS_STATE_FILTERS.find((chip) => chip.id === threadsState) ?? THREADS_STATE_FILTERS[0];
   const projects = projectOptions(groups.flatMap((group) => group.threads));
   const now = Date.now();
-  return <section className="inbox-pane attention-pane threads-pane" aria-labelledby="threads-heading">
-    <div className="section-heading"><div className="project-heading"><h1 id="threads-heading">Threads</h1></div></div>
+  return <section className="inbox-pane attention-pane threads-pane" aria-label="Threads">
     <div className="reviews-filter-row">
       <div className="overview-tabs" role="tablist" aria-label="Thread states">{THREADS_STATE_FILTERS.map((chip) => <button key={chip.id} role="tab" type="button" aria-selected={threadsState === chip.id} className={`overview-tab ${threadsState === chip.id ? "active" : ""}`} onClick={() => onState(chip.id)}>{chip.label}<span className="tab-count">{counts[chip.id]}</span></button>)}</div>
       <div className="overview-tabs" role="tablist" aria-label="Thread voices">{THREADS_VOICE_FILTERS.map((chip) => <button key={chip.id} role="tab" type="button" aria-selected={threadsVoice === chip.id} className={`overview-tab ${threadsVoice === chip.id ? "active" : ""}`} onClick={() => onVoice(chip.id)}>{chip.label}</button>)}</div>
@@ -252,7 +253,7 @@ export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, o
       <span className="crumb-sep">/</span>
       <span title={detail.change_label}>{detail.change_label}</span>
       {detail.root.file_path && <><span className="crumb-sep">/</span><code className="path-text" title={detail.root.file_path}>{detail.root.file_path}{detail.root.start_line !== null ? `:${detail.root.start_line}` : ""}</code></>}
-      <span className={`status-chip ${resolved ? "clean" : "reviews-quiet"}`}>{resolved ? "resolved" : "open"}</span>
+      <span className={`status-chip ${resolved ? "clean" : "reviews-muted"}`}>{resolved ? "resolved" : "open"}</span>
       {detail.head_moved && <span className="comment-badge comment-state-badge" title="The surface's head moved past the reviewed head">moved</span>}
       <span className="thread-breadcrumb-actions">
         <CopyRouteButton rootCommentId={detail.root_comment_id} />
@@ -317,13 +318,10 @@ export function PortalActivityTab({ payload, repoNames, activityProject, onProje
   const divider = payload ? activityDividerIndex(projectEvents, payload.seen_id) : -1;
   const now = Date.now();
   let flatIndex = -1;
-  return <section className="inbox-pane attention-pane activity-pane" aria-labelledby="activity-heading">
-    <div className="section-heading">
-      <div className="project-heading"><h1 id="activity-heading">Activity</h1></div>
-      <button className="secondary-button" type="button" disabled={!payload || marking} onClick={onMarkSeen}>{marking ? "Marking..." : "Mark all seen"}</button>
-    </div>
+  return <section className="inbox-pane attention-pane activity-pane" aria-label="Activity">
     <div className="reviews-filter-row">
       <label className="overview-filter-input reviews-project"><select aria-label="Filter by project" value={activityProject} onChange={(event) => onProject(event.currentTarget.value)}><option value="">All projects</option>{projects.map((path) => <option key={path} value={path}>{repoNames.get(path) ?? path}</option>)}</select></label>
+      <button className="secondary-button activity-seen" type="button" disabled={!payload || marking} onClick={onMarkSeen}>{marking ? "Marking..." : "Mark all seen"}</button>
     </div>
     {payload?.error ? <ReviewsEmpty title="Activity could not be loaded" detail={payload.error} /> : payload === null ? <ReviewsEmpty title="Loading activity..." detail="Reading the stored event log." /> : events.length === 0 ? <ReviewsEmpty title="No activity yet" detail="Review requests, comments, and submissions land here as they happen." /> : <>
       {groups.map((group) => <div key={`${group.label}:${group.events[0].id}`} className="activity-day">

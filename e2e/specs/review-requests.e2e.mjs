@@ -88,7 +88,7 @@ async function humanRequestStatus() {
 }
 
 async function openAttentionTab(label) {
-  await $('button.nav-tab[aria-label^="Attention"]').click();
+  await $('button.nav-tab[aria-label^="Pulse"]').click();
   await $(".attention-pane").waitForDisplayed();
   const tab = await $(`//button[contains(@class, "overview-tab")][contains(normalize-space(.), "${label}")]`);
   await tab.click();

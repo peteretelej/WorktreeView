@@ -912,8 +912,9 @@ h2 {
 }
 
 /* Narrow mode drops the Age column: the header carries the same class as
-   the rows so both grids switch to the six-column template together. */
-.attention-narrow .table-header.attention-head,
+   the rows so both grids switch to the six-column template together. The
+   header matches the class on itself, not through an ancestor. */
+.table-header.attention-head.attention-narrow,
 .attention-narrow .attention-row {
   grid-template-columns: minmax(90px, 150px) minmax(120px, 1fr) minmax(80px, 120px) 100px 48px 40px;
 }
@@ -922,11 +923,67 @@ h2 {
   font-size: 10px;
 }
 
-/* Pulse portal tabs: the shared Inbox | Reviews strip above the portal
-   views reuses the overview underline tabs for one tab language. */
+.table-header.attention-head .attention-age {
+  text-align: right;
+}
+
+/* Pulse portal: one shell (heading + shared tab strip) wraps the active
+   pane, so the strip stays a fixed rail instead of stretching with the
+   content grid's auto rows behind it. */
+.portal-view {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.portal-view .inbox-pane {
+  flex: 1;
+  min-height: 0;
+  padding-top: 8px;
+}
+
+.portal-head {
+  flex: none;
+  padding: 20px 20px 0;
+}
+
+.portal-head h1 {
+  margin: 0;
+  font-size: 19px;
+}
+
+.portal-sub {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* The shared Inbox | Threads | Reviews | Activity strip reuses the
+   overview underline tabs at the mockup's larger size; the active tab's
+   count reads in the accent like its underline. */
 .portal-tabs {
-  padding: 0 20px 10px;
+  flex: none;
   flex-wrap: wrap;
+  margin: 14px 20px 12px;
+}
+
+.portal-tabs .overview-tab {
+  gap: 7px;
+  padding: 7px 12px 6px;
+  font-size: 12px;
+}
+
+.portal-tabs .tab-count {
+  font-size: 10.5px;
+}
+
+.portal-tabs .overview-tab.active .tab-count {
+  color: var(--primary);
+}
+
+.activity-seen {
+  margin-left: auto;
 }
 
 /* Reviews tab: state chips, project select, and search share one rail
@@ -953,13 +1010,88 @@ h2 {
   outline: none;
 }
 
-.status-chip.reviews-stale {
+/* The reviews table adds the mockup's Last event column, so its grid
+   re-states the attention columns with the event rail before Age. */
+.reviews-pane .table-header.attention-head,
+.reviews-pane .attention-row {
+  grid-template-columns: minmax(110px, 180px) minmax(140px, 1.1fr) minmax(90px, 120px) 130px 52px 90px minmax(120px, 1fr) 44px;
+}
+
+/* Narrow reviews rows drop the event column and fold Age into the meta
+   line, landing on the same six-column template as the queue. */
+.reviews-pane .table-header.attention-head.attention-narrow,
+.reviews-pane .attention-narrow .attention-row {
+  grid-template-columns: minmax(90px, 150px) minmax(120px, 1fr) minmax(80px, 120px) 100px 48px 40px;
+}
+
+/* The last-event line: muted narration that ellipsizes under its title. */
+.attention-event {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Findings read as colored text like the mockup, not badges; zero stays
+   dim so an empty column still reads as counted. */
+.reviews-findings {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.reviews-findings .finding-p0 {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.reviews-findings .finding-p1 {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.attention-none {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+/* The requester badge keeps the badge anatomy but reads in the voice's
+   color, mono, with the human/agent glyph. */
+.comment-badge.requester-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.comment-badge.requester-human {
+  color: var(--info);
+}
+
+.comment-badge.requester-agent {
+  color: var(--primary);
+}
+
+/* Status chips read the mockup's tones: settled-green approval, warning
+   changes-requested and drift, muted withdrawal and request-less. */
+.status-chip.reviews-ok {
+  border-color: transparent;
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.status-chip.reviews-warn {
   border-color: transparent;
   background: var(--warn-soft);
   color: var(--warn);
 }
 
-.status-chip.reviews-quiet {
+.status-chip.reviews-muted {
   color: var(--muted);
 }
 

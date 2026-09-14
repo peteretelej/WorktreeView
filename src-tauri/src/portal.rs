@@ -4,7 +4,8 @@
 // path): inclusion, state classification, search matching, ordering, and
 // bounds are backend rules the webview renders verbatim.
 
-use crate::requests::{identity_change_label, surface_head_moved, FindingCounts, APPROVED, WITHDRAWN};
+use crate::events::{ACTOR_AGENT, ACTOR_HUMAN};
+use crate::requests::{identity_change_label, surface_head_moved, FindingCounts, APPROVED, REQUESTED, WITHDRAWN};
 use crate::retrospection::{recorded_worktree_head, SurfaceHead};
 use crate::reviews::{list_comments_in_pool, Comment};
 use crate::CommandError;
@@ -54,6 +55,16 @@ const LATEST_REQUEST_QUERY: &str = "SELECT rq.repo_path, rq.base_sha, rq.target_
      LEFT JOIN agent_tokens AS t ON t.id = rq.requester_token_id \
      ORDER BY rq.updated_at DESC, rq.id DESC";
 
+// The newest narrated event per identity, the Reviews tab's last-event
+// text. Identity-scoped events only: repo additions carry no identity
+// columns. The bare `summary` column rides SQLite's min/max rule, so it
+// reads from the MAX(id) row.
+const IDENTITY_LAST_EVENT_QUERY: &str = "SELECT repo_path, base_sha, target_key, target_kind, \
+     summary, MAX(id) \
+     FROM events \
+     WHERE base_sha IS NOT NULL AND target_key IS NOT NULL AND target_kind IS NOT NULL \
+     GROUP BY repo_path, base_sha, target_key, target_kind";
+
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub(crate) struct PortalReviewRow {
     pub(crate) repo_path: String,
@@ -63,6 +74,7 @@ pub(crate) struct PortalReviewRow {
     pub(crate) change_label: String,
     pub(crate) head_sha: Option<String>,
     pub(crate) requester: String,
+    pub(crate) requester_kind: String,
     pub(crate) status: String,
     pub(crate) note: String,
     pub(crate) round: i64,
@@ -73,6 +85,7 @@ pub(crate) struct PortalReviewRow {
     pub(crate) last_activity_at: i64,
     pub(crate) state: String,
     pub(crate) age_basis: i64,
+    pub(crate) last_event: String,
 }
 
 // The latest request's rendered fields; a request-less identity carries
@@ -84,6 +97,7 @@ struct LatestRequest {
     max_rounds: i64,
     head_sha: Option<String>,
     requester: String,
+    requester_kind: &'static str,
     updated_at: i64,
 }
 
@@ -139,7 +153,12 @@ async fn latest_requests_newest_first(
 ) -> Result<Vec<(IdentityKey, LatestRequest)>, CommandError> {
     let mut rows = Vec::new();
     for row in sqlx::query(LATEST_REQUEST_QUERY).fetch_all(pool).await? {
-        let requester: Option<String> = row.try_get("requester_name")?;
+        // The token join misses for the human's own requests: a hit is an
+        // agent token, a miss is the human.
+        let (requester, requester_kind) = match row.try_get::<Option<String>, _>("requester_name")? {
+            Some(name) => (name, ACTOR_AGENT),
+            None => ("human".to_string(), ACTOR_HUMAN),
+        };
         rows.push((
             (
                 row.try_get("repo_path")?,
@@ -153,12 +172,62 @@ async fn latest_requests_newest_first(
                 round: row.try_get("round")?,
                 max_rounds: row.try_get("max_rounds")?,
                 head_sha: row.try_get("head_sha")?,
-                requester: requester.unwrap_or_else(|| "human".to_string()),
+                requester,
+                requester_kind,
                 updated_at: row.try_get("updated_at")?,
             },
         ));
     }
     Ok(rows)
+}
+
+// The newest narrated event per identity, keyed like every request-and-
+// activity projection.
+async fn last_events_by_identity(
+    pool: &SqlitePool,
+) -> Result<std::collections::HashMap<IdentityKey, String>, sqlx::Error> {
+    let mut events: std::collections::HashMap<IdentityKey, String> =
+        std::collections::HashMap::new();
+    for row in sqlx::query(IDENTITY_LAST_EVENT_QUERY).fetch_all(pool).await? {
+        events.insert(
+            (
+                row.try_get("repo_path")?,
+                row.try_get("base_sha")?,
+                row.try_get("target_key")?,
+                row.try_get("target_kind")?,
+            ),
+            row.try_get("summary")?,
+        );
+    }
+    Ok(events)
+}
+
+// The last-event text for identities whose activity predates the event
+// log, composed from the row's own facts: the latest request's wording,
+// then the activity counts. Every listed row carries a request or
+// activity, so the parts never all drop out.
+fn fallback_event(latest: Option<&LatestRequest>, comment_count: i64, submission_count: i64) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match latest {
+        Some(request) if request.status == REQUESTED && !request.note.is_empty() => {
+            parts.push(format!("requested with note: {}", request.note));
+        }
+        Some(request) => parts.push(request.status.replace('_', " ")),
+        None => {}
+    }
+    if comment_count > 0 {
+        parts.push(format!(
+            "{comment_count} {}",
+            if comment_count == 1 { "comment" } else { "comments" }
+        ));
+    }
+    if submission_count > 0 {
+        parts.push(format!(
+            "{submission_count} {}",
+            if submission_count == 1 { "submission" } else { "submissions" }
+        ));
+    }
+    parts.join(" · ")
 }
 
 // One identity's stored activity, gathered from the reviews-driven
@@ -224,6 +293,7 @@ pub(crate) async fn list_portal_reviews_in_pool(
         latest_by_identity.entry(identity).or_insert(request);
     }
     let heads = crate::retrospection::recorded_surface_heads_in_pool(pool).await?;
+    let last_events = last_events_by_identity(pool).await?;
 
     let mut activities: Vec<IdentityActivity> = Vec::new();
     for row in sqlx::query(IDENTITY_ACTIVITY_QUERY).fetch_all(pool).await? {
@@ -310,6 +380,9 @@ pub(crate) async fn list_portal_reviews_in_pool(
         let head_sha = recorded
             .map(|head| head.head_sha.clone())
             .or_else(|| (activity.target_kind == "head").then(|| activity.target_key.clone()));
+        let last_event = last_events.get(&identity).cloned().unwrap_or_else(|| {
+            fallback_event(latest, activity.comment_count, activity.submission_count)
+        });
         let row = PortalReviewRow {
             repo_path: activity.repo_path,
             base_sha: activity.base_sha,
@@ -318,6 +391,8 @@ pub(crate) async fn list_portal_reviews_in_pool(
             change_label,
             head_sha,
             requester: latest.map_or(String::new(), |request| request.requester.clone()),
+            requester_kind: latest
+                .map_or(ACTOR_HUMAN.to_string(), |request| request.requester_kind.to_string()),
             status: latest.map_or(String::new(), |request| request.status.clone()),
             note: latest.map_or(String::new(), |request| request.note.clone()),
             round: latest.map_or(0, |request| request.round),
@@ -330,6 +405,7 @@ pub(crate) async fn list_portal_reviews_in_pool(
             // which is also the payload's ordering key.
             state: classify_state(latest, recorded).to_string(),
             age_basis: last_activity_at,
+            last_event,
         };
         if let Some(state) = &query.state {
             if state != STATE_ALL && &row.state != state {
@@ -1170,6 +1246,24 @@ mod tests {
             .unwrap();
     }
 
+    // Inserts a request directly, so no lifecycle event rides along and the
+    // fallback composition is what the row exposes.
+    async fn seed_bare_request(pool: &SqlitePool, repo: &str, base: &str, key: &str, head: &str, note: &str) {
+        sqlx::query(
+            "INSERT INTO review_requests (repo_path, base_sha, target_key, target_kind, \
+                    status, note, head_sha, lenses, reviewers, max_rounds, round, created_at, updated_at) \
+             VALUES (?, ?, ?, 'worktree', 'requested', ?, ?, '[]', '[]', 2, 0, 1, 1)",
+        )
+        .bind(repo)
+        .bind(base)
+        .bind(key)
+        .bind(note)
+        .bind(head)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn list(pool: &SqlitePool, query: &PortalReviewQuery) -> Vec<PortalReviewRow> {
         list_portal_reviews_in_pool(pool, query).await.unwrap()
     }
@@ -1471,6 +1565,46 @@ mod tests {
         set_updated_at(&pool, newer.id, 5000).await;
         let rows = list(&pool, &PortalReviewQuery::default()).await;
         assert_eq!(row_of(&rows, "base-latest").requester, "other-bot");
+    }
+
+    #[tokio::test]
+    async fn the_last_event_rides_the_newest_identity_event() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+        let reviewer = agent_token(&pool, "reviewer-bot").await;
+        let created = create(&pool, REPO, "base-event", "/wt-event", "head-event", &Actor::Agent(coder)).await;
+        // The create itself narrates; a claim then becomes the newest event
+        // and the row's last-event text.
+        claim_request_in_pool(&pool, created.id, &Actor::Agent(reviewer), &noop_notify())
+            .await
+            .unwrap();
+
+        let rows = list(&pool, &PortalReviewQuery::default()).await;
+        let row = row_of(&rows, "base-event");
+        assert_eq!(row.last_event, "claimed by reviewer-bot");
+        assert_eq!(row.requester, "coder-bot");
+        assert_eq!(row.requester_kind, ACTOR_AGENT);
+    }
+
+    #[tokio::test]
+    async fn identities_without_events_compose_their_last_event_from_facts() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        // A requested row with a note reads the note; a note-less one reads
+        // its status; a request-less commented identity reads its counts.
+        seed_bare_request(&pool, REPO, "base-note", "/wt-note", "head-note", "Please review my changes.").await;
+        seed_bare_request(&pool, REPO, "base-plain", "/wt-plain", "head-plain", "").await;
+        seed_finding(&pool, REPO, "base-comments", "/wt-c", "P1", 1).await;
+        seed_finding(&pool, REPO, "base-comments", "/wt-c", "P2", 2).await;
+
+        let rows = list(&pool, &PortalReviewQuery::default()).await;
+        let noted = row_of(&rows, "base-note");
+        assert_eq!(noted.last_event, "requested with note: Please review my changes.");
+        assert_eq!(noted.requester, "human");
+        assert_eq!(noted.requester_kind, ACTOR_HUMAN);
+        assert_eq!(row_of(&rows, "base-plain").last_event, "requested");
+        assert_eq!(row_of(&rows, "base-comments").last_event, "2 comments");
     }
 
     #[tokio::test]
