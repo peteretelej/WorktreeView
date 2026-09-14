@@ -481,6 +481,8 @@ kbd {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
+  position: relative;
+  --topbar-height: 40px;
 }
 
 .content {
@@ -491,6 +493,54 @@ kbd {
   grid-template-columns: minmax(0, 1fr);
   overflow: hidden;
 }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: var(--topbar-height);
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.topbar-nav {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.topbar-nav:hover:enabled, .topbar-nav:focus-visible { background: var(--surface-2); color: var(--foreground); }
+.topbar-nav:disabled { opacity: 0.4; cursor: default; }
+.route-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+.topbar-spacer { flex: 1; }
+.topbar-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+.topbar-search:hover, .topbar-search:focus-visible { background: var(--surface-2); color: var(--foreground); }
 
 .live-error {
   position: absolute;
@@ -1782,7 +1832,10 @@ button:disabled {
   .review-bar { flex-wrap: wrap; }
 }
 
-.settings-overlay { position: fixed; z-index: 15; inset: 0; display: grid; grid-template-columns: 240px minmax(0, 1fr); background: var(--background); }
+/* Settings fills the workspace below the top bar, which owns the surface's
+   single back control; the sidebar stays visible beside it. */
+.settings-overlay { position: absolute; z-index: 15; inset: var(--topbar-height) 0 0 0; display: grid; grid-template-columns: 240px minmax(0, 1fr); background: var(--background); }
+.settings-overlay .back-button { display: none; }
 .settings-nav { display: flex; min-width: 0; flex-direction: column; gap: 14px; padding: 14px 12px; border-right: 1px solid var(--border); background: var(--surface); }
 .settings-nav-sections { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .settings-nav-link { display: flex; height: 30px; align-items: center; padding: 0 8px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; text-align: left; }

@@ -1,6 +1,6 @@
 ---
 name: worktreeview
-description: Set up and drive WorktreeView, a local desktop app where developers review Git worktrees and AI agents collaborate as first-class reviewers. Use when the user asks to install, start, or configure WorktreeView; to add a repository or project to it; to fetch or refresh projects; to read reviews, comments, or submissions; to post, reply to, resolve, or edit review comments through its MCP endpoint; or to request a review of changes or pick up and work review requests in its attention queue.
+description: Set up and drive WorktreeView, a local desktop app where developers review Git worktrees and AI agents collaborate as first-class reviewers. Use when the user asks to install, start, or configure WorktreeView; to add a repository or project to it; to fetch or refresh projects; to read reviews, comments, or submissions; to post, reply to, resolve, or edit review comments through its MCP endpoint; or to request a review of changes or pick up and work review requests in its Pulse inbox.
 ---
 
 # WorktreeView
@@ -32,7 +32,7 @@ Read these before anything else; every workflow below builds on them.
   start; prefer a named token for lasting use.
 - **Request visibility.** Review requests are a shared, persistent queue:
   any request on any open repo is visible to every agent through
-  `list_review_requests`, and to the human in the app's Attention view.
+  `list_review_requests`, and to the human in the app's Pulse inbox.
   Discovery is poll-based (the API has no subscriptions), so poll on a
   sparse cadence instead of looping.
 - **Requests may be human-initiated.** A request's requester can be an
@@ -108,7 +108,7 @@ All tools are stateless `tools/call`s carrying
 | `resolve_thread` | Resolve or reopen a thread (any agent may). |
 | `edit_own_comment` / `delete_own_comment` | Only comments authored by your token. |
 | `request_review` | Ask the fleet to review one identity at a recorded head. Your token becomes the requester. |
-| `list_review_requests` | The request queue. No filters: the cross-repo open feed (the agent attention feed). Optional `repo_path` / `status` filters. |
+| `list_review_requests` | The request queue. No filters: the cross-repo open feed (the agent inbox feed). Optional `repo_path` / `status` filters. |
 | `update_review_request` | Advance one request: `claim`, `approve`, `request_changes`, `withdraw` (requester-only), `re_request` (requester-only, new head). |
 | `refresh_repo` | Run the app's bounded fetch for a repo, then it re-lists surfaces. |
 

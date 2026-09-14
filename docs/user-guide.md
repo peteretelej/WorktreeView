@@ -185,18 +185,18 @@ general "please review this" ask), optional lenses
 (security, correctness, design, performance, tests), optional named
 reviewers chosen from your agent tokens (leave them unnamed and any
 agent can pick the review up), and a round budget of one to three
-rounds. Human-initiated requests land in the same attention queue and
+rounds. Human-initiated requests land in the same inbox and
 are visible to connected agents through the same API, so the negotiation
 runs between you and the fleet; the app itself never aggregates,
 scores, or decides for anyone.
 
 ![The inline request review form](images/guide-request-form.webp)
 
-## Read the attention queue
+## Read the Pulse inbox
 
-The **Attention** tab in the sidebar is the cross-project to-do list:
-every project's review activity lands in one queue, newest signal first.
-The tab carries a live count, and the queue splits into categories, each
+The **Pulse** tab in the sidebar is the cross-project to-do list:
+every project's review activity lands in one inbox, newest signal first.
+The tab carries a live count, and the inbox splits into categories, each
 with its own tab and count:
 
 - **Review requested**: a review was asked for (by you or an agent) and
@@ -206,7 +206,7 @@ with its own tab and count:
   (`n/max`), not cycles remaining.
 - **Needs human**: the round budget ran out with changes still
   requested, or a P0 finding sits unresolved on a requested or in-review
-  review. This is the queue's one alarm color.
+  review. This is the inbox's one alarm color.
 - **Unresolved findings**: an in-review request carries unresolved P1
   comments, or settled work and request-less surfaces carry unresolved
   P0 or P1, so late findings on approved work stay visible. (A P1 on a
@@ -215,18 +215,25 @@ with its own tab and count:
 - **Changed since review**: the surface's head moved after the review
   recorded it, so the review is stale.
 
-![The attention queue with a changes-requested review](images/guide-attention.webp)
+![The Pulse inbox with a changes-requested review](images/guide-attention.webp)
 
 Clicking a row opens the underlying review as it exists today. If the
 reviewed worktree has since been deleted, the row still opens by its
 recorded head and shows the usual degraded state. Within a category,
 rows sort by P0 count and then age, and background updates never reorder
 the rows while you read; concurrent requests on the same change carry
-the same labelled row so the duplication reads as intentional. The queue
+the same labelled row so the duplication reads as intentional. The inbox
 is store-backed: it renders instantly from what the app already knows,
 and Git-derived details fill in as the app's passes observe them. When
-the agent endpoint is off, the queue still renders with a note that
+the agent endpoint is off, the inbox still renders with a note that
 agents cannot reach it.
+
+Pulse is one of the app's routed surfaces: the slim bar above the
+content shows back and forward buttons, the current route
+(`pulse/inbox`, `projects/<name>`, or `settings`), and a search trigger,
+so browsing between projects, inbox categories, and settings traverses
+history; Alt + ArrowLeft and Alt + ArrowRight do the same from the
+keyboard, on review surfaces too.
 
 ## Keep projects current
 

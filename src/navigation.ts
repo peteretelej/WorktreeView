@@ -1,3 +1,5 @@
+import type { AttentionCategory } from "./requests";
+
 export type Worktree = { path: string; branch: string; head: string };
 export type GoneSurface = { kind: "worktree" | "branch"; identity_key: string; label: string; detail: string; head_sha: string; last_seen_at: number; pinned_at: number | null };
 export type SurfacePinRef = { kind: "worktree" | "branch"; identity_key: string; pinned_at: number };
@@ -21,10 +23,13 @@ export type CommitInfo = { sha: string; subject: string; author: string; date: s
 // and parents.
 export type CommitDetail = { sha: string; author: string; date: string; subject: string; body: string; parents: string[] };
 
+export type PortalTab = "inbox";
+export type PortalFilters = { category: AttentionCategory };
+
 export type AppLocation =
   | { kind: "inbox" }
   | { kind: "settings" }
-  | { kind: "attention" }
+  | { kind: "portal"; tab: PortalTab; filters: PortalFilters }
   | { kind: "review"; identity: ReviewIdentity; selectedFile: ChangedFile | null }
   | { kind: "commit-history"; repoPath: string; startPointLabel: string; startRef: string | null; worktreePath: string | null; selectedCommit: CommitInfo | null; selectedFile: ChangedFile | null };
 
@@ -45,6 +50,9 @@ function sameChangedFile(left: ChangedFile | null, right: ChangedFile | null): b
 
 export function sameAppLocation(left: AppLocation, right: AppLocation): boolean {
   if (left.kind !== right.kind) return false;
+  if (left.kind === "portal" && right.kind === "portal") {
+    return left.tab === right.tab && left.filters.category === right.filters.category;
+  }
   if (left.kind === "review" && right.kind === "review") {
     return left.identity.repoPath === right.identity.repoPath
       && left.identity.base === right.identity.base

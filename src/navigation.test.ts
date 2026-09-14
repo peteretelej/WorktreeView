@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createNavigationHistory, sameAppLocation, type AppLocation, type ChangedFile, type ReviewIdentity, type ReviewTarget } from "./navigation.ts";
+import type { AttentionCategory } from "./requests.ts";
 
 function worktreeTarget(path: string): ReviewTarget {
   return { kind: "worktree", worktree: { path, branch: `refs/heads/${path}`, head: "head" } };
@@ -19,6 +20,9 @@ function file(path: string): ChangedFile {
 }
 function pushInbox(history: ReturnType<typeof createNavigationHistory>): void {
   history.push({ kind: "inbox" });
+}
+function portalEntry(category: AttentionCategory): AppLocation {
+  return { kind: "portal", tab: "inbox", filters: { category } };
 }
 
 test("navigation starts at the inbox entry", () => {
@@ -92,6 +96,40 @@ test("consecutive duplicate pushes collapse into one entry", () => {
   assert.deepEqual(history.current(), { kind: "inbox" });
   assert.equal(history.canBack(), false);
   assert.equal(history.canForward(), true);
+});
+
+test("portal entries equal on tab and filters category", () => {
+  const requested = portalEntry("requested");
+  assert.equal(sameAppLocation(requested, portalEntry("requested")), true);
+  assert.equal(sameAppLocation(requested, portalEntry("needs_human")), false);
+  assert.equal(sameAppLocation(requested, { kind: "inbox" }), false);
+});
+
+test("back and forward traverse portal category entries", () => {
+  const history = createNavigationHistory();
+  const requested = portalEntry("requested");
+  const needsHuman = portalEntry("needs_human");
+  history.push(requested);
+  history.push(needsHuman);
+  assert.equal(history.canForward(), false);
+  assert.equal(history.back(), requested);
+  assert.equal(history.canForward(), true);
+  assert.equal(history.forward(), needsHuman);
+  assert.equal(history.back(), requested);
+  assert.deepEqual(history.back(), { kind: "inbox" });
+  assert.equal(history.canBack(), false);
+});
+
+test("portal pushes collapse only when tab and category match", () => {
+  const history = createNavigationHistory();
+  history.push(portalEntry("requested"));
+  history.push(portalEntry("needs_human"));
+  history.push(portalEntry("needs_human"));
+  assert.equal(history.canForward(), false);
+  assert.equal(history.canBack(), true);
+  history.push(portalEntry("requested"));
+  assert.deepEqual(history.back(), { kind: "portal", tab: "inbox", filters: { category: "needs_human" } });
+  assert.deepEqual(history.forward(), { kind: "portal", tab: "inbox", filters: { category: "requested" } });
 });
 
 test("entry equality ignores identity object shape but honors discriminating fields", () => {
