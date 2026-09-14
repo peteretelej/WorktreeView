@@ -23,8 +23,24 @@ export type CommitInfo = { sha: string; subject: string; author: string; date: s
 // and parents.
 export type CommitDetail = { sha: string; author: string; date: string; subject: string; body: string; parents: string[] };
 
-export type PortalTab = "inbox";
-export type PortalFilters = { category: AttentionCategory };
+export type PortalTab = "inbox" | "reviews";
+// The Reviews tab's filter fields; each tab reads its own fields and the
+// rest ride along. Discrete selections push history entries, text edits
+// replace the current entry in place.
+export type ReviewsStateFilter = "open" | "settled" | "stale" | "no_request" | "all";
+export type PortalFilters = {
+  category: AttentionCategory;
+  reviewsState: ReviewsStateFilter;
+  reviewsProject: string;
+  reviewsSearch: string;
+};
+
+export const DEFAULT_PORTAL_FILTERS: PortalFilters = {
+  category: "requested",
+  reviewsState: "all",
+  reviewsProject: "",
+  reviewsSearch: "",
+};
 
 export type AppLocation =
   | { kind: "inbox" }
@@ -51,7 +67,11 @@ function sameChangedFile(left: ChangedFile | null, right: ChangedFile | null): b
 export function sameAppLocation(left: AppLocation, right: AppLocation): boolean {
   if (left.kind !== right.kind) return false;
   if (left.kind === "portal" && right.kind === "portal") {
-    return left.tab === right.tab && left.filters.category === right.filters.category;
+    return left.tab === right.tab
+      && left.filters.category === right.filters.category
+      && left.filters.reviewsState === right.filters.reviewsState
+      && left.filters.reviewsProject === right.filters.reviewsProject
+      && left.filters.reviewsSearch === right.filters.reviewsSearch;
   }
   if (left.kind === "review" && right.kind === "review") {
     return left.identity.repoPath === right.identity.repoPath

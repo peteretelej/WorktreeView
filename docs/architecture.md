@@ -46,6 +46,15 @@ normalized domain data through narrow, typed Tauri commands.
   URL, and a bounded ahead/behind fallback against the default branch for
   local worktree branches without an upstream. Remote-tracking branches
   ride the same pass and skip the fallback probe.
+- `portal.rs`: the Pulse portal's store-backed listing of review
+  identities. `list_portal_reviews_in_pool` lists every identity carrying
+  a review request or any comment/submission activity (including settled
+  and request-less ones) as one row per identity with the backend-owned
+  state classification (open, settled, stale from the attention queue's
+  changed-since-review comparison, or no request), the identity's
+  unresolved severity counts, and last-activity ordering under a fixed
+  row cap; the optional text needle matches as an ASCII-case-insensitive
+  substring. No Git runs on the path.
 - `review.rs`: assembles review data (changed files, patches, commits,
   refs) from Git results, plus the new-side file content that context
   expansion and the full-file view render (worktree read or blob at a rev,

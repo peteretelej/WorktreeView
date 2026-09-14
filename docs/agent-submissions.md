@@ -426,11 +426,14 @@ Discovery is poll-based: the face has no subscriptions, so agents poll
 filters is the attention feed: the cross-repo open queue (every status
 except `approved` and `withdrawn`) with derived `age_ms`, `comment_count`,
 and `unresolved_finding_counts` by severity, so one call answers "is
-anything waiting on me and how badly". The running app does not poll: it
-is pushed a `review-request-changed` event on every successful request
-mutation, so the human sees agent actions live. That event stays
-app-internal; the synchronous tool result remains the only thing a
-client depends on.
+anything waiting on me and how badly". This tool with its status filter
+remains the documented "has this been reviewed" path for agents (W2);
+the human app mirrors it with the Reviews tab in Pulse, which is a
+frontend surface over the same store and adds no agent tool. The running
+app does not poll: it is pushed a `review-request-changed` event on every
+successful request mutation, so the human sees agent actions live. That
+event stays app-internal; the synchronous tool result remains the only
+thing a client depends on.
 
 ### Identity and ownership
 

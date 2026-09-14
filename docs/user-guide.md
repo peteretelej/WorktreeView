@@ -230,10 +230,40 @@ agents cannot reach it.
 
 Pulse is one of the app's routed surfaces: the slim bar above the
 content shows back and forward buttons, the current route
-(`pulse/inbox`, `projects/<name>`, or `settings`), and a search trigger,
-so browsing between projects, inbox categories, and settings traverses
-history; Alt + ArrowLeft and Alt + ArrowRight do the same from the
-keyboard, on review surfaces too.
+(`pulse/inbox`, `pulse/reviews`, `projects/<name>`, or `settings`), and a
+search trigger, so browsing between projects, inbox categories, and
+settings traverses history; Alt + ArrowLeft and Alt + ArrowRight do the
+same from the keyboard, on review surfaces too.
+
+## Read the Reviews tab
+
+The **Reviews** tab in Pulse answers "has this been reviewed?" across
+every project. It lists every review identity that carries a review
+request or any comment or submission activity, including approved and
+withdrawn reviews and surfaces that were commented on without a request;
+rows show the project, the change with its recorded head, the requester,
+a status chip, the round, unresolved findings, and how recently anything
+happened, newest activity first.
+
+Each row carries one of four states, and the chips above the list narrow
+by state with live counts:
+
+- **Open**: a review request is still in flight (requested, in review,
+  or changes requested).
+- **Settled**: the latest request was approved or withdrawn.
+- **Stale**: the surface's head has moved past the head the review
+  recorded, the same changed-since-review signal the inbox uses, so
+  settled work that drifted since stays visible.
+- **No request**: comments or submissions exist on the surface but no
+  review request was ever filed.
+
+**All** shows everything. The project select narrows the list to one
+repository, and the search box filters by label, head or base sha,
+requester, and note text as you type.
+
+Clicking a row opens the review the same way the inbox does, at its
+recorded head and base; if the reviewed worktree is gone, the usual
+degraded state explains that the content is no longer available.
 
 ## Keep projects current
 

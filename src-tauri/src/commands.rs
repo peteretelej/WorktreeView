@@ -8,6 +8,7 @@ use crate::git::{
     Worktree,
 };
 use crate::overview::{branch_inventory, BranchInventory};
+use crate::portal::{list_portal_reviews_in_pool, PortalReviewQuery, PortalReviewRow};
 use crate::requests::{list_attention_in_pool, AttentionQueue};
 use crate::review::{
     commit_detail, commit_page, refs_inventory, review_changes, review_file_bytes,
@@ -357,6 +358,27 @@ pub(crate) async fn list_attention(
     state: tauri::State<'_, AppState>,
 ) -> Result<AttentionQueue, CommandError> {
     list_attention_in_pool(&state.pool).await
+}
+
+// The Pulse Reviews tab's identity listing: store-only like the attention
+// queue, with the backend owning inclusion, state classification, search
+// matching, and bounds.
+#[tauri::command]
+pub(crate) async fn list_portal_reviews(
+    repo_path: Option<String>,
+    state_filter: Option<String>,
+    search: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PortalReviewRow>, CommandError> {
+    list_portal_reviews_in_pool(
+        &state.pool,
+        &PortalReviewQuery {
+            repo_path,
+            state: state_filter,
+            search,
+        },
+    )
+    .await
 }
 
 // The human review-header surface acts as Actor::Human on the shared

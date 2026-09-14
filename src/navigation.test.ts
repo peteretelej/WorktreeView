@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createNavigationHistory, sameAppLocation, type AppLocation, type ChangedFile, type ReviewIdentity, type ReviewTarget } from "./navigation.ts";
+import { createNavigationHistory, DEFAULT_PORTAL_FILTERS, sameAppLocation, type AppLocation, type ChangedFile, type PortalFilters, type ReviewIdentity, type ReviewTarget } from "./navigation.ts";
 import type { AttentionCategory } from "./requests.ts";
 
 function worktreeTarget(path: string): ReviewTarget {
@@ -22,7 +22,10 @@ function pushInbox(history: ReturnType<typeof createNavigationHistory>): void {
   history.push({ kind: "inbox" });
 }
 function portalEntry(category: AttentionCategory): AppLocation {
-  return { kind: "portal", tab: "inbox", filters: { category } };
+  return { kind: "portal", tab: "inbox", filters: { ...DEFAULT_PORTAL_FILTERS, category } };
+}
+function reviewsEntry(overrides: Partial<PortalFilters> = {}): AppLocation {
+  return { kind: "portal", tab: "reviews", filters: { ...DEFAULT_PORTAL_FILTERS, ...overrides } };
 }
 
 test("navigation starts at the inbox entry", () => {
@@ -128,8 +131,47 @@ test("portal pushes collapse only when tab and category match", () => {
   assert.equal(history.canForward(), false);
   assert.equal(history.canBack(), true);
   history.push(portalEntry("requested"));
-  assert.deepEqual(history.back(), { kind: "portal", tab: "inbox", filters: { category: "needs_human" } });
-  assert.deepEqual(history.forward(), { kind: "portal", tab: "inbox", filters: { category: "requested" } });
+  assert.deepEqual(history.back(), { kind: "portal", tab: "inbox", filters: { ...DEFAULT_PORTAL_FILTERS, category: "needs_human" } });
+  assert.deepEqual(history.forward(), { kind: "portal", tab: "inbox", filters: { ...DEFAULT_PORTAL_FILTERS, category: "requested" } });
+});
+
+test("reviews filter fields are all discriminating", () => {
+  const base = reviewsEntry();
+  assert.equal(sameAppLocation(base, reviewsEntry()), true);
+  assert.equal(sameAppLocation(base, reviewsEntry({ reviewsState: "settled" })), false);
+  assert.equal(sameAppLocation(base, reviewsEntry({ reviewsProject: "/repo" })), false);
+  assert.equal(sameAppLocation(base, reviewsEntry({ reviewsSearch: "feat" })), false);
+  // The inbox tab's own filter fields ride along, so they discriminate too.
+  assert.equal(sameAppLocation(base, reviewsEntry({ category: "needs_human" })), false);
+});
+
+test("reviews chip picks push while search edits replace in place", () => {
+  const history = createNavigationHistory();
+  history.push(reviewsEntry());
+  history.push(reviewsEntry({ reviewsState: "settled", reviewsProject: "/repo" }));
+  // Typing after a chip pick updates that entry in place: text edits never
+  // stack history entries, and an identical replace is a no-op.
+  history.replace(reviewsEntry({ reviewsState: "settled", reviewsProject: "/repo", reviewsSearch: "f" }));
+  history.replace(reviewsEntry({ reviewsState: "settled", reviewsProject: "/repo", reviewsSearch: "feat" }));
+  history.replace(reviewsEntry({ reviewsState: "settled", reviewsProject: "/repo", reviewsSearch: "feat" }));
+  assert.equal(history.canForward(), false);
+  assert.deepEqual(history.back(), reviewsEntry());
+  assert.deepEqual(history.forward(), reviewsEntry({ reviewsState: "settled", reviewsProject: "/repo", reviewsSearch: "feat" }));
+  // The next discrete selection pushes a fresh entry on top.
+  history.push(reviewsEntry({ reviewsState: "open" }));
+  assert.deepEqual(history.back(), reviewsEntry({ reviewsState: "settled", reviewsProject: "/repo", reviewsSearch: "feat" }));
+});
+
+test("tab switches between inbox and reviews push history entries", () => {
+  const history = createNavigationHistory();
+  const inbox = portalEntry("requested");
+  history.push(inbox);
+  history.push(reviewsEntry({ category: "requested" }));
+  assert.deepEqual(history.back(), inbox);
+  assert.equal(history.canForward(), true);
+  // Same tab and identical filters still collapse.
+  history.push(reviewsEntry({ category: "requested" }));
+  assert.deepEqual(history.current(), reviewsEntry({ category: "requested" }));
 });
 
 test("entry equality ignores identity object shape but honors discriminating fields", () => {

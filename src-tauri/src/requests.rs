@@ -670,7 +670,7 @@ pub(crate) struct RequestRow {
     pub(crate) needs_human: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 pub(crate) struct FindingCounts {
     #[serde(rename = "P0")]
     pub(crate) p0: i64,
@@ -983,33 +983,50 @@ fn recorded_head<'a>(
 }
 
 fn head_moved(head: &crate::retrospection::SurfaceHead, request: &RequestTriage) -> bool {
-    match &request.head_sha {
-        Some(sha) => sha != &head.head_sha,
-        None => false,
+    surface_head_moved(Some(head), request.head_sha.as_deref())
+}
+
+// The changed-since-review comparison the attention queue and the portal
+// listing share: a surface whose recorded head differs from the reviewed
+// head moved, and an unrecorded request head never reads as moved.
+pub(crate) fn surface_head_moved(
+    recorded: Option<&crate::retrospection::SurfaceHead>,
+    head_sha: Option<&str>,
+) -> bool {
+    match (recorded, head_sha) {
+        (Some(head), Some(sha)) => sha != head.head_sha,
+        _ => false,
     }
 }
 
-fn short_sha(sha: &str) -> String {
+pub(crate) fn short_sha(sha: &str) -> String {
     let hex = sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit());
     if hex { sha[..7].to_string() } else { sha.to_string() }
 }
 
-// Display label for the change column: the recorded branch label when the
+// Display label for any identity row: the recorded branch label when the
 // surface was retrospected, the worktree folder name as a fallback, and a
 // short sha for head-kind identities.
-fn change_label(request: &RequestTriage, recorded: Option<&crate::retrospection::SurfaceHead>) -> String {
-    if request.target_kind == "head" {
-        return short_sha(&request.target_key);
+pub(crate) fn identity_change_label(
+    target_kind: &str,
+    target_key: &str,
+    recorded: Option<&crate::retrospection::SurfaceHead>,
+) -> String {
+    if target_kind == "head" {
+        return short_sha(target_key);
     }
     match recorded {
         Some(head) if !head.label.is_empty() => head.label.clone(),
-        _ => request
-            .target_key
+        _ => target_key
             .rsplit(['/', '\\'])
             .next()
-            .unwrap_or(&request.target_key)
+            .unwrap_or(target_key)
             .to_string(),
     }
+}
+
+fn change_label(request: &RequestTriage, recorded: Option<&crate::retrospection::SurfaceHead>) -> String {
+    identity_change_label(&request.target_kind, &request.target_key, recorded)
 }
 
 fn request_row(

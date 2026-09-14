@@ -910,6 +910,47 @@ h2 {
   font-size: 10px;
 }
 
+/* Pulse portal tabs: the shared Inbox | Reviews strip above the portal
+   views reuses the overview underline tabs for one tab language. */
+.portal-tabs {
+  padding: 0 20px 10px;
+  flex-wrap: wrap;
+}
+
+/* Reviews tab: state chips, project select, and search share one rail
+   under the heading; the rows reuse the attention table grid. */
+.reviews-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0 20px 10px;
+  flex-wrap: wrap;
+}
+
+.reviews-project {
+  width: 220px;
+}
+
+.reviews-project select {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 11px;
+  outline: none;
+}
+
+.status-chip.reviews-stale {
+  border-color: transparent;
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.status-chip.reviews-quiet {
+  color: var(--muted);
+}
+
 /* Overview branch and archived rows reuse the worktree row grid inside a
    project-row-wrap so the hover-revealed surface pin carries over; every
    overview row shares the same right inset so the percentage columns line
