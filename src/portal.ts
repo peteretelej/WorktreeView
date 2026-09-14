@@ -225,3 +225,89 @@ export function searchResultCount(matches: PortalSearchMatches | null): number {
   if (!matches) return 0;
   return matches.comments.length + matches.requests.length + matches.commits.length;
 }
+
+// ===== Activity tab =====
+
+// Mirrors the backend's EventRow: one narrated mutation from the store's
+// append-only event log.
+export type PortalActivityEvent = {
+  id: number;
+  repo_path: string;
+  kind: string;
+  base_sha: string | null;
+  target_key: string | null;
+  target_kind: string | null;
+  request_id: number | null;
+  comment_id: number | null;
+  actor_kind: "human" | "agent";
+  actor_name: string;
+  summary: string;
+  created_at: number;
+};
+
+// The list_portal_activity answer: the newest-first feed page plus the
+// seen watermark from the same read, so the divider and the events it
+// splits share one snapshot.
+export type PortalActivityPage = { events: PortalActivityEvent[]; seen_id: number };
+
+// The closed event vocabulary's display labels; unknown kinds fall back to
+// the raw kind rather than disappearing.
+export function activityKindLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    request_created: "review requested",
+    request_claimed: "review claimed",
+    request_verdict: "verdict",
+    request_re_requested: "re-requested",
+    request_withdrawn: "withdrawn",
+    submission_delivered: "submission",
+    comment_posted: "comment",
+    comment_replied: "reply",
+    comment_resolved: "resolved",
+    comment_reopened: "reopened",
+    surface_head_moved: "head moved",
+    repo_added: "project added",
+  };
+  return labels[kind] ?? kind.replace(/_/g, " ");
+}
+
+// The row glyph's family: the closed vocabulary folds into five icons.
+export function activityKindFamily(kind: string): "request" | "comment" | "submission" | "surface" | "project" {
+  if (kind.startsWith("request")) return "request";
+  if (kind.startsWith("comment")) return "comment";
+  if (kind === "submission_delivered") return "submission";
+  if (kind === "surface_head_moved") return "surface";
+  return "project";
+}
+
+function activityDayKey(at: number): string {
+  const date = new Date(at);
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+// Consecutive events on one calendar day share a group labeled Today,
+// Yesterday, or the date; the feed arrives newest-first, so groups come
+// out newest-first too.
+export function activityDayGroups(events: PortalActivityEvent[], now: number): Array<{ label: string; events: PortalActivityEvent[] }> {
+  const startOfToday = new Date(now).setHours(0, 0, 0, 0);
+  const startOfYesterday = new Date(now).setHours(0, 0, 0, 0) - 86_400_000;
+  const groups: Array<{ label: string; events: PortalActivityEvent[] }> = [];
+  let currentKey = "";
+  for (const event of events) {
+    const key = activityDayKey(event.created_at);
+    if (key !== currentKey) {
+      const label = event.created_at >= startOfToday ? "Today"
+        : event.created_at >= startOfYesterday ? "Yesterday"
+        : new Date(event.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+      groups.push({ label, events: [] });
+      currentKey = key;
+    }
+    groups[groups.length - 1].events.push(event);
+  }
+  return groups;
+}
+
+// The "new since your last visit" divider renders above the feed's first
+// event past the seen watermark; -1 when everything visible is seen.
+export function activityDividerIndex(events: PortalActivityEvent[], seenId: number): number {
+  return events.findIndex((event) => event.id > seenId);
+}

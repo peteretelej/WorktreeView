@@ -21,6 +21,9 @@ function threadEntry(commentId: number): AppLocation {
 function threadsEntry(overrides: Partial<PortalFilters> = {}): AppLocation {
   return { kind: "portal", tab: "threads", filters: { ...DEFAULT_PORTAL_FILTERS, ...overrides } };
 }
+function activityEntry(overrides: Partial<PortalFilters> = {}): AppLocation {
+  return { kind: "portal", tab: "activity", filters: { ...DEFAULT_PORTAL_FILTERS, ...overrides } };
+}
 function file(path: string): ChangedFile {
   return { path, status: "M", untracked: false };
 }
@@ -159,6 +162,21 @@ test("threads filter fields are all discriminating", () => {
   assert.equal(sameAppLocation(base, threadsEntry({ threadsProject: "/repo" })), false);
   assert.equal(sameAppLocation(base, threadsEntry({ threadsText: "loop" })), false);
   assert.equal(sameAppLocation(base, reviewsEntry()), false, "the tab itself discriminates");
+});
+
+test("activity filter fields are discriminating and the tab joins the union", () => {
+  const base = activityEntry();
+  assert.equal(sameAppLocation(base, activityEntry()), true);
+  assert.equal(sameAppLocation(base, activityEntry({ activityProject: "/repo" })), false);
+  assert.equal(sameAppLocation(base, threadsEntry()), false, "the tab itself discriminates");
+  // The default filters carry the activity field, so a push from another
+  // tab never compares undefined against string.
+  assert.equal(DEFAULT_PORTAL_FILTERS.activityProject, "");
+  const history = createNavigationHistory();
+  history.push(activityEntry());
+  history.push(activityEntry({ activityProject: "/repo" }));
+  assert.equal(history.canForward(), false);
+  assert.deepEqual(history.back(), activityEntry());
 });
 
 test("thread entries equal on the root comment id alone", () => {

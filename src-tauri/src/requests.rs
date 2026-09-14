@@ -944,6 +944,7 @@ pub(crate) const CATEGORY_CHANGES_REQUESTED: &str = "changes_requested";
 pub(crate) const CATEGORY_NEEDS_HUMAN: &str = "needs_human";
 pub(crate) const CATEGORY_UNRESOLVED_FINDINGS: &str = "unresolved_findings";
 pub(crate) const CATEGORY_CHANGED_SINCE_REVIEW: &str = "changed_since_review";
+pub(crate) const CATEGORY_RECENT_COMMENTS: &str = "recent_comments";
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub(crate) struct AttentionRow {
@@ -963,6 +964,13 @@ pub(crate) struct AttentionRow {
     pub(crate) needs_human: bool,
     pub(crate) age_basis: i64,
     pub(crate) head_sha: Option<String>,
+    // The row's preview-line facts: what happened last on this identity,
+    // who did it, when, and how many root threads still sit unresolved.
+    // The webview formats the sentence; the backend owns the facts.
+    pub(crate) last_activity_at: i64,
+    pub(crate) last_activity_kind: String,
+    pub(crate) last_activity_actor: String,
+    pub(crate) open_thread_count: i64,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -1055,6 +1063,126 @@ const ATTENTION_FREE_FINDINGS_QUERY: &str = "SELECT rv.repo_path, rv.base_sha, r
          AND rq.target_key = rv.target_key AND rq.target_kind = rv.target_kind) \
      GROUP BY rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind";
 
+// Request-less identities' newest comment: the recent_comments pool's
+// candidates, any severity, discussion included. The free-findings pass
+// keeps first-match precedence over this one.
+const ATTENTION_RECENT_COMMENTS_QUERY: &str = "SELECT rv.repo_path, rv.base_sha, rv.target_key, \
+     rv.target_kind, MAX(c.created_at) AS last_comment_at \
+     FROM reviews AS rv \
+     JOIN comments AS c ON c.review_id = rv.id \
+     WHERE NOT EXISTS ( \
+       SELECT 1 FROM review_requests AS rq \
+       WHERE rq.repo_path = rv.repo_path AND rq.base_sha = rv.base_sha \
+         AND rq.target_key = rv.target_key AND rq.target_kind = rv.target_kind) \
+     GROUP BY rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind";
+
+// Every identity's last activity, one winner per source (comment,
+// submission, request); the queue pass picks the newest of what an
+// identity has. Human comments store the author name the review surface
+// shows ("you"), so preview lines narrate it the same way.
+const ATTENTION_ACTIVITY_QUERY: &str = "SELECT repo_path, base_sha, target_key, target_kind, \
+     kind, actor, created_at FROM ( \
+     SELECT rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind, \
+            'comment' AS kind, c.author_name AS actor, c.created_at AS created_at, \
+            ROW_NUMBER() OVER (PARTITION BY rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind \
+                               ORDER BY c.created_at DESC, c.id DESC) AS rn \
+     FROM comments c JOIN reviews rv ON rv.id = c.review_id \
+     UNION ALL \
+     SELECT rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind, \
+            'submission' AS kind, s.agent_name AS actor, s.created_at AS created_at, \
+            ROW_NUMBER() OVER (PARTITION BY rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind \
+                               ORDER BY s.created_at DESC, s.id DESC) AS rn \
+     FROM submissions s JOIN reviews rv ON rv.id = s.review_id \
+     UNION ALL \
+     SELECT rq.repo_path, rq.base_sha, rq.target_key, rq.target_kind, \
+            'request' AS kind, COALESCE(t.name, 'human') AS actor, rq.updated_at AS created_at, \
+            ROW_NUMBER() OVER (PARTITION BY rq.repo_path, rq.base_sha, rq.target_key, rq.target_kind \
+                               ORDER BY rq.updated_at DESC, rq.id DESC) AS rn \
+     FROM review_requests rq LEFT JOIN agent_tokens t ON t.id = rq.requester_token_id) \
+     AS activity WHERE rn = 1";
+
+// Unresolved root comment threads per identity: the preview line's
+// "threads open" fact.
+const ATTENTION_OPEN_THREADS_QUERY: &str = "SELECT rv.repo_path, rv.base_sha, rv.target_key, \
+     rv.target_kind, COUNT(*) AS open_threads \
+     FROM comments c JOIN reviews rv ON rv.id = c.review_id \
+     WHERE c.parent_id IS NULL AND c.resolved_at IS NULL \
+     GROUP BY rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind";
+
+#[derive(Debug, Clone, Default)]
+struct IdentityActivity {
+    last_activity_at: i64,
+    last_activity_kind: String,
+    last_activity_actor: String,
+    open_thread_count: i64,
+}
+
+type ActivityMap = std::collections::HashMap<IdentityKey, IdentityActivity>;
+
+fn activity_rank(kind: &str) -> i8 {
+    match kind {
+        "comment" => 2,
+        "submission" => 1,
+        "request" => 0,
+        _ => -1,
+    }
+}
+
+// The preview facts for every identity with any comment, submission, or
+// request activity; a row-producing identity always has at least one of
+// these, so map misses stay theoretical.
+async fn identity_activity_in_pool(pool: &SqlitePool) -> Result<ActivityMap, sqlx::Error> {
+    let mut map: ActivityMap = ActivityMap::new();
+    for row in sqlx::query(ATTENTION_ACTIVITY_QUERY).fetch_all(pool).await? {
+        let key: IdentityKey = (
+            row.try_get("repo_path")?,
+            row.try_get("base_sha")?,
+            row.try_get("target_key")?,
+            row.try_get("target_kind")?,
+        );
+        let at: i64 = row.try_get("created_at")?;
+        let kind: String = row.try_get("kind")?;
+        let actor: String = row.try_get("actor")?;
+        let entry = map.entry(key).or_default();
+        let newer = at > entry.last_activity_at
+            || (at == entry.last_activity_at && activity_rank(&kind) > activity_rank(&entry.last_activity_kind));
+        if newer {
+            entry.last_activity_at = at;
+            entry.last_activity_kind = kind;
+            entry.last_activity_actor = actor;
+        }
+    }
+    for row in sqlx::query(ATTENTION_OPEN_THREADS_QUERY).fetch_all(pool).await? {
+        let key: IdentityKey = (
+            row.try_get("repo_path")?,
+            row.try_get("base_sha")?,
+            row.try_get("target_key")?,
+            row.try_get("target_kind")?,
+        );
+        if let Some(entry) = map.get_mut(&key) {
+            entry.open_thread_count = row.try_get("open_threads")?;
+        }
+    }
+    Ok(map)
+}
+
+// The seen watermark's comparison time: the referenced event's created_at,
+// or the epoch for the not-yet-marked cursor (0), which is the intended
+// first-run flood. Events are append-only with no pruning, so a marked id
+// always resolves; a miss falls back to the epoch, which only ever
+// over-fires Recent comments.
+async fn activity_watermark_time(pool: &SqlitePool) -> Result<i64, CommandError> {
+    let seen_id = crate::store::get_settings_in_pool(pool).await?.activity_seen_id;
+    if seen_id <= 0 {
+        return Ok(0);
+    }
+    Ok(sqlx::query_scalar::<_, i64>("SELECT created_at FROM events WHERE id = ?")
+        .bind(seen_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(0))
+}
+
 type IdentityKey = (String, String, String, String);
 
 fn identity_of(request: &RequestTriage) -> IdentityKey {
@@ -1134,7 +1262,12 @@ fn request_row(
     request: &RequestTriage,
     recorded: Option<&crate::retrospection::SurfaceHead>,
     category: &str,
+    activity: &ActivityMap,
 ) -> AttentionRow {
+    let found = activity
+        .get(&identity_of(request))
+        .cloned()
+        .unwrap_or_default();
     AttentionRow {
         request_id: Some(request.id),
         repo_path: request.repo_path.clone(),
@@ -1160,6 +1293,10 @@ fn request_row(
         head_sha: recorded.map(|head| head.head_sha.clone()).or_else(|| {
             (request.target_kind == "head").then(|| request.target_key.clone())
         }),
+        last_activity_at: found.last_activity_at,
+        last_activity_kind: found.last_activity_kind,
+        last_activity_actor: found.last_activity_actor,
+        open_thread_count: found.open_thread_count,
     }
 }
 
@@ -1175,9 +1312,11 @@ fn sort_rows(rows: &mut Vec<AttentionRow>) {
 
 // The cross-repo attention queue: one read-only store pass with no Git on
 // the path. Open requests produce one row each; identities whose requests
-// all settled (or that never had one) surface their late findings, and a
+// all settled (or that never had one) surface their late findings, a
 // recorded retrospection head differing from a request's head reads as
-// changed since review. Rows reflect the last retrospection pass.
+// changed since review, and request-less identities whose newest comment
+// postdates the seen watermark queue as recent comments. Categories are
+// first-match in that order. Rows reflect the last retrospection pass.
 pub(crate) async fn list_attention_in_pool(
     pool: &SqlitePool,
 ) -> Result<AttentionQueue, CommandError> {
@@ -1203,6 +1342,8 @@ pub(crate) async fn list_attention_in_pool(
         });
     }
     let heads = crate::retrospection::recorded_surface_heads_in_pool(pool).await?;
+    let activity = identity_activity_in_pool(pool).await?;
+    let watermark_at = activity_watermark_time(pool).await?;
 
     let mut rows_by_repo: std::collections::BTreeMap<String, Vec<AttentionRow>> =
         std::collections::BTreeMap::new();
@@ -1230,7 +1371,7 @@ pub(crate) async fn list_attention_in_pool(
             rows_by_repo
                 .entry(request.repo_path.clone())
                 .or_default()
-                .push(request_row(request, recorded, category));
+                .push(request_row(request, recorded, category, &activity));
         }
     }
 
@@ -1264,7 +1405,7 @@ pub(crate) async fn list_attention_in_pool(
         } else {
             continue;
         };
-        let mut row = request_row(latest, recorded, category);
+        let mut row = request_row(latest, recorded, category, &activity);
         // A moved surface ages from when the retrospection pass recorded
         // the new head, not from the request's last move.
         if let Some(moved_at) = moved_at {
@@ -1277,7 +1418,10 @@ pub(crate) async fn list_attention_in_pool(
     }
 
     // Identities with no request at all: only their unresolved blocking
-    // findings can put them on the queue.
+    // findings can put them on the queue. Their keys are remembered so the
+    // recent-comments pass below never double-claims them (first match).
+    let mut claimed_free: std::collections::HashSet<IdentityKey> =
+        std::collections::HashSet::new();
     for row in sqlx::query(ATTENTION_FREE_FINDINGS_QUERY)
         .fetch_all(pool)
         .await?
@@ -1303,6 +1447,11 @@ pub(crate) async fn list_attention_in_pool(
             unresolved_p1: row.try_get("unresolved_p1")?,
         };
         let recorded = recorded_head(&heads, &probe);
+        claimed_free.insert(identity_of(&probe));
+        let found = activity
+            .get(&identity_of(&probe))
+            .cloned()
+            .unwrap_or_default();
         rows_by_repo.entry(repo_path.clone()).or_default().push(AttentionRow {
             request_id: None,
             repo_path,
@@ -1320,6 +1469,73 @@ pub(crate) async fn list_attention_in_pool(
             needs_human: false,
             age_basis: row.try_get("last_finding_at")?,
             head_sha: recorded.map(|head| head.head_sha.clone()),
+            last_activity_at: found.last_activity_at,
+            last_activity_kind: found.last_activity_kind,
+            last_activity_actor: found.last_activity_actor,
+            open_thread_count: found.open_thread_count,
+        });
+    }
+
+    // Request-less identities whose newest comment postdates the seen
+    // watermark join the queue as recent_comments: any severity, discussion
+    // included, drained for good once Mark all seen passes them (the queue
+    // stays a queue; settled work moves on, never back in).
+    for row in sqlx::query(ATTENTION_RECENT_COMMENTS_QUERY)
+        .fetch_all(pool)
+        .await?
+    {
+        let repo_path: String = row.try_get("repo_path")?;
+        let base_sha: String = row.try_get("base_sha")?;
+        let target_key: String = row.try_get("target_key")?;
+        let target_kind: String = row.try_get("target_kind")?;
+        let key: IdentityKey =
+            (repo_path.clone(), base_sha.clone(), target_key.clone(), target_kind.clone());
+        if claimed_free.contains(&key) {
+            continue;
+        }
+        let last_comment_at: i64 = row.try_get("last_comment_at")?;
+        if last_comment_at <= watermark_at {
+            continue;
+        }
+        let probe = RequestTriage {
+            id: 0,
+            repo_path: repo_path.clone(),
+            base_sha: base_sha.clone(),
+            target_key: target_key.clone(),
+            target_kind: target_kind.clone(),
+            requester: String::new(),
+            status: String::new(),
+            round: 0,
+            max_rounds: 0,
+            head_sha: None,
+            created_at: 0,
+            updated_at: 0,
+            unresolved_p0: 0,
+            unresolved_p1: 0,
+        };
+        let recorded = recorded_head(&heads, &probe);
+        let found = activity.get(&key).cloned().unwrap_or_default();
+        rows_by_repo.entry(repo_path.clone()).or_default().push(AttentionRow {
+            request_id: None,
+            repo_path,
+            base_sha,
+            target_key,
+            target_kind,
+            change_label: change_label(&probe, recorded),
+            requester: String::new(),
+            status: String::new(),
+            round: 0,
+            max_rounds: 0,
+            unresolved_p0: 0,
+            unresolved_p1: 0,
+            category: CATEGORY_RECENT_COMMENTS.to_string(),
+            needs_human: false,
+            age_basis: last_comment_at,
+            head_sha: recorded.map(|head| head.head_sha.clone()),
+            last_activity_at: found.last_activity_at,
+            last_activity_kind: found.last_activity_kind,
+            last_activity_actor: found.last_activity_actor,
+            open_thread_count: found.open_thread_count,
         });
     }
 
@@ -2702,5 +2918,138 @@ mod tests {
         assert_eq!(rows[0].comment_id, None);
         assert!(rows[0].summary.contains("coder-bot"));
         assert!(rows[2].summary.starts_with("changes requested by "));
+    }
+
+    // A request-less identity's discussion comment (no severity) with a
+    // controlled created_at, so watermark gating is testable.
+    async fn seed_discussion(pool: &SqlitePool, base: &str, created_at: i64, author: &str) {
+        sqlx::query(
+            "INSERT OR IGNORE INTO reviews (repo_path, base_sha, target_key, target_kind, created_at) \
+             VALUES (?, ?, ?, ?, 1)",
+        )
+        .bind(REPO)
+        .bind(base)
+        .bind(KEY)
+        .bind(KIND)
+        .execute(pool)
+        .await
+        .unwrap();
+        let review_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM reviews WHERE repo_path = ? AND base_sha = ? \
+             AND target_key = ? AND target_kind = ?",
+        )
+        .bind(REPO)
+        .bind(base)
+        .bind(KEY)
+        .bind(KIND)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO comments (review_id, parent_id, author_kind, author_name, body, \
+                    severity, created_at) \
+             VALUES (?, NULL, 'agent', ?, 'a question', NULL, ?)",
+        )
+        .bind(review_id)
+        .bind(author)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    // One narrated event at the real clock, so a subsequent mark_activity_seen
+    // sets a watermark time the seeded comments can sit before or after.
+    async fn seed_event_now(pool: &SqlitePool) {
+        crate::events::record_event(
+            pool,
+            crate::events::NewEvent {
+                repo_path: REPO.into(),
+                kind: crate::events::COMMENT_POSTED,
+                base_sha: None,
+                target_key: None,
+                target_kind: None,
+                request_id: None,
+                comment_id: None,
+                actor_kind: crate::events::ACTOR_HUMAN,
+                actor_name: "human".into(),
+                summary: "s".into(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn recent_comments_gate_on_the_watermark_and_drain_on_mark_seen() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let now = crate::store::now_millis();
+
+        // A request-less identity with a discussion comment. The unmarked
+        // watermark maps to the epoch, so the first run reads it as new.
+        seed_discussion(&pool, "base-c1", now - 60_000, "codex").await;
+        let queue = list_attention_in_pool(&pool).await.unwrap();
+        let row = row_of(&queue, "base-c1");
+        assert_eq!(row.category, CATEGORY_RECENT_COMMENTS);
+        assert_eq!(row.request_id, None);
+        assert_eq!(row.age_basis, now - 60_000);
+        assert_eq!(row.last_activity_kind, "comment");
+        assert_eq!(row.last_activity_actor, "codex");
+        assert_eq!(row.last_activity_at, now - 60_000);
+
+        // Mark all seen advances the watermark past the comment, and the
+        // drained identity leaves the queue for good.
+        seed_event_now(&pool).await;
+        assert!(crate::store::mark_activity_seen_in_pool(&pool).await.unwrap() >= 1);
+        let queue = list_attention_in_pool(&pool).await.unwrap();
+        assert!(queue
+            .repos
+            .iter()
+            .flat_map(|group| group.rows.iter())
+            .all(|row| row.base_sha != "base-c1"));
+
+        // Activity newer than the watermark fires the identity again.
+        seed_discussion(&pool, "base-c1", now + 60_000, "codex").await;
+        let queue = list_attention_in_pool(&pool).await.unwrap();
+        let row = row_of(&queue, "base-c1");
+        assert_eq!(row.category, CATEGORY_RECENT_COMMENTS);
+        assert_eq!(row.last_activity_at, now + 60_000);
+    }
+
+    #[tokio::test]
+    async fn recent_comments_yield_to_findings_and_rows_carry_preview_facts() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+
+        // A request-less identity with blocking findings and fresh
+        // discussion: first-match keeps it in unresolved_findings.
+        seed_finding(&pool, "base-f", "P0", false).await;
+        seed_discussion(&pool, "base-f", crate::store::now_millis() + 5_000, "codex").await;
+        let queue = list_attention_in_pool(&pool).await.unwrap();
+        let free = row_of(&queue, "base-f");
+        assert_eq!(free.category, CATEGORY_UNRESOLVED_FINDINGS);
+        assert_eq!(free.open_thread_count, 2, "the P0 root plus the discussion root");
+
+        // An open request's preview rides the request mutation itself.
+        let coder = agent_token(&pool, "coder-bot").await;
+        let request = create_on(&pool, &Actor::Agent(coder), "base-p", "head-p").await;
+        let queue = list_attention_in_pool(&pool).await.unwrap();
+        let open = row_of(&queue, "base-p");
+        assert_eq!(open.category, CATEGORY_REQUESTED);
+        assert_eq!(open.last_activity_kind, "request");
+        assert_eq!(open.last_activity_actor, "coder-bot");
+        assert_eq!(open.last_activity_at, get(&pool, request.id).await.updated_at);
+        assert_eq!(open.open_thread_count, 0);
+
+        // A comment landing after the request moves the preview to the
+        // comment and counts its thread.
+        seed_discussion(&pool, "base-p", crate::store::now_millis() + 5_000, "reviewer").await;
+        let queue = list_attention_in_pool(&pool).await.unwrap();
+        let open = row_of(&queue, "base-p");
+        assert_eq!(open.last_activity_kind, "comment");
+        assert_eq!(open.last_activity_actor, "reviewer");
+        assert!(open.last_activity_at > get(&pool, request.id).await.updated_at);
+        assert_eq!(open.open_thread_count, 1);
     }
 }

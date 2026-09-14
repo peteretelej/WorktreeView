@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   ATTENTION_TABS,
   attentionAge,
+  attentionPreview,
   attentionRows,
   attentionStatus,
   attentionTabCounts,
@@ -41,6 +42,10 @@ function row(overrides: Partial<AttentionRow> & { category: AttentionCategory })
     needs_human: false,
     age_basis: 1000,
     head_sha: null,
+    last_activity_at: 1000,
+    last_activity_kind: "request",
+    last_activity_actor: "coder-bot",
+    open_thread_count: 0,
     ...overrides,
   };
 }
@@ -71,6 +76,7 @@ test("tab counts aggregate rows per category across repos", () => {
     needs_human: 1,
     unresolved_findings: 1,
     changed_since_review: 1,
+    recent_comments: 0,
   });
   assert.deepEqual(attentionTabCounts(attentionRows(null)), {
     requested: 0,
@@ -78,6 +84,7 @@ test("tab counts aggregate rows per category across repos", () => {
     needs_human: 0,
     unresolved_findings: 0,
     changed_since_review: 0,
+    recent_comments: 0,
   });
 });
 
@@ -145,6 +152,32 @@ test("status chips read needs-human first and skip request-less rows", () => {
   assert.deepEqual(attentionStatus(row({ category: "requested", status: "requested" })), { label: "requested", tone: "status" });
   assert.deepEqual(attentionStatus(row({ category: "changes_requested", status: "changes_requested" })), { label: "changes requested", tone: "status" });
   assert.equal(attentionStatus(row({ category: "unresolved_findings", status: "" })), null);
+});
+
+test("preview lines narrate the backend's last-activity facts", () => {
+  const now = 10_000_000;
+  assert.equal(
+    attentionPreview(row({ category: "recent_comments", last_activity_kind: "comment", last_activity_actor: "codex", last_activity_at: now - 12 * 60_000, open_thread_count: 3 }), now),
+    "codex commented 12m ago · 3 threads open",
+  );
+  assert.equal(
+    attentionPreview(row({ category: "requested", last_activity_kind: "submission", last_activity_actor: "reviewer-bot", last_activity_at: now - 2 * 60_000, open_thread_count: 0 }), now),
+    "reviewer-bot delivered a review 2m ago",
+  );
+  assert.equal(
+    attentionPreview(row({ category: "changes_requested", last_activity_kind: "request", last_activity_actor: "human", last_activity_at: now, open_thread_count: 1 }), now),
+    "human updated the request just now · 1 thread open",
+  );
+  // A row with no recorded actor still formats as its activity kind.
+  assert.equal(
+    attentionPreview(row({ category: "recent_comments", last_activity_kind: "comment", last_activity_actor: "", last_activity_at: now - 90 * 60_000, open_thread_count: 0 }), now),
+    "commented 1h ago",
+  );
+});
+
+test("the recent comments tab is part of the rendered chip set", () => {
+  assert.ok(ATTENTION_TABS.some((tab) => tab.id === "recent_comments"));
+  assert.equal(ATTENTION_TABS.length, 6);
 });
 
 test("verdicts speak only from in review", () => {

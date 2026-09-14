@@ -32,7 +32,11 @@ Read these before anything else; every workflow below builds on them.
   start; prefer a named token for lasting use.
 - **Request visibility.** Review requests are a shared, persistent queue:
   any request on any open repo is visible to every agent through
-  `list_review_requests`, and to the human in the app's Pulse inbox.
+  `list_review_requests`, and to the human in the app's Pulse inbox. The
+  human's inbox also surfaces recent comment activity on request-less
+  surfaces (its Recent comments category, any severity) until the human
+  marks activity seen, so your comments reach the human even where no
+  request exists.
   Discovery is poll-based (the API has no subscriptions), so poll on a
   sparse cadence instead of looping.
 - **Requests may be human-initiated.** A request's requester can be an

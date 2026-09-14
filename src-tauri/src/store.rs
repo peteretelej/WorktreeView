@@ -114,6 +114,11 @@ pub struct Settings {
     pub mcp_enabled: bool,
     pub mcp_listen_address: String,
     pub mcp_port: u16,
+    // The user's Activity seen cursor (an events.id). Deliberately absent
+    // from set_settings_in_pool's write set: only mark_activity_seen
+    // advances it, so an unrelated settings save cannot round-trip a stale
+    // value and re-fire Recent comments after a mark.
+    pub activity_seen_id: i64,
 }
 
 // Bounds cover the frontend's zoom level set (src/zoom.ts); stored values
@@ -141,6 +146,7 @@ impl Default for Settings {
             mcp_enabled: true,
             mcp_listen_address: "127.0.0.1".into(),
             mcp_port: 9888,
+            activity_seen_id: 0,
         }
     }
 }
@@ -415,6 +421,11 @@ pub(crate) async fn get_settings_in_pool(pool: &SqlitePool) -> Result<Settings, 
                     settings.mcp_port = port;
                 }
             }
+            "activity_seen_id" => {
+                if let Ok(seen) = value.parse::<i64>() {
+                    settings.activity_seen_id = seen.max(0);
+                }
+            }
             _ => {}
         }
     }
@@ -461,6 +472,8 @@ pub(crate) async fn set_settings_in_pool(
         ),
         ("mcp_listen_address", settings.mcp_listen_address.clone()),
         ("mcp_port", settings.mcp_port.to_string()),
+        // activity_seen_id is intentionally absent: the bulk save's payload
+        // may carry a stale watermark, and only mark_activity_seen writes it.
     ];
     let mut transaction = pool.begin().await?;
     for (key, value) in values {
@@ -477,6 +490,24 @@ pub(crate) async fn set_settings_in_pool(
     let mut persisted = settings.clone();
     persisted.zoom = zoom;
     Ok(persisted)
+}
+
+// Advances the Activity watermark to the current event cursor in one
+// settings write and returns it (0 when the log is empty). The sole write
+// path for activity_seen_id, so Mark all seen can never be clobbered by an
+// unrelated settings save.
+pub(crate) async fn mark_activity_seen_in_pool(pool: &SqlitePool) -> Result<i64, CommandError> {
+    let max_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM events")
+        .fetch_one(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('activity_seen_id', ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(max_id.to_string())
+    .execute(pool)
+    .await?;
+    Ok(max_id)
 }
 
 #[cfg(test)]
@@ -587,10 +618,53 @@ mod tests {
             mcp_enabled: false,
             mcp_listen_address: "0.0.0.0".into(),
             mcp_port: 9899,
+            ..Settings::default()
         };
         let persisted = set_settings_in_pool(&pool, &settings).await.unwrap();
         assert_eq!(persisted, settings);
         assert_eq!(get_settings_in_pool(&pool).await.unwrap(), settings);
+    }
+
+    #[tokio::test]
+    async fn mark_activity_seen_survives_unrelated_settings_saves() {
+        let pool = test_pool().await;
+        // The watermark starts at the epoch (0): first-run activity reads as
+        // new by design.
+        assert_eq!(get_settings_in_pool(&pool).await.unwrap().activity_seen_id, 0);
+        assert_eq!(mark_activity_seen_in_pool(&pool).await.unwrap(), 0);
+
+        for _ in 0..3 {
+            crate::events::record_event(
+                &pool,
+                crate::events::NewEvent {
+                    repo_path: "/demo".into(),
+                    kind: crate::events::COMMENT_POSTED,
+                    base_sha: None,
+                    target_key: None,
+                    target_kind: None,
+                    request_id: None,
+                    comment_id: None,
+                    actor_kind: crate::events::ACTOR_AGENT,
+                    actor_name: "codex".into(),
+                    summary: "s".into(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // Three comment events seeded above (ids 1-3).
+        let marked = mark_activity_seen_in_pool(&pool).await.unwrap();
+        assert_eq!(marked, 3);
+        assert_eq!(get_settings_in_pool(&pool).await.unwrap().activity_seen_id, 3);
+
+        // A bulk settings save carrying a stale watermark payload must not
+        // move the stored cursor: only mark_activity_seen writes it.
+        let stale = Settings { activity_seen_id: 1, ..Settings::default() };
+        set_settings_in_pool(&pool, &stale).await.unwrap();
+        assert_eq!(get_settings_in_pool(&pool).await.unwrap().activity_seen_id, 3);
+
+        // Marking again is idempotent while nothing new lands.
+        assert_eq!(mark_activity_seen_in_pool(&pool).await.unwrap(), 3);
     }
 
     #[tokio::test]

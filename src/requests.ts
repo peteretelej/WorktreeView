@@ -8,7 +8,8 @@ export type AttentionCategory =
   | "changes_requested"
   | "needs_human"
   | "unresolved_findings"
-  | "changed_since_review";
+  | "changed_since_review"
+  | "recent_comments";
 
 export type AttentionRow = {
   request_id: number | null;
@@ -27,6 +28,10 @@ export type AttentionRow = {
   needs_human: boolean;
   age_basis: number;
   head_sha: string | null;
+  last_activity_at: number;
+  last_activity_kind: "comment" | "submission" | "request";
+  last_activity_actor: string;
+  open_thread_count: number;
 };
 
 export type AttentionRepoGroup = { repo_path: string; repo_name: string; rows: AttentionRow[] };
@@ -50,6 +55,7 @@ export const ATTENTION_TABS: Array<{ id: AttentionCategory; label: string; empty
   { id: "needs_human", label: "Needs human", empty: "Nothing needs a human" },
   { id: "unresolved_findings", label: "Unresolved findings", empty: "No unresolved findings" },
   { id: "changed_since_review", label: "Changed since review", empty: "Nothing changed after review" },
+  { id: "recent_comments", label: "Recent comments", empty: "No new comment activity" },
 ];
 
 export function attentionRows(queue: AttentionQueue | null): AttentionRow[] {
@@ -63,6 +69,7 @@ export function attentionTabCounts(rows: AttentionRow[]): Record<AttentionCatego
     needs_human: 0,
     unresolved_findings: 0,
     changed_since_review: 0,
+    recent_comments: 0,
   };
   for (const row of rows) counts[row.category] += 1;
   return counts;
@@ -112,6 +119,22 @@ export function attentionAge(ageBasis: number, now: number): string {
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d`;
   return `${Math.floor(days / 7)}w`;
+}
+
+// The inbox row's preview line from the backend's facts: who did what
+// last, when, and how many threads still sit open. A row with no recorded
+// actor (the theoretical miss) still formats as its activity kind.
+export function attentionPreview(row: AttentionRow, now: number): string {
+  const who = row.last_activity_actor ? `${row.last_activity_actor} ` : "";
+  const verb = row.last_activity_kind === "comment" ? "commented"
+    : row.last_activity_kind === "submission" ? "delivered a review"
+    : "updated the request";
+  const compact = attentionAge(row.last_activity_at, now);
+  const when = compact === "now" ? "just now" : `${compact} ago`;
+  const threads = row.open_thread_count > 0
+    ? ` · ${row.open_thread_count} ${row.open_thread_count === 1 ? "thread" : "threads"} open`
+    : "";
+  return `${who}${verb} ${when}${threads}`;
 }
 
 // The status chip's text and tone: a needs-human row reads in the

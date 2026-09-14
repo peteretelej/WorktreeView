@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Copy, MessageSquare, Search } from "lucide-react";
+import { Check, Copy, FolderGit2, GitBranch, Inbox, ListTree, MessageSquare, Search } from "lucide-react";
 import { attentionAge, isNarrowAttention } from "./requests.ts";
 import { copyText } from "./clipboard.ts";
 import { CommentThreadView, type CommentsApi } from "./comments.tsx";
 import { anchorLabel } from "./comments.ts";
 import {
+  activityDayGroups,
+  activityDividerIndex,
+  activityKindFamily,
+  activityKindLabel,
   projectOptions,
   reviewsStateCounts,
   reviewsStatusChip,
@@ -19,6 +23,7 @@ import {
   REVIEWS_STATE_FILTERS,
   THREADS_STATE_FILTERS,
   THREADS_VOICE_FILTERS,
+  type PortalActivityEvent,
   type PortalReviewRow,
   type PortalThreadDetail,
   type PortalThreadGroup,
@@ -276,5 +281,73 @@ export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, o
         </div>
       </aside>
     </div>
+  </section>;
+}
+
+// The Activity tab's fetched page; null until the first load lands. The
+// seen watermark rides the page, so the divider is frozen as of load and
+// only moves when Mark all seen advances it.
+export type PortalActivityPayload = { events: PortalActivityEvent[]; seen_id: number; loading: boolean; error: string };
+
+const ACTIVITY_ICONS = {
+  request: ListTree,
+  comment: MessageSquare,
+  submission: Inbox,
+  surface: GitBranch,
+  project: FolderGit2,
+} as const;
+
+// The Pulse Activity tab: the store's event log as a day-grouped feed.
+// Membership, ordering, and bounds arrive from the backend; this view
+// groups by day, narrows by the carried repo_path, and renders. The
+// divider sits at the seen watermark as of load and clears only through
+// Mark all seen.
+export function PortalActivityTab({ payload, repoNames, activityProject, onProject, onMarkSeen, marking }: {
+  payload: PortalActivityPayload | null;
+  repoNames: Map<string, string>;
+  activityProject: string;
+  onProject: (project: string) => void;
+  onMarkSeen: () => void;
+  marking: boolean;
+}) {
+  const events = payload?.events ?? [];
+  const projectEvents = rowsForProject(events, activityProject);
+  const projects = projectOptions(events);
+  const groups = activityDayGroups(projectEvents, Date.now());
+  const divider = payload ? activityDividerIndex(projectEvents, payload.seen_id) : -1;
+  const now = Date.now();
+  let flatIndex = -1;
+  return <section className="inbox-pane attention-pane activity-pane" aria-labelledby="activity-heading">
+    <div className="section-heading">
+      <div className="project-heading"><h1 id="activity-heading">Activity</h1></div>
+      <button className="secondary-button" type="button" disabled={!payload || marking} onClick={onMarkSeen}>{marking ? "Marking..." : "Mark all seen"}</button>
+    </div>
+    <div className="reviews-filter-row">
+      <label className="overview-filter-input reviews-project"><select aria-label="Filter by project" value={activityProject} onChange={(event) => onProject(event.currentTarget.value)}><option value="">All projects</option>{projects.map((path) => <option key={path} value={path}>{repoNames.get(path) ?? path}</option>)}</select></label>
+    </div>
+    {payload?.error ? <ReviewsEmpty title="Activity could not be loaded" detail={payload.error} /> : payload === null ? <ReviewsEmpty title="Loading activity..." detail="Reading the stored event log." /> : events.length === 0 ? <ReviewsEmpty title="No activity yet" detail="Review requests, comments, and submissions land here as they happen." /> : <>
+      {groups.map((group) => <div key={`${group.label}:${group.events[0].id}`} className="activity-day">
+        <div className="activity-day-label">{group.label}</div>
+        <div className="worktree-list attention-list activity-list">{group.events.map((event) => {
+          flatIndex += 1;
+          const family = activityKindFamily(event.kind);
+          const Icon = ACTIVITY_ICONS[family];
+          return <div key={event.id}>
+            {flatIndex === divider && <div className="activity-divider" role="separator" aria-label="New since your last visit"><span>New since your last visit</span></div>}
+            <div className="activity-row">
+              <span className={`activity-kind activity-kind-${family}`} title={activityKindLabel(event.kind)}><Icon size={13} /><span>{activityKindLabel(event.kind)}</span></span>
+              <span className="activity-body">
+                <strong title={event.summary}>{event.summary}</strong>
+                <span className="activity-meta">
+                  <span className="path-text" title={event.repo_path}>{repoNames.get(event.repo_path) ?? event.repo_path}</span>
+                  <span>{event.actor_kind === "human" ? "you" : event.actor_name}</span>
+                  <span>{attentionAge(event.created_at, now)}</span>
+                </span>
+              </span>
+            </div>;
+          </div>;
+        })}</div>
+      </div>)}
+    </>}
   </section>;
 }

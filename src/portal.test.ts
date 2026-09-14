@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  activityDayGroups,
+  activityDividerIndex,
+  activityKindFamily,
+  activityKindLabel,
   normalizeReviewsSearch,
   normalizeThreadsText,
   projectOptions,
@@ -17,6 +21,7 @@ import {
   REVIEWS_STATE_FILTERS,
   THREADS_STATE_FILTERS,
   THREADS_VOICE_FILTERS,
+  type PortalActivityEvent,
   type PortalReviewRow,
   type PortalSearchMatches,
   type PortalThreadRow,
@@ -171,4 +176,71 @@ test("the search result count covers every scope", () => {
   assert.equal(searchResultCount(matches), 2);
   assert.equal(searchResultCount(null), 0);
   assert.equal(searchResultCount({ comments: [], requests: [], commits: [] }), 0);
+});
+
+// ===== Activity helpers =====
+
+let nextEvent = 0;
+
+function event(overrides: Partial<PortalActivityEvent> = {}): PortalActivityEvent {
+  nextEvent += 1;
+  return {
+    id: nextEvent,
+    repo_path: "/demo",
+    kind: "comment_posted",
+    base_sha: "base",
+    target_key: "/wt",
+    target_kind: "worktree",
+    request_id: null,
+    comment_id: null,
+    actor_kind: "agent",
+    actor_name: "codex",
+    summary: "codex posted a finding",
+    created_at: 1000,
+    ...overrides,
+  };
+}
+
+test("event kinds label and fold into five icon families", () => {
+  assert.equal(activityKindLabel("request_created"), "review requested");
+  assert.equal(activityKindLabel("comment_replied"), "reply");
+  assert.equal(activityKindLabel("surface_head_moved"), "head moved");
+  assert.equal(activityKindLabel("repo_added"), "project added");
+  // Unknown kinds fall back to the raw kind, never disappear.
+  assert.equal(activityKindLabel("something_new"), "something new");
+  assert.equal(activityKindFamily("request_verdict"), "request");
+  assert.equal(activityKindFamily("comment_resolved"), "comment");
+  assert.equal(activityKindFamily("submission_delivered"), "submission");
+  assert.equal(activityKindFamily("surface_head_moved"), "surface");
+  assert.equal(activityKindFamily("repo_added"), "project");
+});
+
+test("the feed groups into day buckets newest-first", () => {
+  const now = new Date(2026, 8, 14, 12, 0, 0).getTime(); // a fixed local noon
+  const today = now - 3_600_000;
+  const yesterday = now - 26 * 3_600_000;
+  const older = now - 50 * 3_600_000;
+  const groups = activityDayGroups(
+    [event({ id: 4, created_at: today }), event({ id: 3, created_at: today }), event({ id: 2, created_at: yesterday }), event({ id: 1, created_at: older })],
+    now,
+  );
+  assert.deepEqual(groups.map((group) => group.label).slice(0, 2), ["Today", "Yesterday"]);
+  assert.equal(groups.length, 3, "older days fall back to a locale date label");
+  assert.deepEqual(groups[0].events.map((row) => row.id), [4, 3]);
+  assert.deepEqual(groups[1].events.map((row) => row.id), [2]);
+  assert.deepEqual(groups[2].events.map((row) => row.id), [1]);
+  assert.deepEqual(activityDayGroups([], now), []);
+});
+
+test("the divider sits at the first event past the seen watermark", () => {
+  const events = [event({ id: 8 }), event({ id: 7 }), event({ id: 2 })];
+  // A descending feed puts the unseen block at the top.
+  assert.equal(activityDividerIndex(events, 0), 0);
+  assert.equal(activityDividerIndex(events, 7), 0, "the newest event is still unseen");
+  // Everything seen leaves no divider.
+  assert.equal(activityDividerIndex(events, 8), -1);
+  assert.equal(activityDividerIndex([], 0), -1);
+  // Array order decides, not id order: the divider tracks the first row
+  // past the watermark wherever the feed puts it.
+  assert.equal(activityDividerIndex([event({ id: 2 }), event({ id: 7 })], 5), 1);
 });

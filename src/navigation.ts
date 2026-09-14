@@ -23,7 +23,7 @@ export type CommitInfo = { sha: string; subject: string; author: string; date: s
 // and parents.
 export type CommitDetail = { sha: string; author: string; date: string; subject: string; body: string; parents: string[] };
 
-export type PortalTab = "inbox" | "reviews" | "threads";
+export type PortalTab = "inbox" | "reviews" | "threads" | "activity";
 // The portal tabs' filter fields; each tab reads its own fields and the
 // rest ride along. Discrete selections push history entries, text edits
 // replace the current entry in place.
@@ -39,6 +39,7 @@ export type PortalFilters = {
   threadsVoice: ThreadsVoiceFilter;
   threadsProject: string;
   threadsText: string;
+  activityProject: string;
 };
 
 export const DEFAULT_PORTAL_FILTERS: PortalFilters = {
@@ -50,6 +51,7 @@ export const DEFAULT_PORTAL_FILTERS: PortalFilters = {
   threadsVoice: "all",
   threadsProject: "",
   threadsText: "",
+  activityProject: "",
 };
 
 export type AppLocation =
@@ -89,7 +91,8 @@ export function sameAppLocation(left: AppLocation, right: AppLocation): boolean 
       && left.filters.threadsState === right.filters.threadsState
       && left.filters.threadsVoice === right.filters.threadsVoice
       && left.filters.threadsProject === right.filters.threadsProject
-      && left.filters.threadsText === right.filters.threadsText;
+      && left.filters.threadsText === right.filters.threadsText
+      && left.filters.activityProject === right.filters.activityProject;
   }
   if (left.kind === "thread" && right.kind === "thread") {
     return left.commentId === right.commentId;

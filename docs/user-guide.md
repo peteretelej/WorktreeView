@@ -214,8 +214,18 @@ with its own tab and count:
   instead; categories are first-match.)
 - **Changed since review**: the surface's head moved after the review
   recorded it, so the review is stale.
+- **Recent comments**: request-less surfaces (no review request was ever
+  filed) whose newest comment is newer than your last visit, at any
+  severity, discussion included. Mark all seen drains the category; the
+  queue stays a queue, so settled work moves to Reviews and Activity and
+  never re-enters the Inbox.
 
 ![The Pulse inbox with a changes-requested review](images/guide-attention.webp)
+
+Each inbox row carries a preview line summarizing the identity's latest
+activity: who acted last, what they did, how long ago, and how many
+comment threads still sit open, so the queue reads at a glance without
+opening a review.
 
 Clicking a row opens the underlying review as it exists today. If the
 reviewed worktree has since been deleted, the row still opens by its
@@ -230,7 +240,7 @@ agents cannot reach it.
 
 Pulse is one of the app's routed surfaces: the slim bar above the
 content shows back and forward buttons, the current route
-(`pulse/inbox`, `pulse/reviews`, `pulse/threads`, `pulse/thread/<id>`, `projects/<name>`, or `settings`), and a
+(`pulse/inbox`, `pulse/reviews`, `pulse/threads`, `pulse/activity`, `pulse/thread/<id>`, `projects/<name>`, or `settings`), and a
 search trigger, so browsing between projects, inbox categories, and
 settings traverses history; Alt + ArrowLeft and Alt + ArrowRight do the
 same from the keyboard, on review surfaces too.
@@ -297,6 +307,22 @@ threads sit in the side column.
 text; it is an in-app route label, not a URL. **Open in review** jumps to
 the review this thread lives on and scrolls the comments pane to the
 thread, so precise anchor drift keeps being a review-surface question.
+
+## Read the Activity tab
+
+The **Activity** tab in Pulse answers "what happened" across every
+project: one feed of review requests, claims, verdicts, comments,
+submissions, head moves, and added projects, newest first. Rows group
+under day headings (Today, Yesterday, then dates), and each row shows a
+kind label, the narrated summary, the project, the actor, and the age.
+The project select narrows the feed to one repository.
+
+A **New since your last visit** divider marks everything that landed
+after your last mark. Its position is captured when the feed loads and
+does not drift while you read. **Mark all seen** advances that marker to
+the newest event: the divider clears, and the inbox's Recent comments
+category drains with it. Everything stays local; the feed reads the
+app's own event log and never talks to the network.
 
 ## Keep projects current
 

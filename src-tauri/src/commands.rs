@@ -32,8 +32,8 @@ use crate::reviews::{
     Submission,
 };
 use crate::store::{
-    get_settings_in_pool, load_repos, open_repo_path, remove_repo_in_pool, set_repo_pinned_in_pool,
-    set_settings_in_pool, Repo, Settings,
+    get_settings_in_pool, load_repos, mark_activity_seen_in_pool, open_repo_path,
+    remove_repo_in_pool, set_repo_pinned_in_pool, set_settings_in_pool, Repo, Settings,
 };
 use crate::transport::{
     restart, ListenerConfig, ListenerOwner, ListenerStatus, McpStatusHandle, TransportDeps,
@@ -263,6 +263,15 @@ pub(crate) async fn set_settings(
     set_settings_in_pool(&state.pool, &settings).await
 }
 
+// Marks everything currently in the event log seen and returns the new
+// watermark (the cursor the Activity divider and Recent comments read).
+#[tauri::command]
+pub(crate) async fn mark_activity_seen(
+    state: tauri::State<'_, AppState>,
+) -> Result<i64, CommandError> {
+    mark_activity_seen_in_pool(&state.pool).await
+}
+
 #[tauri::command]
 pub(crate) async fn list_agent_tokens(
     state: tauri::State<'_, AppState>,
@@ -426,6 +435,35 @@ pub(crate) async fn search_portal(
     state: tauri::State<'_, AppState>,
 ) -> Result<PortalSearchMatches, CommandError> {
     search_portal_in_pool(&state.pool, &needle).await
+}
+
+// The Activity tab's feed page: the store's event log newest-first, with
+// the seen watermark from the same read, so the "new since your last
+// visit" divider and the events it splits share one snapshot.
+#[derive(Debug, Serialize)]
+pub(crate) struct PortalActivityPage {
+    pub(crate) events: Vec<crate::events::EventRow>,
+    pub(crate) seen_id: i64,
+}
+
+#[tauri::command]
+pub(crate) async fn list_portal_activity(
+    repo_path: Option<String>,
+    limit: Option<usize>,
+    state: tauri::State<'_, AppState>,
+) -> Result<PortalActivityPage, CommandError> {
+    let events = crate::events::list_events_in_pool(
+        &state.pool,
+        &crate::events::EventQuery {
+            since_id: 0,
+            repo_path,
+            limit: limit.unwrap_or(crate::events::EVENT_LIST_LIMIT),
+            ascending: false,
+        },
+    )
+    .await?;
+    let seen_id = get_settings_in_pool(&state.pool).await?.activity_seen_id;
+    Ok(PortalActivityPage { events, seen_id })
 }
 
 // The human review-header surface acts as Actor::Human on the shared

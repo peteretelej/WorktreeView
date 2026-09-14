@@ -20,12 +20,13 @@ use commands::{
     create_agent_token, create_comment, create_review_request, delete_agent_token,
     delete_comment, describe_commit, edit_comment, fetch_project, fetch_review_objects,
     get_branch_inventory, get_mcp_status, get_portal_thread, get_settings, list_agent_tokens,
-    list_attention, list_comments, list_commits, list_portal_reviews, list_portal_threads,
-    list_refs, list_repos, list_requests, list_review_changes, list_submissions, list_surfaces,
-    list_worktree_status, list_worktrees, match_comment_anchors, open_log_dir, open_repo,
-    open_review_file, read_review_file, read_review_file_bytes, read_review_patch, remove_repo,
-    reply_comment, restart_mcp, search_portal, update_review_request, set_comment_resolved,
-    set_repo_pinned, set_settings, set_surface_pinned,
+    list_attention, list_comments, list_commits, list_portal_activity, list_portal_reviews,
+    list_portal_threads, list_refs, list_repos, list_requests, list_review_changes,
+    list_submissions, list_surfaces, list_worktree_status, list_worktrees, mark_activity_seen,
+    match_comment_anchors, open_log_dir, open_repo, open_review_file, read_review_file,
+    read_review_file_bytes, read_review_patch, remove_repo, reply_comment, restart_mcp,
+    search_portal, update_review_request, set_comment_resolved, set_repo_pinned, set_settings,
+    set_surface_pinned,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -292,6 +293,8 @@ pub fn run() {
             list_portal_threads,
             get_portal_thread,
             search_portal,
+            list_portal_activity,
+            mark_activity_seen,
             list_requests,
             create_review_request,
             update_review_request,
