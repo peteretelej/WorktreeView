@@ -4,6 +4,7 @@ import { Check, Copy, MessageSquare, Search } from "lucide-react";
 import { attentionAge, isNarrowAttention } from "./requests.ts";
 import { copyText } from "./clipboard.ts";
 import { CommentThreadView, type CommentsApi } from "./comments.tsx";
+import { anchorLabel } from "./comments.ts";
 import {
   projectOptions,
   reviewsStateCounts,
@@ -255,6 +256,10 @@ export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, o
     </div>
     <div className="thread-detail-body">
       <div className="thread-conversation">
+        {detail.root.snippet && <div className="thread-snippet">
+          <span className="thread-snippet-label" title="The anchored lines as stored when the comment was written"><code className="path-text">{anchorLabel(detail.root)}</code></span>
+          <pre className="comment-snippet"><code>{detail.root.snippet}</code></pre>
+        </div>}
         <CommentThreadView thread={{ comment: detail.root, replies: detail.replies }} status={null} comments={commentsApi} />
       </div>
       <aside className="thread-others" aria-label="Other threads on this change">

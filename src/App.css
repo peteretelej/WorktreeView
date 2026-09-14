@@ -1120,6 +1120,19 @@ h2 {
   padding: 0;
 }
 
+/* The stored anchor snippet sits above the conversation with its stored
+   anchor label; the portal never recomputes drift. */
+.thread-snippet {
+  margin: 0 0 14px;
+}
+
+.thread-snippet-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .thread-others {
   border: 1px solid var(--border);
   border-radius: 6px;
