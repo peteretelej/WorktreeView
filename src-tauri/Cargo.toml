@@ -1,6 +1,6 @@
 [package]
 name = "worktreeview"
-version = "0.4.0"
+version = "0.4.1"
 description = "Code review UI for Git worktrees"
 license = "Apache-2.0"
 authors = ["Peter Etelej"]
