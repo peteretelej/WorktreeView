@@ -68,8 +68,7 @@ export function PortalReviewsTab({ payload, repoNames, reviewsState, reviewsProj
   }, []);
   const narrow = paneWidth > 0 && isNarrowAttention(paneWidth);
   const now = Date.now();
-  return <section className="inbox-pane attention-pane reviews-pane" ref={paneRef} aria-labelledby="reviews-heading">
-    <div className="section-heading"><div className="project-heading"><h1 id="reviews-heading">Reviews</h1></div></div>
+  return <section className="inbox-pane attention-pane reviews-pane" ref={paneRef} aria-label="Reviews">
     <div className="reviews-filter-row">
       <div className="overview-tabs" role="tablist" aria-label="Review states">{REVIEWS_STATE_FILTERS.map((chip) => <button key={chip.id} role="tab" type="button" aria-selected={reviewsState === chip.id} className={`overview-tab ${reviewsState === chip.id ? "active" : ""}`} onClick={() => onState(chip.id)}>{chip.label}<span className="tab-count">{counts[chip.id]}</span></button>)}</div>
       <label className="overview-filter-input reviews-project"><select aria-label="Filter by project" value={reviewsProject} onChange={(event) => onProject(event.currentTarget.value)}><option value="">All projects</option>{projects.map((path) => <option key={path} value={path}>{repoNames.get(path) ?? path}</option>)}</select></label>
@@ -143,8 +142,7 @@ export function PortalThreadsTab({ payload, repoNames, threadsState, threadsVoic
   const activeChip = THREADS_STATE_FILTERS.find((chip) => chip.id === threadsState) ?? THREADS_STATE_FILTERS[0];
   const projects = projectOptions(groups.flatMap((group) => group.threads));
   const now = Date.now();
-  return <section className="inbox-pane attention-pane threads-pane" aria-labelledby="threads-heading">
-    <div className="section-heading"><div className="project-heading"><h1 id="threads-heading">Threads</h1></div></div>
+  return <section className="inbox-pane attention-pane threads-pane" aria-label="Threads">
     <div className="reviews-filter-row">
       <div className="overview-tabs" role="tablist" aria-label="Thread states">{THREADS_STATE_FILTERS.map((chip) => <button key={chip.id} role="tab" type="button" aria-selected={threadsState === chip.id} className={`overview-tab ${threadsState === chip.id ? "active" : ""}`} onClick={() => onState(chip.id)}>{chip.label}<span className="tab-count">{counts[chip.id]}</span></button>)}</div>
       <div className="overview-tabs" role="tablist" aria-label="Thread voices">{THREADS_VOICE_FILTERS.map((chip) => <button key={chip.id} role="tab" type="button" aria-selected={threadsVoice === chip.id} className={`overview-tab ${threadsVoice === chip.id ? "active" : ""}`} onClick={() => onVoice(chip.id)}>{chip.label}</button>)}</div>
@@ -317,13 +315,10 @@ export function PortalActivityTab({ payload, repoNames, activityProject, onProje
   const divider = payload ? activityDividerIndex(projectEvents, payload.seen_id) : -1;
   const now = Date.now();
   let flatIndex = -1;
-  return <section className="inbox-pane attention-pane activity-pane" aria-labelledby="activity-heading">
-    <div className="section-heading">
-      <div className="project-heading"><h1 id="activity-heading">Activity</h1></div>
-      <button className="secondary-button" type="button" disabled={!payload || marking} onClick={onMarkSeen}>{marking ? "Marking..." : "Mark all seen"}</button>
-    </div>
+  return <section className="inbox-pane attention-pane activity-pane" aria-label="Activity">
     <div className="reviews-filter-row">
       <label className="overview-filter-input reviews-project"><select aria-label="Filter by project" value={activityProject} onChange={(event) => onProject(event.currentTarget.value)}><option value="">All projects</option>{projects.map((path) => <option key={path} value={path}>{repoNames.get(path) ?? path}</option>)}</select></label>
+      <button className="secondary-button activity-seen" type="button" disabled={!payload || marking} onClick={onMarkSeen}>{marking ? "Marking..." : "Mark all seen"}</button>
     </div>
     {payload?.error ? <ReviewsEmpty title="Activity could not be loaded" detail={payload.error} /> : payload === null ? <ReviewsEmpty title="Loading activity..." detail="Reading the stored event log." /> : events.length === 0 ? <ReviewsEmpty title="No activity yet" detail="Review requests, comments, and submissions land here as they happen." /> : <>
       {groups.map((group) => <div key={`${group.label}:${group.events[0].id}`} className="activity-day">

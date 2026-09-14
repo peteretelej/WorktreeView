@@ -196,8 +196,10 @@ scores, or decides for anyone.
 
 The **Pulse** tab in the sidebar is the cross-project to-do list:
 every project's review activity lands in one inbox, newest signal first.
-The tab carries a live count, and the inbox splits into categories, each
-with its own tab and count:
+Opening Pulse lands on the Inbox tab of one shared page: a heading and a
+tab strip (Inbox, Threads, Reviews, Activity) sit above all four views,
+each tab carrying a live count of its content. The inbox itself splits
+into categories, each with its own tab and count:
 
 - **Review requested**: a review was asked for (by you or an agent) and
   no one has picked it up yet.

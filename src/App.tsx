@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronsLeft, FolderGit2, MessageSquare, ChevronDown, ChevronRight, CircleDot, Copy, CornerUpLeft, GitBranch, GitCommitHorizontal, HardDrive, Inbox, ListTree, MessagesSquare, MoreVertical, Pin, PinOff, RefreshCw, Search, Settings as SettingsIcon, Trash2, X } from "lucide-react";
+import { ChevronsLeft, Clock, FileCheck, FolderGit2, MessageSquare, ChevronDown, ChevronRight, CircleDot, Copy, CornerUpLeft, GitBranch, GitCommitHorizontal, HardDrive, Inbox, ListTree, MessagesSquare, MoreVertical, Pin, PinOff, RefreshCw, Search, Settings as SettingsIcon, Trash2, X } from "lucide-react";
 import { createNavigationHistory, DEFAULT_PORTAL_FILTERS, sameReviewTarget, type AppLocation, type BranchInventory, type BranchSummary, type ChangedFile, type CommitInfo, type GoneSurface, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type ReviewsStateFilter, type SurfaceListing, type ThreadsStateFilter, type ThreadsVoiceFilter, type Worktree } from "./navigation";
 import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
 import { SettingsPage, applyTheme, defaultSettings, getSettings, persistSettings, type ChangedFilesView, type Settings } from "./settings";
@@ -243,12 +243,13 @@ function App() {
     return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
   }, []);
   useEffect(() => { void refreshAttention(); }, []);
-  // The Reviews tab's listing follows its location filters: the search
+  // The Reviews tab's listing loads while the portal is open (not only on
+  // its own tab) so the shared tab strip's count stays live: the search
   // needle narrows server-side (debounced while typing), and a refreshed
-  // attention payload re-runs it so request events keep an open tab live.
+  // attention payload re-runs it so request events keep the tab live.
   // A failed refresh keeps the last payload; the tab is stale, not gone.
   useEffect(() => {
-    if (portalLocation?.tab !== "reviews") return;
+    if (!portalLocation) return;
     const search = normalizeReviewsSearch(portalLocation.filters.reviewsSearch);
     let cancelled = false;
     const timer = setTimeout(() => {
@@ -259,12 +260,13 @@ function App() {
     return () => { cancelled = true; clearTimeout(timer); };
   }, [portalLocation?.tab, portalLocation?.filters.reviewsSearch, attention]);
   // The Threads tab's listing (and the detail view's other-threads column)
-  // follows the threads text needle server-side; the discrete filters stay
-  // client-side over the same payload so chip counts keep their meaning.
-  // A refreshed attention payload re-runs it so comment-driven activity
-  // keeps an open tab live; failures keep the last payload.
+  // loads while the portal is open so the tab strip's count stays live: the
+  // text needle narrows server-side; the discrete filters stay client-side
+  // over the same payload so chip counts keep their meaning. A refreshed
+  // attention payload re-runs it so comment-driven activity keeps the tab
+  // live; failures keep the last payload.
   useEffect(() => {
-    if (portalLocation?.tab !== "threads" && !threadLocation) return;
+    if (!portalLocation && !threadLocation) return;
     const text = normalizeThreadsText(portalLocation?.filters.threadsText ?? "");
     let cancelled = false;
     const timer = setTimeout(() => {
@@ -288,11 +290,12 @@ function App() {
   }, [threadLocation?.commentId, threadsNonce]);
   // The Activity tab's feed page carries the seen watermark from the same
   // read, so the divider is frozen as of the load; it moves only when Mark
-  // all seen advances the watermark below. Request-driven refreshes re-run
-  // the fetch the same way the Reviews and Threads tabs do; failures keep
-  // the last page.
+  // all seen advances the watermark below. The page loads while the portal
+  // is open so the tab strip's count stays live; request-driven refreshes
+  // re-run the fetch the same way the Reviews and Threads tabs do; failures
+  // keep the last page.
   useEffect(() => {
-    if (portalLocation?.tab !== "activity") return;
+    if (!portalLocation) return;
     let cancelled = false;
     invoke<{ events: PortalActivityPayload["events"]; seen_id: number }>("list_portal_activity", { repoPath: null, limit: null })
       .then((page) => { if (!cancelled) setPortalActivity({ events: page.events, seen_id: page.seen_id, loading: false, error: "" }); })
@@ -988,6 +991,11 @@ function App() {
   const showCommitsBar = history !== null && (historyAnchor !== null ? historyAnchorKey === historyKeyOf(history) : activeCommitSha !== null && reviewLocation !== null && history.repoPath === reviewLocation.identity.repoPath);
   // The queue's tab badge counts every queued row across categories.
   const attentionCount = attentionRows(attention).length;
+  // The portal tab strip's counts: each tab's payload total, null until
+  // that payload's first load lands.
+  const portalThreadsCount = portalThreads ? portalThreads.groups.reduce((total, group) => total + group.threads.length, 0) : null;
+  const portalReviewsCount = portalReviews?.rows.length ?? null;
+  const portalActivityCount = portalActivity?.events.length ?? null;
   // The top bar addresses non-review surfaces; review and history keep
   // their own headers with the history controls.
   const topBarLabel = portalLocation ? `pulse/${portalLocation.tab}` : threadLocation ? "pulse/thread" : location.kind === "inbox" ? activeRepo ? `projects/${activeRepo.name}` : "projects" : settingsLocation ? "settings" : null;
@@ -1046,18 +1054,24 @@ function App() {
 </div>
 </aside>
 <section className="workspace">
-<div className="live-error" role="status" aria-live="polite">{statusMessage}</div>{operationError && <div className="operation-error" role="status">{operationError}</div>}{topBarLabel && <TopBar label={topBarLabel} canBack={nav.canBack()} canForward={nav.canForward()} onBack={() => nav.back()} onForward={() => nav.forward()} onSearch={openPalette} />}<main className="content">{portalLocation ? <>
-<div className="overview-tabs portal-tabs" role="tablist" aria-label="Pulse tabs">
-<button role="tab" type="button" aria-selected={portalLocation.tab === "inbox"} className={`overview-tab ${portalLocation.tab === "inbox" ? "active" : ""}`} onClick={() => nav.push({ ...portalLocation, tab: "inbox" })}>Inbox</button>
-<button role="tab" type="button" aria-selected={portalLocation.tab === "reviews"} className={`overview-tab ${portalLocation.tab === "reviews" ? "active" : ""}`} onClick={() => nav.push({ ...portalLocation, tab: "reviews" })}>Reviews</button>
-<button role="tab" type="button" aria-selected={portalLocation.tab === "threads"} className={`overview-tab ${portalLocation.tab === "threads" ? "active" : ""}`} onClick={() => nav.push({ ...portalLocation, tab: "threads" })}>Threads</button>
-<button role="tab" type="button" aria-selected={portalLocation.tab === "activity"} className={`overview-tab ${portalLocation.tab === "activity" ? "active" : ""}`} onClick={() => nav.push({ ...portalLocation, tab: "activity" })}>Activity</button>
-</div>{portalLocation.tab === "reviews" ?
+<div className="live-error" role="status" aria-live="polite">{statusMessage}</div>{operationError && <div className="operation-error" role="status">{operationError}</div>}{topBarLabel && <TopBar label={topBarLabel} canBack={nav.canBack()} canForward={nav.canForward()} onBack={() => nav.back()} onForward={() => nav.forward()} onSearch={openPalette} />}<main className="content">{portalLocation ?
+      <div className="portal-view">
+        <header className="portal-head">
+          <h1>Pulse</h1>
+          <p className="portal-sub">Everything moving across your projects: what needs you, what is being said, what was decided, what happened.</p>
+        </header>
+        <div className="overview-tabs portal-tabs" role="tablist" aria-label="Pulse tabs">
+          <button role="tab" type="button" aria-selected={portalLocation.tab === "inbox"} className={`overview-tab ${portalLocation.tab === "inbox" ? "active" : ""}`} onClick={() => nav.push({ ...portalLocation, tab: "inbox" })}><Inbox size={14} /><span>Inbox</span><span className="tab-count">{attentionCount}</span></button>
+          <button role="tab" type="button" aria-selected={portalLocation.tab === "threads"} className={`overview-tab ${portalLocation.tab === "threads" ? "active" : ""}`} onClick={() => nav.push({ ...portalLocation, tab: "threads" })}><MessageSquare size={14} /><span>Threads</span>{portalThreadsCount !== null && <span className="tab-count">{portalThreadsCount}</span>}</button>
+          <button role="tab" type="button" aria-selected={portalLocation.tab === "reviews"} className={`overview-tab ${portalLocation.tab === "reviews" ? "active" : ""}`} onClick={() => nav.push({ ...portalLocation, tab: "reviews" })}><FileCheck size={14} /><span>Reviews</span>{portalReviewsCount !== null && <span className="tab-count">{portalReviewsCount}</span>}</button>
+          <button role="tab" type="button" aria-selected={portalLocation.tab === "activity"} className={`overview-tab ${portalLocation.tab === "activity" ? "active" : ""}`} onClick={() => nav.push({ ...portalLocation, tab: "activity" })}><Clock size={14} /><span>Activity</span>{portalActivityCount !== null && <span className="tab-count">{portalActivityCount}</span>}</button>
+        </div>
+        {portalLocation.tab === "reviews" ?
       <PortalReviewsTab payload={portalReviews} repoNames={repoNames} reviewsState={portalLocation.filters.reviewsState} reviewsProject={portalLocation.filters.reviewsProject} reviewsSearch={portalLocation.filters.reviewsSearch} onState={(state: ReviewsStateFilter) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, reviewsState: state } })} onProject={(project) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, reviewsProject: project } })} onSearch={(search) => nav.replace({ ...portalLocation, filters: { ...portalLocation.filters, reviewsSearch: search } })} onOpenRow={openReviewIdentity} />
       : portalLocation.tab === "threads" ? <PortalThreadsTab payload={portalThreads} repoNames={repoNames} threadsState={portalLocation.filters.threadsState} threadsVoice={portalLocation.filters.threadsVoice} threadsProject={portalLocation.filters.threadsProject} threadsText={portalLocation.filters.threadsText} onState={(state: ThreadsStateFilter) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, threadsState: state } })} onVoice={(voice: ThreadsVoiceFilter) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, threadsVoice: voice } })} onProject={(project) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, threadsProject: project } })} onText={(text) => nav.replace({ ...portalLocation, filters: { ...portalLocation.filters, threadsText: text } })} onOpenThread={openPortalThread} />
       : portalLocation.tab === "activity" ? <PortalActivityTab payload={portalActivity} repoNames={repoNames} activityProject={portalLocation.filters.activityProject} onProject={(project) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, activityProject: project } })} onMarkSeen={() => void markActivitySeen()} marking={markingSeen} />
       : <AttentionQueueView queue={attention} endpointEnabled={settings.mcp_enabled} tab={portalLocation.filters.category} onTab={(category) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, category } })} onOpenRow={openAttentionRow} />}
-      </>
+      </div>
       : threadLocation ?
       <PortalThreadDetail payload={portalThread} groups={portalThreads?.groups ?? []} repoNames={repoNames} onOpenThread={openPortalThread} onOpenReview={openThreadInReview} onChanged={() => setThreadsNonce((nonce) => nonce + 1)} />
       : reviewLocation ?
@@ -1153,8 +1167,7 @@ function AttentionQueueView({ queue, endpointEnabled, tab, onTab, onOpenRow }: {
   const visible = rowsForAttentionTab(rows, tab);
   const activeTab = ATTENTION_TABS.find((item) => item.id === tab) ?? ATTENTION_TABS[0];
   const now = Date.now();
-  return <section className="inbox-pane attention-pane" ref={paneRef} aria-labelledby="attention-heading">
-    <div className="section-heading"><div className="project-heading"><h1 id="attention-heading">Inbox</h1></div></div>
+  return <section className="inbox-pane attention-pane" ref={paneRef} aria-label="Inbox">
     {!endpointEnabled && <p className="attention-endpoint-note">The agent endpoint is off, so agents cannot reach this queue. Reviews already delivered still appear.</p>}
     <div className="overview-tabs" role="tablist" aria-label="Inbox categories">{ATTENTION_TABS.map((item) => <button key={item.id} role="tab" type="button" aria-selected={tab === item.id} className={`overview-tab ${tab === item.id ? "active" : ""}`} onClick={() => onTab(item.id)}>{item.label}<span className="tab-count">{counts[item.id]}</span></button>)}</div>
     {rows.length === 0 ? <Empty icon={<Inbox size={24} />} title="Nothing needs attention" detail="Review requests and findings land here as agents work." /> : <>
