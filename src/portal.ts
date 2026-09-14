@@ -1,9 +1,11 @@
-// Mirrors of the serde types behind the list_portal_reviews command, plus
-// the pure helpers the Reviews tab renders through: the backend owns
-// inclusion, state classification, search matching, and ordering, and the
+// Mirrors of the serde types behind the portal commands (list_portal_reviews,
+// list_portal_threads, get_portal_thread, search_portal), plus the pure
+// helpers the portal views render through: the backend owns inclusion,
+// grouping, state classification, search matching, and bounds, and the
 // webview only counts, narrows by carried fields, and labels from the
 // payload.
 
+import type { ReviewComment } from "./comments.ts";
 import { requestStatusLabel } from "./requests.ts";
 
 export type PortalReviewState = "open" | "settled" | "stale" | "no_request";
@@ -65,12 +67,14 @@ export function rowsForReviewsState(rows: PortalReviewRow[], filter: ReviewsStat
   return filter === "all" ? rows : rows.filter((row) => row.state === filter);
 }
 
-export function rowsForProject(rows: PortalReviewRow[], project: string): PortalReviewRow[] {
+// Shared project narrowing for both portal listings; any row carrying its
+// repo_path works.
+export function rowsForProject<T extends { repo_path: string }>(rows: T[], project: string): T[] {
   return project === "" ? rows : rows.filter((row) => row.repo_path === project);
 }
 
 // Distinct project paths in the payload, sorted for a stable select.
-export function reviewsProjectOptions(rows: PortalReviewRow[]): string[] {
+export function projectOptions<T extends { repo_path: string }>(rows: T[]): string[] {
   return [...new Set(rows.map((row) => row.repo_path))].sort((left, right) => left.localeCompare(right));
 }
 
@@ -83,4 +87,141 @@ export function reviewsStatusChip(row: PortalReviewRow): { label: string; tone: 
     case "open": return { label: requestStatusLabel(row.status), tone: "open" };
     case "no_request": return { label: "no request", tone: "quiet" };
   }
+}
+
+// ===== Threads tab =====
+
+export type ThreadsStateFilter = "open" | "resolved" | "all";
+export type ThreadsVoiceFilter = "all" | "human" | "agents";
+
+export type PortalParticipant = { author_kind: "human" | "agent"; author_name: string };
+
+export type PortalThreadRow = {
+  root_comment_id: number;
+  repo_path: string;
+  base_sha: string;
+  target_key: string;
+  target_kind: "worktree" | "head";
+  excerpt: string;
+  severity: "P0" | "P1" | "P2" | "P3" | null;
+  anchor: string | null;
+  participants: PortalParticipant[];
+  reply_count: number;
+  resolved_at: number | null;
+  last_activity_at: number;
+  head_moved: boolean;
+};
+
+// One change's thread group: threads grouped by (repo_path, target_key,
+// target_kind), so they survive base changes.
+export type PortalThreadGroup = {
+  repo_path: string;
+  target_key: string;
+  target_kind: "worktree" | "head";
+  change_label: string;
+  open_count: number;
+  threads: PortalThreadRow[];
+};
+
+// A thread's full conversation; the root and replies are the review
+// surface's stored comments, anchors and snippets included.
+export type PortalThreadDetail = {
+  root_comment_id: number;
+  repo_path: string;
+  base_sha: string;
+  target_key: string;
+  target_kind: "worktree" | "head";
+  change_label: string;
+  head_sha: string | null;
+  head_moved: boolean;
+  resolved_at: number | null;
+  root: ReviewComment;
+  replies: ReviewComment[];
+  participants: PortalParticipant[];
+};
+
+// Chip order and copy; the tab's empty state reuses the All chip's copy.
+export const THREADS_STATE_FILTERS: Array<{ id: ThreadsStateFilter; label: string; empty: string }> = [
+  { id: "open", label: "Open", empty: "No open threads" },
+  { id: "resolved", label: "Resolved", empty: "No resolved threads" },
+  { id: "all", label: "All", empty: "No threads yet" },
+];
+
+export const THREADS_VOICE_FILTERS: Array<{ id: ThreadsVoiceFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "human", label: "Human" },
+  { id: "agents", label: "Agents" },
+];
+
+// The threads text needle narrows server-side like the reviews search;
+// only trimming happens here.
+export function normalizeThreadsText(raw: string): string {
+  return raw.trim();
+}
+
+export function threadsStateCounts(rows: PortalThreadRow[]): Record<ThreadsStateFilter, number> {
+  const counts: Record<ThreadsStateFilter, number> = { open: 0, resolved: 0, all: rows.length };
+  for (const row of rows) counts[row.resolved_at === null ? "open" : "resolved"] += 1;
+  return counts;
+}
+
+export function rowsForThreadsState(rows: PortalThreadRow[], filter: ThreadsStateFilter): PortalThreadRow[] {
+  if (filter === "all") return rows;
+  return rows.filter((row) => (filter === "open" ? row.resolved_at === null : row.resolved_at !== null));
+}
+
+// Voice reads any participant, exactly like the backend's filter: a thread
+// answers the human or agents voice when any participant carries it. The
+// voice id is plural ("agents"); the stored author_kind is singular.
+export function rowsForThreadsVoice(rows: PortalThreadRow[], voice: ThreadsVoiceFilter): PortalThreadRow[] {
+  if (voice === "all") return rows;
+  const kind = voice === "human" ? "human" : "agent";
+  return rows.filter((row) => row.participants.some((participant) => participant.author_kind === kind));
+}
+
+// The thread's in-app route label; hash serialization is deferred, so this
+// is the path text the Copy link action shares, not a URL.
+export function threadRouteLabel(rootCommentId: number): string {
+  return `pulse/thread/${rootCommentId}`;
+}
+
+// ===== Palette search =====
+
+export type PortalSearchComment = {
+  comment_id: number;
+  root_comment_id: number;
+  excerpt: string;
+  repo_path: string;
+  change_label: string;
+};
+
+export type PortalSearchRequest = {
+  repo_path: string;
+  base_sha: string;
+  target_key: string;
+  target_kind: "worktree" | "head";
+  head_sha: string | null;
+  change_label: string;
+  status: string;
+  requester: string;
+  note: string;
+};
+
+export type PortalSearchCommit = {
+  repo_path: string;
+  sha: string;
+  subject: string;
+  parents: string[];
+};
+
+export type PortalSearchMatches = {
+  comments: PortalSearchComment[];
+  requests: PortalSearchRequest[];
+  commits: PortalSearchCommit[];
+};
+
+// The palette's combined result count: every scope rides one paged list.
+export function searchResultCount(matches: PortalSearchMatches | null): number {
+  if (!matches) return 0;
+  return matches.comments.length + matches.requests.length + matches.commits.length;
 }

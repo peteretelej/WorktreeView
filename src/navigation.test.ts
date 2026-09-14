@@ -13,7 +13,13 @@ function reviewIdentity(overrides: Partial<ReviewIdentity> & { target: ReviewTar
   return { repoPath: "/repo", base: "main", scope: "committed", reversed: false, ...overrides };
 }
 function reviewEntry(overrides: Partial<Extract<AppLocation, { kind: "review" }>> & { identity: ReviewIdentity }): AppLocation {
-  return { kind: "review", selectedFile: null, ...overrides };
+  return { kind: "review", selectedFile: null, focusedCommentId: null, ...overrides };
+}
+function threadEntry(commentId: number): AppLocation {
+  return { kind: "thread", commentId };
+}
+function threadsEntry(overrides: Partial<PortalFilters> = {}): AppLocation {
+  return { kind: "portal", tab: "threads", filters: { ...DEFAULT_PORTAL_FILTERS, ...overrides } };
 }
 function file(path: string): ChangedFile {
   return { path, status: "M", untracked: false };
@@ -143,6 +149,37 @@ test("reviews filter fields are all discriminating", () => {
   assert.equal(sameAppLocation(base, reviewsEntry({ reviewsSearch: "feat" })), false);
   // The inbox tab's own filter fields ride along, so they discriminate too.
   assert.equal(sameAppLocation(base, reviewsEntry({ category: "needs_human" })), false);
+});
+
+test("threads filter fields are all discriminating", () => {
+  const base = threadsEntry();
+  assert.equal(sameAppLocation(base, threadsEntry()), true);
+  assert.equal(sameAppLocation(base, threadsEntry({ threadsState: "resolved" })), false);
+  assert.equal(sameAppLocation(base, threadsEntry({ threadsVoice: "agents" })), false);
+  assert.equal(sameAppLocation(base, threadsEntry({ threadsProject: "/repo" })), false);
+  assert.equal(sameAppLocation(base, threadsEntry({ threadsText: "loop" })), false);
+  assert.equal(sameAppLocation(base, reviewsEntry()), false, "the tab itself discriminates");
+});
+
+test("thread entries equal on the root comment id alone", () => {
+  assert.equal(sameAppLocation(threadEntry(7), threadEntry(7)), true);
+  assert.equal(sameAppLocation(threadEntry(7), threadEntry(8)), false);
+  assert.equal(sameAppLocation(threadEntry(7), { kind: "inbox" }), false);
+  const history = createNavigationHistory();
+  history.push(threadEntry(7));
+  history.push(threadEntry(8));
+  assert.deepEqual(history.back(), threadEntry(7));
+  assert.deepEqual(history.forward(), threadEntry(8));
+  // The same thread pushed twice collapses.
+  history.push(threadEntry(8));
+  assert.equal(history.canForward(), false);
+});
+
+test("review entries discriminate on focusedCommentId", () => {
+  const plain = reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a") }) });
+  const focused = reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a") }), focusedCommentId: 42 });
+  assert.equal(sameAppLocation(plain, focused), false);
+  assert.equal(sameAppLocation(focused, reviewEntry({ identity: reviewIdentity({ target: worktreeTarget("/wt-a") }), focusedCommentId: 42 }),), true);
 });
 
 test("reviews chip picks push while search edits replace in place", () => {

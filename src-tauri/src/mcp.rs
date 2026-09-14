@@ -1,6 +1,9 @@
 use crate::agents::AgentIdentity;
 use crate::commands::{list_worktrees_in_path, refresh_repo};
 use crate::overview::branch_inventory;
+use crate::portal::{
+    list_portal_threads_in_pool, PortalThreadQuery, THREAD_STATE_OPEN, THREAD_STATE_RESOLVED,
+};
 use crate::requests::{
     claim_request_in_pool, create_request_in_pool, re_request_in_pool,
     set_request_verdict_in_pool, withdraw_request_in_pool, Actor as RequestActor, RequestDraft,
@@ -240,6 +243,15 @@ struct ListReviewRequestsArgs {
     status: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListThreadsArgs {
+    repo_path: Option<String>,
+    state: Option<String>,
+    since: Option<i64>,
+    participant: Option<String>,
+}
+
 // The transition vocabulary is a closed set: serde refuses any other value
 // as a shape error before anything executes.
 #[derive(Deserialize)]
@@ -454,6 +466,29 @@ fn tool_descriptors() -> Value {
             ),
         ),
         tool(
+            "list_threads",
+            "List review threads (root comments and their replies) across every open repository, grouped by change. Anchor fields are reported as stored; drift is not recomputed against Git.",
+            schema(
+                json!({
+                    "repo_path": path_arg("Optional exact repository path as listed by list_repos; omit for every open repository."),
+                    "state": {
+                        "type": "string",
+                        "enum": ["open", "resolved"],
+                        "description": "Optional thread state filter; omitting it answers open threads.",
+                    },
+                    "since": {
+                        "type": "integer",
+                        "description": "Optional epoch-milliseconds floor: only threads whose last activity is at or after this instant.",
+                    },
+                    "participant": {
+                        "type": "string",
+                        "description": "Optional exact participant name (human or agent) that authored the root or a reply.",
+                    },
+                }),
+                &[],
+            ),
+        ),
+        tool(
             "create_comment",
             "Create a comment on a review; the author is your agent token, so you can edit and delete it later. Anchor shapes: no file for review-level, file only for file-level, file with side and start_line for line-level.",
             schema(
@@ -660,6 +695,10 @@ async fn handle_tools_call(
         "list_review_requests" => {
             let args = tool_args(id, &arguments)?;
             list_review_requests(state, args).await
+        }
+        "list_threads" => {
+            let args = tool_args(id, &arguments)?;
+            list_threads(state, args).await
         }
         "create_comment" => {
             let args = tool_args(id, &arguments)?;
@@ -877,6 +916,43 @@ async fn list_review_requests(state: &TransportState, args: ListReviewRequestsAr
         .map(|row| request_list_row(row, now))
         .collect::<Result<Vec<_>, String>>()?;
     payload(listed)
+}
+
+// The cross-repo thread sweep: the portal's grouped listing with the
+// tool's own state vocabulary (omitted state answers open threads), then
+// the since and participant filters narrow the grouped rows. Reads stay
+// find-only.
+async fn list_threads(state: &TransportState, args: ListThreadsArgs) -> ToolOutcome {
+    if let Some(state_filter) = args.state.as_deref() {
+        if state_filter != THREAD_STATE_OPEN && state_filter != THREAD_STATE_RESOLVED {
+            return Err(format!(
+                "Unknown state '{state_filter}'; states are {THREAD_STATE_OPEN} or {THREAD_STATE_RESOLVED}."
+            ));
+        }
+    }
+    if let Some(repo_path) = &args.repo_path {
+        ensure_repo_open(state, repo_path).await.map_err(|error| error.message)?;
+    }
+    let query = PortalThreadQuery {
+        repo_path: args.repo_path,
+        // The tool's omitted state is the portal's default: open threads.
+        state: Some(args.state.unwrap_or_else(|| THREAD_STATE_OPEN.to_string())),
+        voice: None,
+        text: None,
+    };
+    let mut groups = list_portal_threads_in_pool(&state.pool, &query)
+        .await
+        .map_err(|error| error.message)?;
+    for group in &mut groups {
+        group.threads.retain(|thread| {
+            args.since.map_or(true, |since| thread.last_activity_at >= since)
+                && args.participant.as_deref().map_or(true, |name| {
+                    thread.participants.iter().any(|known| known.author_name == name)
+                })
+        });
+    }
+    groups.retain(|group| !group.threads.is_empty());
+    payload(groups)
 }
 
 // One stored request plus its derived triage fields from the grouped query.
@@ -1183,12 +1259,13 @@ mod tests {
     const OWNERSHIP_MESSAGE: &str =
         "Only the agent token that authored a comment can edit or delete it.";
     const UNKNOWN_REPO_MESSAGE: &str = "No repository with that path is open in WorktreeView.";
-    const TOOL_NAMES: [&str; 14] = [
+    const TOOL_NAMES: [&str; 15] = [
         "list_repos",
         "list_review_targets",
         "list_comments",
         "list_submissions",
         "list_review_requests",
+        "list_threads",
         "create_comment",
         "reply_comment",
         "resolve_thread",
@@ -1666,6 +1743,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reviews, 0, "a read must not create a review identity");
+    }
+
+    #[tokio::test]
+    async fn list_threads_answers_through_the_endpoint_with_each_filter() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let (state, secret) = test_state(pool.clone()).await;
+        // One review identity with a human root and an agent reply, stored
+        // like the ingest path stores them.
+        sqlx::query(
+            "INSERT INTO reviews (repo_path, base_sha, target_key, target_kind, created_at) \
+             VALUES ('/demo', 'base', '/demo', 'worktree', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO comments (review_id, parent_id, author_kind, author_name, body, created_at) \
+             VALUES ((SELECT id FROM reviews WHERE repo_path = '/demo'), NULL, 'human', 'dana', 'thread root', 1000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let root: i64 = sqlx::query_scalar("SELECT MAX(id) FROM comments")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO comments (review_id, parent_id, author_kind, author_name, body, created_at) \
+             VALUES ((SELECT id FROM reviews WHERE repo_path = '/demo'), ?, 'agent', 'reviewer-bot', 'a reply', 1100)",
+        )
+        .bind(root)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // No filters: open threads grouped by change, participants first.
+        let payload = call_tool_raw(&state, &secret, "list_threads", json!({})).await;
+        assert_eq!(payload["result"]["isError"], false);
+        let groups = result_text(&payload);
+        assert_eq!(groups[0]["change_label"], "demo");
+        assert_eq!(groups[0]["open_count"], 1);
+        assert_eq!(groups[0]["threads"][0]["reply_count"], 1);
+        assert_eq!(groups[0]["threads"][0]["participants"][0]["author_name"], "dana");
+        assert_eq!(groups[0]["threads"][0]["participants"][1]["author_name"], "reviewer-bot");
+
+        // Participant filter: exact name over root and reply authors.
+        let by_participant = call_tool_raw(
+            &state,
+            &secret,
+            "list_threads",
+            json!({ "participant": "reviewer-bot" }),
+        )
+        .await;
+        assert_eq!(result_text(&by_participant)[0]["threads"].as_array().unwrap().len(), 1);
+        let nobody = call_tool_raw(&state, &secret, "list_threads", json!({ "participant": "nobody" })).await;
+        assert_eq!(result_text(&nobody), json!([]));
+
+        // Since: a future instant answers nothing; a past one keeps the thread.
+        let future = call_tool_raw(&state, &secret, "list_threads", json!({ "since": 9_999_999_999_999i64 })).await;
+        assert_eq!(result_text(&future), json!([]));
+        let past = call_tool_raw(&state, &secret, "list_threads", json!({ "since": 1000 })).await;
+        assert_eq!(result_text(&past)[0]["threads"].as_array().unwrap().len(), 1);
+
+        // Resolved state: nothing is resolved yet.
+        let resolved = call_tool_raw(&state, &secret, "list_threads", json!({ "state": "resolved" })).await;
+        assert_eq!(result_text(&resolved), json!([]));
+
+        // Unknown state and unknown repo are clean failures.
+        let bad_state = call_tool_raw(&state, &secret, "list_threads", json!({ "state": "all" })).await;
+        assert_eq!(bad_state["result"]["isError"], true);
+        assert!(bad_state["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown state 'all'"));
+        let bad_repo = call_tool_raw(&state, &secret, "list_threads", json!({ "repo_path": "/nowhere" })).await;
+        assert_eq!(bad_repo["result"]["isError"], true);
+        assert_eq!(bad_repo["result"]["content"][0]["text"], UNKNOWN_REPO_MESSAGE);
     }
 
     #[tokio::test]

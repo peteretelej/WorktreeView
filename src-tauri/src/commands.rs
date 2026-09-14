@@ -8,7 +8,11 @@ use crate::git::{
     Worktree,
 };
 use crate::overview::{branch_inventory, BranchInventory};
-use crate::portal::{list_portal_reviews_in_pool, PortalReviewQuery, PortalReviewRow};
+use crate::portal::{
+    get_portal_thread_in_pool, list_portal_reviews_in_pool, list_portal_threads_in_pool,
+    search_portal_in_pool, PortalReviewQuery, PortalReviewRow, PortalSearchMatches,
+    PortalThreadDetail, PortalThreadGroup, PortalThreadQuery,
+};
 use crate::requests::{list_attention_in_pool, AttentionQueue};
 use crate::review::{
     commit_detail, commit_page, refs_inventory, review_changes, review_file_bytes,
@@ -379,6 +383,49 @@ pub(crate) async fn list_portal_reviews(
         },
     )
     .await
+}
+
+// The Pulse Threads tab's grouped conversation listing: store-only like the
+// reviews listing, with grouping, filters, ordering, and bounds owned by
+// the backend.
+#[tauri::command]
+pub(crate) async fn list_portal_threads(
+    repo_path: Option<String>,
+    state_filter: Option<String>,
+    voice: Option<String>,
+    text: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PortalThreadGroup>, CommandError> {
+    list_portal_threads_in_pool(
+        &state.pool,
+        &PortalThreadQuery {
+            repo_path,
+            state: state_filter,
+            voice,
+            text,
+        },
+    )
+    .await
+}
+
+// One thread's full conversation by its root comment id, with anchors and
+// snippets exactly as stored.
+#[tauri::command]
+pub(crate) async fn get_portal_thread(
+    root_comment_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<PortalThreadDetail, CommandError> {
+    get_portal_thread_in_pool(&state.pool, root_comment_id).await
+}
+
+// The palette's cross-store search: matched comment bodies, requests, and
+// cached commit subjects in one bounded answer.
+#[tauri::command]
+pub(crate) async fn search_portal(
+    needle: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<PortalSearchMatches, CommandError> {
+    search_portal_in_pool(&state.pool, &needle).await
 }
 
 // The human review-header surface acts as Actor::Human on the shared

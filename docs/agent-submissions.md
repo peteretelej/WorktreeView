@@ -371,6 +371,7 @@ the transport layer (HTTP 401, `-32001`).
 | `request_review` | `repo_path`, `base_sha`, `target_key`, `target_kind`, `head_sha`; optional `note`, `lenses`, `reviewers`, `max_rounds` (an absent note is a general review ask) | the stored request row with a `requester` display | unknown repo; over-2000-character note; unknown or duplicate lens; unknown or duplicate reviewer; `max_rounds` outside 1-3; empty `head_sha`; same-head create against a `changes_requested` request |
 | `list_review_requests` | optional `repo_path`, `status` | array of request rows plus derived `age_ms`, `comment_count`, `unresolved_finding_counts` (per severity), and `requester` | unknown `status` value |
 | `update_review_request` | `id`, `action` (`claim`/`approve`/`request_changes`/`withdraw`/`re_request`); optional `note` and `head_sha`, both only with `re_request` (`head_sha` is required there) | the updated request row | unknown request id; actor-rule violations (claim gating, requester-only withdraw and re-request); round budget exhausted; `re_request` with the same `head_sha`; invalid refreshed `note` |
+| `list_threads` | optional `repo_path`, `state` (`open`/`resolved`), `since` (epoch ms on last activity), `participant` (exact name) | array of thread groups, one per change (`repo_path`, `target_key`, `target_kind`, `change_label`, `open_count`), each with its thread rows: `root_comment_id`, `excerpt`, `severity`, `anchor`, `participants`, `reply_count`, `resolved_at`, `last_activity_at`, `head_moved` | unknown `state` value; unknown repo |
 | `refresh_repo` | `repo_path` | `{ "ok": true }` | unknown repo; fetch failure |
 
 Reads are find-only: a review identity with no comments yet answers an
@@ -381,7 +382,12 @@ anchor shapes (no `file` for review-level, `file` only for file-level,
 carry no line content, so nothing is hashed at write time and drift
 matching does not apply to them, exactly like ingested findings.
 `list_comments` reports anchor data as stored; it does not recompute drift
-against live Git (that runs only on the human review path).
+against live Git (that runs only on the human review path). `list_threads`
+follows the same rule: anchors and snippets are reported as stored, and
+`head_moved` is only the store-level comparison of the identity's latest
+request head against the surface's last recorded head, never a Git
+recomputation. Omitting `state` answers open threads; group membership
+keys on the change, so threads survive base changes.
 
 ### Review requests
 

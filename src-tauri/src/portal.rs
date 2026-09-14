@@ -1,12 +1,12 @@
-// The Pulse portal's Reviews tab projection: every review identity that
-// carries a review request or any comment/submission activity, one row per
-// identity, including settled and request-less ones. Store-only like the
-// attention queue (no Git on the path): state classification, search
-// matching, ordering, and bounds are backend rules the webview renders
-// verbatim.
+// The Pulse portal's store projections: the Reviews tab's identity
+// listing, the Threads tab's grouped conversations, and the palette's
+// cross-store search. Store-only like the attention queue (no Git on the
+// path): inclusion, state classification, search matching, ordering, and
+// bounds are backend rules the webview renders verbatim.
 
 use crate::requests::{identity_change_label, surface_head_moved, FindingCounts, APPROVED, WITHDRAWN};
 use crate::retrospection::{recorded_worktree_head, SurfaceHead};
+use crate::reviews::{list_comments_in_pool, Comment};
 use crate::CommandError;
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
@@ -128,6 +128,39 @@ fn matches_search(row: &PortalReviewRow, needle: &str) -> bool {
         .any(|field| field.to_ascii_lowercase().contains(&needle))
 }
 
+// The review identity every request-and-activity projection keys on.
+type IdentityKey = (String, String, String, String);
+
+// Every stored request newest-first with its identity, so consumers see
+// each identity's latest request as the first row they meet: the ordering
+// is the freshness rule (by updated_at, then id).
+async fn latest_requests_newest_first(
+    pool: &SqlitePool,
+) -> Result<Vec<(IdentityKey, LatestRequest)>, CommandError> {
+    let mut rows = Vec::new();
+    for row in sqlx::query(LATEST_REQUEST_QUERY).fetch_all(pool).await? {
+        let requester: Option<String> = row.try_get("requester_name")?;
+        rows.push((
+            (
+                row.try_get("repo_path")?,
+                row.try_get("base_sha")?,
+                row.try_get("target_key")?,
+                row.try_get("target_kind")?,
+            ),
+            LatestRequest {
+                status: row.try_get("status")?,
+                note: row.try_get("note")?,
+                round: row.try_get("round")?,
+                max_rounds: row.try_get("max_rounds")?,
+                head_sha: row.try_get("head_sha")?,
+                requester: requester.unwrap_or_else(|| "human".to_string()),
+                updated_at: row.try_get("updated_at")?,
+            },
+        ));
+    }
+    Ok(rows)
+}
+
 // One identity's stored activity, gathered from the reviews-driven
 // aggregate or synthesized as all-zero for an identity that only ever
 // carried requests: a reviews row only materializes with the first
@@ -185,26 +218,10 @@ pub(crate) async fn list_portal_reviews_in_pool(
         }
     }
 
-    let mut latest_by_identity: std::collections::HashMap<(String, String, String, String), LatestRequest> =
+    let mut latest_by_identity: std::collections::HashMap<IdentityKey, LatestRequest> =
         std::collections::HashMap::new();
-    for row in sqlx::query(LATEST_REQUEST_QUERY).fetch_all(pool).await? {
-        let requester: Option<String> = row.try_get("requester_name")?;
-        latest_by_identity
-            .entry((
-                row.try_get("repo_path")?,
-                row.try_get("base_sha")?,
-                row.try_get("target_key")?,
-                row.try_get("target_kind")?,
-            ))
-            .or_insert(LatestRequest {
-                status: row.try_get("status")?,
-                note: row.try_get("note")?,
-                round: row.try_get("round")?,
-                max_rounds: row.try_get("max_rounds")?,
-                head_sha: row.try_get("head_sha")?,
-                requester: requester.unwrap_or_else(|| "human".to_string()),
-                updated_at: row.try_get("updated_at")?,
-            });
+    for (identity, request) in latest_requests_newest_first(pool).await? {
+        latest_by_identity.entry(identity).or_insert(request);
     }
     let heads = crate::retrospection::recorded_surface_heads_in_pool(pool).await?;
 
@@ -343,6 +360,697 @@ pub(crate) async fn list_portal_reviews_in_pool(
     Ok(rows)
 }
 
+// ===== Threads tab =====
+
+// The thread states; "open" means the root comment is unresolved. The
+// strings are the filter ids the webview and the list_threads tool send
+// back verbatim, and the backend is their single owner.
+pub(crate) const THREAD_STATE_OPEN: &str = "open";
+pub(crate) const THREAD_STATE_RESOLVED: &str = "resolved";
+
+// The voice filter reads a thread's participants: a thread answers the
+// human or agents voice when any participant (root author or replier)
+// carries that author_kind.
+pub(crate) const THREAD_VOICE_ALL: &str = "all";
+pub(crate) const THREAD_VOICE_HUMAN: &str = "human";
+pub(crate) const THREAD_VOICE_AGENTS: &str = "agents";
+
+// The threads listing stays bounded like the reviews listing: only the
+// newest 500 threads by last activity are assembled, no matter how much
+// stored conversation accumulates.
+const THREAD_ROW_LIMIT: usize = 500;
+
+// One pass over root comments joined with their review identity; reply
+// aggregates ride as correlated subqueries, so grouping across bases under
+// one change stays a single bounded query (no new index or migration).
+const THREAD_ROOTS_QUERY: &str = "SELECT c.id AS root_id, c.body, c.author_kind, c.author_name, \
+     c.file_path, c.start_line, c.severity, c.resolved_at, c.created_at, \
+     rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind, \
+     (SELECT COUNT(*) FROM comments AS r WHERE r.parent_id = c.id) AS reply_count, \
+     (SELECT MAX(r.created_at) FROM comments AS r WHERE r.parent_id = c.id) AS last_reply_at \
+     FROM comments AS c \
+     JOIN reviews AS rv ON rv.id = c.review_id \
+     WHERE c.parent_id IS NULL";
+
+// Thread rows sort by last activity (root created_at vs newest reply), the
+// same key that bounds and orders the listing.
+const THREAD_ROOTS_ORDER: &str = " ORDER BY MAX(c.created_at, COALESCE(\
+     (SELECT MAX(r.created_at) FROM comments AS r WHERE r.parent_id = c.id), c.created_at)) DESC, \
+     c.id DESC";
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub(crate) struct PortalParticipant {
+    pub(crate) author_kind: String,
+    pub(crate) author_name: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub(crate) struct PortalThreadRow {
+    pub(crate) root_comment_id: i64,
+    pub(crate) repo_path: String,
+    pub(crate) base_sha: String,
+    pub(crate) target_key: String,
+    pub(crate) target_kind: String,
+    pub(crate) excerpt: String,
+    pub(crate) severity: Option<String>,
+    pub(crate) anchor: Option<String>,
+    pub(crate) participants: Vec<PortalParticipant>,
+    pub(crate) reply_count: i64,
+    pub(crate) resolved_at: Option<i64>,
+    pub(crate) last_activity_at: i64,
+    pub(crate) head_moved: bool,
+}
+
+// One change's thread group: every thread whose review identity shares the
+// (repo_path, target_key, target_kind) key, so threads survive base
+// changes; the display label never participates in grouping.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub(crate) struct PortalThreadGroup {
+    pub(crate) repo_path: String,
+    pub(crate) target_key: String,
+    pub(crate) target_kind: String,
+    pub(crate) change_label: String,
+    pub(crate) open_count: i64,
+    pub(crate) threads: Vec<PortalThreadRow>,
+}
+
+// The threads listing's optional filters; state defaults to open and voice
+// to all, matching the webview's chips verbatim.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct PortalThreadQuery {
+    pub(crate) repo_path: Option<String>,
+    pub(crate) state: Option<String>,
+    pub(crate) voice: Option<String>,
+    pub(crate) text: Option<String>,
+}
+
+// The text needle becomes a bounded LIKE pattern: `%` and `_` in the needle
+// match literally through the ESCAPE clause, and SQLite's LIKE is
+// ASCII-case-insensitive by default.
+fn like_pattern(needle: &str) -> String {
+    format!(
+        "%{}%",
+        needle
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
+}
+
+// Mono anchor label for a thread row: file:start for line anchors, the file
+// alone for file-level anchors, and none for review-level threads.
+fn anchor_label(file_path: Option<&str>, start_line: Option<i64>) -> Option<String> {
+    match (file_path, start_line) {
+        (Some(file), Some(line)) => Some(format!("{file}:{line}")),
+        (Some(file), None) => Some(file.to_string()),
+        (None, _) => None,
+    }
+}
+
+// A thread's participant list: the root author first, then reply authors in
+// reply order, deduplicated by (author_kind, author_name).
+fn merge_participants(
+    root: (&str, &str),
+    reply_participants: &[PortalParticipant],
+) -> Vec<PortalParticipant> {
+    let mut participants = vec![PortalParticipant {
+        author_kind: root.0.to_string(),
+        author_name: root.1.to_string(),
+    }];
+    for participant in reply_participants {
+        if !participants
+            .iter()
+            .any(|known| known.author_kind == participant.author_kind && known.author_name == participant.author_name)
+        {
+            participants.push(participant.clone());
+        }
+    }
+    participants
+}
+
+// Reply participants for the assembled roots in one bounded IN-list query;
+// the roots' own authors join in merge_participants. QueryBuilder carries
+// the dynamic id list: every id rides as a bound parameter.
+async fn reply_participants_for_roots(
+    pool: &SqlitePool,
+    root_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<PortalParticipant>>, CommandError> {
+    let mut participants: std::collections::HashMap<i64, Vec<PortalParticipant>> =
+        std::collections::HashMap::new();
+    if root_ids.is_empty() {
+        return Ok(participants);
+    }
+    let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT parent_id, author_kind, author_name FROM comments WHERE parent_id IN (",
+    );
+    for (index, id) in root_ids.iter().enumerate() {
+        if index > 0 {
+            builder.push(",");
+        }
+        builder.push_bind(id);
+    }
+    builder.push(") ORDER BY created_at, id");
+    for row in builder.build().fetch_all(pool).await? {
+        participants
+            .entry(row.try_get("parent_id")?)
+            .or_default()
+            .push(PortalParticipant {
+                author_kind: row.try_get("author_kind")?,
+                author_name: row.try_get("author_name")?,
+            });
+    }
+    Ok(participants)
+}
+
+// The threads tab's listing: every root comment grouped by change, newest
+// activity first, optionally narrowed by exact repo, state, participant
+// voice, and a LIKE needle over root and reply bodies. Open counts count
+// each group's open threads regardless of the state filter so the chips
+// keep their meaning, and the state filter only narrows the rows.
+pub(crate) async fn list_portal_threads_in_pool(
+    pool: &SqlitePool,
+    query: &PortalThreadQuery,
+) -> Result<Vec<PortalThreadGroup>, CommandError> {
+    let state = query.state.as_deref().unwrap_or(THREAD_STATE_OPEN);
+    if state != THREAD_STATE_OPEN && state != THREAD_STATE_RESOLVED && state != STATE_ALL {
+        return Err(invalid_filter(format!(
+            "Unknown state filter '{state}'; states are {THREAD_STATE_OPEN}, {THREAD_STATE_RESOLVED}, or {STATE_ALL}."
+        )));
+    }
+    let voice = query.voice.as_deref().unwrap_or(THREAD_VOICE_ALL);
+    if voice != THREAD_VOICE_ALL && voice != THREAD_VOICE_HUMAN && voice != THREAD_VOICE_AGENTS {
+        return Err(invalid_filter(format!(
+            "Unknown voice filter '{voice}'; voices are {THREAD_VOICE_HUMAN}, {THREAD_VOICE_AGENTS}, or {THREAD_VOICE_ALL}."
+        )));
+    }
+
+    // The dynamic pieces come from a fixed vocabulary and every value rides
+    // as a bound parameter, so QueryBuilder carries the composed query.
+    let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(THREAD_ROOTS_QUERY);
+    if let Some(repo) = &query.repo_path {
+        builder.push(" AND rv.repo_path = ").push_bind(repo.clone());
+    }
+    // The voice id is plural ("agents"); the stored author_kind is singular.
+    let voice_kind = match voice {
+        THREAD_VOICE_HUMAN => Some("human"),
+        THREAD_VOICE_AGENTS => Some("agent"),
+        _ => None,
+    };
+    if let Some(kind) = voice_kind {
+        builder.push(&format!(
+            " AND (c.author_kind = '{kind}' OR EXISTS(SELECT 1 FROM comments AS r \
+             WHERE r.parent_id = c.id AND r.author_kind = '{kind}'))"
+        ));
+    }
+    let needle = query
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    if let Some(text) = needle {
+        // push_bind emits the placeholder itself: the LIKE patterns ride as
+        // binds between the pushed SQL fragments, never inline `?` marks.
+        builder
+            .push(" AND (c.body LIKE ")
+            .push_bind(like_pattern(text))
+            .push(" ESCAPE '\\' OR EXISTS(SELECT 1 FROM comments AS r \
+                   WHERE r.parent_id = c.id AND r.body LIKE ")
+            .push_bind(like_pattern(text))
+            .push(" ESCAPE '\\'))");
+    }
+    builder
+        .push(THREAD_ROOTS_ORDER)
+        .push(" LIMIT ")
+        .push_bind(THREAD_ROW_LIMIT as i64);
+
+    // Roots carry their author alongside the row so each participant list
+    // can start with the root author.
+    let mut roots: Vec<(PortalThreadRow, PortalParticipant)> = Vec::new();
+    for row in builder.build().fetch_all(pool).await? {
+        let created_at: i64 = row.try_get("created_at")?;
+        let last_reply_at: Option<i64> = row.try_get("last_reply_at")?;
+        let root_author = PortalParticipant {
+            author_kind: row.try_get("author_kind")?,
+            author_name: row.try_get("author_name")?,
+        };
+        let root = PortalThreadRow {
+            root_comment_id: row.try_get("root_id")?,
+            repo_path: row.try_get("repo_path")?,
+            base_sha: row.try_get("base_sha")?,
+            target_key: row.try_get("target_key")?,
+            target_kind: row.try_get("target_kind")?,
+            excerpt: row
+                .try_get::<String, _>("body")?
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim_end()
+                .to_string(),
+            severity: row.try_get("severity")?,
+            anchor: anchor_label(
+                row.try_get::<Option<String>, _>("file_path")?.as_deref(),
+                row.try_get("start_line")?,
+            ),
+            participants: Vec::new(),
+            reply_count: row.try_get("reply_count")?,
+            resolved_at: row.try_get("resolved_at")?,
+            last_activity_at: last_reply_at.max(Some(created_at)).unwrap_or(created_at),
+            head_moved: false,
+        };
+        roots.push((root, root_author));
+    }
+
+    // The moved-badge basis is the same store-only comparison the attention
+    // queue's changed-since-review rule uses: the identity's latest request
+    // head against the surface's recorded head. Request-less identities
+    // show no moved badge, and precise anchor drift stays the review
+    // surface's job.
+    let mut latest_by_identity: std::collections::HashMap<IdentityKey, Option<String>> =
+        std::collections::HashMap::new();
+    for (identity, request) in latest_requests_newest_first(pool).await? {
+        latest_by_identity.entry(identity).or_insert(request.head_sha);
+    }
+    let heads = crate::retrospection::recorded_surface_heads_in_pool(pool).await?;
+
+    let root_ids: Vec<i64> = roots.iter().map(|(root, _)| root.root_comment_id).collect();
+    let mut reply_participants = reply_participants_for_roots(pool, &root_ids).await?;
+
+    // Group before the state filter so a group's open count covers all of
+    // its threads no matter which state chip is active. Group order follows
+    // the rows' newest-first activity: a group enters when its newest
+    // thread is seen.
+    let mut groups: Vec<PortalThreadGroup> = Vec::new();
+    let mut group_index: std::collections::HashMap<(String, String, String), usize> =
+        std::collections::HashMap::new();
+    for (mut row, root_author) in roots {
+        let recorded = if row.target_kind == "worktree" {
+            crate::retrospection::recorded_worktree_head(&heads, &row.repo_path, &row.target_key)
+        } else {
+            None
+        };
+        row.head_moved = latest_by_identity
+            .get(&(
+                row.repo_path.clone(),
+                row.base_sha.clone(),
+                row.target_key.clone(),
+                row.target_kind.clone(),
+            ))
+            .and_then(|head| head.as_deref())
+            .map_or(false, |head| surface_head_moved(recorded, Some(head)));
+        row.participants = merge_participants(
+            (
+                root_author.author_kind.as_str(),
+                root_author.author_name.as_str(),
+            ),
+            &reply_participants
+                .remove(&row.root_comment_id)
+                .unwrap_or_default(),
+        );
+        let key = (
+            row.repo_path.clone(),
+            row.target_key.clone(),
+            row.target_kind.clone(),
+        );
+        let index = match group_index.get(&key) {
+            Some(index) => *index,
+            None => {
+                groups.push(PortalThreadGroup {
+                    repo_path: row.repo_path.clone(),
+                    target_key: row.target_key.clone(),
+                    target_kind: row.target_kind.clone(),
+                    change_label: identity_change_label(&row.target_kind, &row.target_key, recorded),
+                    open_count: 0,
+                    threads: Vec::new(),
+                });
+                group_index.insert(key, groups.len() - 1);
+                groups.len() - 1
+            }
+        };
+        if row.resolved_at.is_none() {
+            groups[index].open_count += 1;
+        }
+        let matches_state = state == STATE_ALL
+            || (state == THREAD_STATE_OPEN && row.resolved_at.is_none())
+            || (state == THREAD_STATE_RESOLVED && row.resolved_at.is_some());
+        if matches_state {
+            groups[index].threads.push(row);
+        }
+    }
+    groups.retain(|group| !group.threads.is_empty());
+    Ok(groups)
+}
+
+// ===== Thread detail =====
+
+// A thread's full conversation: the stored root and replies verbatim (the
+// same serde shape the review surface's list_comments returns, so anchors
+// and snippets read as stored), the identity and its label, and the same
+// moved-badge basis as the listing. No Git access.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub(crate) struct PortalThreadDetail {
+    pub(crate) root_comment_id: i64,
+    pub(crate) repo_path: String,
+    pub(crate) base_sha: String,
+    pub(crate) target_key: String,
+    pub(crate) target_kind: String,
+    pub(crate) change_label: String,
+    // The recorded head when the surface was last retrospected (else the
+    // identity itself for head-kind rows), so the webview can open the
+    // review the same way the reviews rows do.
+    pub(crate) head_sha: Option<String>,
+    pub(crate) head_moved: bool,
+    pub(crate) resolved_at: Option<i64>,
+    pub(crate) root: Comment,
+    pub(crate) replies: Vec<Comment>,
+    pub(crate) participants: Vec<PortalParticipant>,
+}
+
+pub(crate) async fn get_portal_thread_in_pool(
+    pool: &SqlitePool,
+    root_comment_id: i64,
+) -> Result<PortalThreadDetail, CommandError> {
+    let row = sqlx::query(
+        "SELECT c.resolved_at, c.author_kind, c.author_name, \
+         rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind \
+         FROM comments AS c JOIN reviews AS rv ON rv.id = c.review_id \
+         WHERE c.id = ? AND c.parent_id IS NULL",
+    )
+    .bind(root_comment_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| CommandError::new("invalid_comment", "The thread does not exist."))?;
+    let resolved_at: Option<i64> = row.try_get("resolved_at")?;
+    let repo_path: String = row.try_get("repo_path")?;
+    let base_sha: String = row.try_get("base_sha")?;
+    let target_key: String = row.try_get("target_key")?;
+    let target_kind: String = row.try_get("target_kind")?;
+
+    // The stored comments come from the same find-only listing the review
+    // surface renders; the thread's slice of that listing is its root and
+    // ordered replies.
+    let comments = list_comments_in_pool(pool, &repo_path, &base_sha, &target_key, &target_kind)
+        .await?;
+    let root = comments
+        .iter()
+        .find(|comment| comment.id() == root_comment_id)
+        .cloned()
+        .ok_or_else(|| CommandError::new("invalid_comment", "The comment does not exist."))?;
+    let reply_ids: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM comments WHERE parent_id = ? ORDER BY created_at, id")
+            .bind(root_comment_id)
+            .fetch_all(pool)
+            .await?;
+    let replies: Vec<Comment> = comments
+        .into_iter()
+        .filter(|comment| reply_ids.contains(&comment.id()))
+        .collect();
+
+    // Participants: the root author first, then reply authors in reply
+    // order, deduplicated like the listing rows. The authors read straight
+    // from the store; the comment payloads stay the review surface's type.
+    let mut participants = vec![PortalParticipant {
+        author_kind: row.try_get("author_kind")?,
+        author_name: row.try_get("author_name")?,
+    }];
+    let reply_row = sqlx::query(
+        "SELECT author_kind, author_name FROM comments WHERE parent_id = ? ORDER BY created_at, id",
+    )
+    .bind(root_comment_id)
+    .fetch_all(pool)
+    .await?;
+    for author in reply_row {
+        let candidate = PortalParticipant {
+            author_kind: author.try_get("author_kind")?,
+            author_name: author.try_get("author_name")?,
+        };
+        if !participants
+            .iter()
+            .any(|known| known.author_kind == candidate.author_kind && known.author_name == candidate.author_name)
+        {
+            participants.push(candidate);
+        }
+    }
+
+    let heads = crate::retrospection::recorded_surface_heads_in_pool(pool).await?;
+    let recorded = if target_kind == "worktree" {
+        crate::retrospection::recorded_worktree_head(&heads, &repo_path, &target_key)
+    } else {
+        None
+    };
+    let latest_head = latest_requests_newest_first(pool)
+        .await?
+        .into_iter()
+        .find(|(identity, _)| {
+            identity.0 == repo_path
+                && identity.1 == base_sha
+                && identity.2 == target_key
+                && identity.3 == target_kind
+        })
+        .and_then(|(_, request)| request.head_sha);
+    let head_moved = latest_head
+        .as_deref()
+        .map_or(false, |head| surface_head_moved(recorded, Some(head)));
+
+    Ok(PortalThreadDetail {
+        root_comment_id: root.id(),
+        change_label: identity_change_label(&target_kind, &target_key, recorded),
+        head_sha: recorded
+            .map(|head| head.head_sha.clone())
+            .or_else(|| (target_kind == "head").then(|| target_key.clone())),
+        head_moved,
+        resolved_at,
+        repo_path,
+        base_sha,
+        target_key,
+        target_kind,
+        root,
+        replies,
+        participants,
+    })
+}
+
+// ===== Portal search =====
+
+// Each search scope is capped independently; the palette pages the combined
+// result through its existing page size, so the total stays bounded.
+const SEARCH_SCOPE_LIMIT: usize = 50;
+// The commit scan reads a bounded newest slice before attribution, so a
+// huge commit cache cannot turn one keystroke into an unbounded pass.
+const SEARCH_COMMIT_SCAN_LIMIT: i64 = 200;
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub(crate) struct PortalSearchComment {
+    pub(crate) comment_id: i64,
+    pub(crate) root_comment_id: i64,
+    pub(crate) excerpt: String,
+    pub(crate) repo_path: String,
+    pub(crate) change_label: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub(crate) struct PortalSearchRequest {
+    pub(crate) repo_path: String,
+    pub(crate) base_sha: String,
+    pub(crate) target_key: String,
+    pub(crate) target_kind: String,
+    pub(crate) head_sha: Option<String>,
+    pub(crate) change_label: String,
+    pub(crate) status: String,
+    pub(crate) requester: String,
+    pub(crate) note: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub(crate) struct PortalSearchCommit {
+    pub(crate) repo_path: String,
+    pub(crate) sha: String,
+    pub(crate) subject: String,
+    pub(crate) parents: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub(crate) struct PortalSearchMatches {
+    pub(crate) comments: Vec<PortalSearchComment>,
+    pub(crate) requests: Vec<PortalSearchRequest>,
+    pub(crate) commits: Vec<PortalSearchCommit>,
+}
+
+// Bounded case-insensitive search across the three store scopes, answered
+// together: matched comment bodies, matched requests (over the note and the
+// derived change label), and matched cached commit subjects. A blank needle
+// answers empty scopes.
+pub(crate) async fn search_portal_in_pool(
+    pool: &SqlitePool,
+    needle: &str,
+) -> Result<PortalSearchMatches, CommandError> {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return Ok(PortalSearchMatches {
+            comments: Vec::new(),
+            requests: Vec::new(),
+            commits: Vec::new(),
+        });
+    }
+    let heads = crate::retrospection::recorded_surface_heads_in_pool(pool).await?;
+    // Labels derive per identity; matched rows repeat identities, so the
+    // derivation is memoized per identity within the call.
+    let mut labels: std::collections::HashMap<IdentityKey, String> = std::collections::HashMap::new();
+    let mut change_label = |repo_path: &str,
+                            base_sha: &str,
+                            target_key: &str,
+                            target_kind: &str|
+     -> Result<String, CommandError> {
+        let key: IdentityKey = (
+            repo_path.to_string(),
+            base_sha.to_string(),
+            target_key.to_string(),
+            target_kind.to_string(),
+        );
+        if let Some(label) = labels.get(&key) {
+            return Ok(label.clone());
+        }
+        let recorded = if target_kind == "worktree" {
+            crate::retrospection::recorded_worktree_head(&heads, repo_path, target_key)
+        } else {
+            None
+        };
+        let label = identity_change_label(target_kind, target_key, recorded);
+        labels.insert(key, label.clone());
+        Ok(label)
+    };
+
+    let pattern = like_pattern(needle);
+    let mut comments = Vec::new();
+    let comment_rows = sqlx::query(
+        "SELECT c.id, c.parent_id, c.body, rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind \
+         FROM comments AS c JOIN reviews AS rv ON rv.id = c.review_id \
+         WHERE c.body LIKE ? ESCAPE '\\' \
+         ORDER BY c.created_at DESC, c.id DESC LIMIT ?",
+    )
+    .bind(&pattern)
+    .bind(SEARCH_SCOPE_LIMIT as i64)
+    .fetch_all(pool)
+    .await?;
+    for row in comment_rows {
+        let comment_id: i64 = row.try_get("id")?;
+        let repo_path: String = row.try_get("repo_path")?;
+        let base_sha: String = row.try_get("base_sha")?;
+        let target_key: String = row.try_get("target_key")?;
+        let target_kind: String = row.try_get("target_kind")?;
+        comments.push(PortalSearchComment {
+            comment_id,
+            root_comment_id: row
+                .try_get::<Option<i64>, _>("parent_id")?
+                .unwrap_or(comment_id),
+            excerpt: row
+                .try_get::<String, _>("body")?
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim_end()
+                .to_string(),
+            change_label: change_label(&repo_path, &base_sha, &target_key, &target_kind)?,
+            repo_path,
+        });
+    }
+
+    // The request scope matches the derived change label, which only exists
+    // in Rust (its derivation reads the retrospection store), so matching
+    // runs in Rust with literal `%`/`_` — the same semantics escaped-LIKE
+    // produces and the same rule the reviews listing's search uses.
+    let lowered = needle.to_ascii_lowercase();
+    let mut requests = Vec::new();
+    let mut seen: std::collections::HashSet<IdentityKey> = std::collections::HashSet::new();
+    for (identity, request) in latest_requests_newest_first(pool).await? {
+        if requests.len() >= SEARCH_SCOPE_LIMIT {
+            break;
+        }
+        if seen.contains(&identity) {
+            continue;
+        }
+        seen.insert(identity.clone());
+        let recorded = if identity.3 == "worktree" {
+            crate::retrospection::recorded_worktree_head(&heads, &identity.0, &identity.2)
+        } else {
+            None
+        };
+        let change_label_value = identity_change_label(&identity.3, &identity.2, recorded);
+        let matches = [change_label_value.as_str(), request.note.as_str()]
+            .iter()
+            .any(|field| field.to_ascii_lowercase().contains(&lowered));
+        if !matches {
+            continue;
+        }
+        let head_sha = recorded
+            .map(|head| head.head_sha.clone())
+            .or_else(|| (identity.3 == "head").then(|| identity.2.clone()));
+        requests.push(PortalSearchRequest {
+            repo_path: identity.0,
+            base_sha: identity.1,
+            target_key: identity.2,
+            target_kind: identity.3,
+            head_sha,
+            change_label: change_label_value,
+            status: request.status,
+            requester: request.requester,
+            note: request.note,
+        });
+    }
+
+    // Cached log commits carry no repo column; the log pages map each
+    // commit sha back to the repositories whose pages hold it.
+    let mut repos_by_sha: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for row in sqlx::query("SELECT repo_path, commit_shas FROM log_pages")
+        .fetch_all(pool)
+        .await?
+    {
+        let repo_path: String = row.try_get("repo_path")?;
+        let shas: Vec<String> =
+            serde_json::from_str(&row.try_get::<String, _>("commit_shas")?).unwrap_or_default();
+        for sha in shas {
+            let repos = repos_by_sha.entry(sha).or_default();
+            if !repos.contains(&repo_path) {
+                repos.push(repo_path.clone());
+            }
+        }
+    }
+    let mut commits = Vec::new();
+    let commit_rows = sqlx::query(
+        "SELECT sha, subject, parents FROM commits \
+         WHERE subject LIKE ? ESCAPE '\\' ORDER BY date DESC LIMIT ?",
+    )
+    .bind(&pattern)
+    .bind(SEARCH_COMMIT_SCAN_LIMIT)
+    .fetch_all(pool)
+    .await?;
+    for row in commit_rows {
+        let sha: String = row.try_get("sha")?;
+        let parents: Vec<String> =
+            serde_json::from_str(&row.try_get::<String, _>("parents")?).unwrap_or_default();
+        for repo_path in repos_by_sha.get(&sha).cloned().unwrap_or_default() {
+            if commits.len() >= SEARCH_SCOPE_LIMIT {
+                break;
+            }
+            commits.push(PortalSearchCommit {
+                repo_path,
+                subject: row.try_get("subject")?,
+                parents: parents.clone(),
+                sha: sha.clone(),
+            });
+        }
+        if commits.len() >= SEARCH_SCOPE_LIMIT {
+            break;
+        }
+    }
+
+    Ok(PortalSearchMatches {
+        comments,
+        requests,
+        commits,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +1172,128 @@ mod tests {
 
     async fn list(pool: &SqlitePool, query: &PortalReviewQuery) -> Vec<PortalReviewRow> {
         list_portal_reviews_in_pool(pool, query).await.unwrap()
+    }
+
+    // One root thread, optionally line-anchored, stored like the ingest
+    // path stores it; the new id is the review's highest comment id.
+    async fn seed_thread(
+        pool: &SqlitePool,
+        repo: &str,
+        base: &str,
+        key: &str,
+        author: (&str, &str),
+        body: &str,
+        created_at: i64,
+        anchor: Option<(&str, &str, i64)>,
+    ) -> i64 {
+        sqlx::query(
+            "INSERT OR IGNORE INTO reviews (repo_path, base_sha, target_key, target_kind, created_at) \
+             VALUES (?, ?, ?, 'worktree', 1)",
+        )
+        .bind(repo)
+        .bind(base)
+        .bind(key)
+        .execute(pool)
+        .await
+        .unwrap();
+        let review = review_id(pool, repo, base, key).await;
+        match anchor {
+            Some((file, side, line)) => {
+                sqlx::query(
+                    "INSERT INTO comments (review_id, parent_id, author_kind, author_name, body, \
+                            file_path, side, start_line, end_line, created_at) \
+                     VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(review)
+                .bind(author.0)
+                .bind(author.1)
+                .bind(body)
+                .bind(file)
+                .bind(side)
+                .bind(line)
+                .bind(line)
+                .bind(created_at)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            None => {
+                sqlx::query(
+                    "INSERT INTO comments (review_id, parent_id, author_kind, author_name, body, created_at) \
+                     VALUES (?, NULL, ?, ?, ?, ?)",
+                )
+                .bind(review)
+                .bind(author.0)
+                .bind(author.1)
+                .bind(body)
+                .bind(created_at)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+        sqlx::query_scalar("SELECT MAX(id) FROM comments WHERE review_id = ?")
+            .bind(review)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn seed_reply(
+        pool: &SqlitePool,
+        root_id: i64,
+        author: (&str, &str),
+        body: &str,
+        created_at: i64,
+    ) -> i64 {
+        sqlx::query(
+            "INSERT INTO comments (review_id, parent_id, author_kind, author_name, body, created_at) \
+             VALUES ((SELECT review_id FROM comments WHERE id = ?), ?, ?, ?, ?, ?)",
+        )
+        .bind(root_id)
+        .bind(root_id)
+        .bind(author.0)
+        .bind(author.1)
+        .bind(body)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query_scalar("SELECT MAX(id) FROM comments WHERE parent_id = ?")
+            .bind(root_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn resolve_root(pool: &SqlitePool, root_id: i64, resolved_at: i64) {
+        sqlx::query("UPDATE comments SET resolved_at = ? WHERE id = ?")
+            .bind(resolved_at)
+            .bind(root_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn set_severity(pool: &SqlitePool, root_id: i64, severity: &str) {
+        sqlx::query("UPDATE comments SET severity = ? WHERE id = ?")
+            .bind(severity)
+            .bind(root_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn threads(pool: &SqlitePool, query: &PortalThreadQuery) -> Vec<PortalThreadGroup> {
+        list_portal_threads_in_pool(pool, query).await.unwrap()
+    }
+
+    fn thread_of<'a>(groups: &'a [PortalThreadGroup], base: &str) -> &'a PortalThreadRow {
+        groups
+            .iter()
+            .flat_map(|group| group.threads.iter())
+            .find(|thread| thread.base_sha == base)
+            .unwrap_or_else(|| panic!("no portal thread for {base}"))
     }
 
     fn row_of<'a>(rows: &'a [PortalReviewRow], base: &str) -> &'a PortalReviewRow {
@@ -729,5 +1559,260 @@ mod tests {
         assert_eq!(rows.len(), ROW_LIMIT);
         assert_eq!(rows[0].base_sha, format!("base-{:04}", ROW_LIMIT + 4), "newest activity first");
         assert_eq!(rows[ROW_LIMIT - 1].base_sha, format!("base-{:04}", 5), "the five oldest identities drop");
+    }
+
+    #[tokio::test]
+    async fn threads_group_across_bases_under_one_change() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        // Two identities on the same worktree at different bases: one
+        // change, one group, both threads inside it.
+        let older = seed_thread(&pool, REPO, "base-one", "/wt-a", ("human", "dana"), "first look", 1_000, None).await;
+        let newer = seed_thread(&pool, REPO, "base-two", "/wt-a", ("agent", "reviewer-bot"), "second look", 2_000, None).await;
+        // A different worktree is a different group even at the same base.
+        seed_thread(&pool, REPO, "base-two", "/wt-b", ("human", "dana"), "other change", 3_000, None).await;
+
+        crate::retrospection::record_surface_open(
+            &pool, REPO, "worktree", "/wt-a", "feature-a", "/wt-a", "head-a",
+        )
+        .await;
+
+        let groups = threads(&pool, &PortalThreadQuery { state: Some(STATE_ALL.into()), ..Default::default() }).await;
+        assert_eq!(groups.len(), 2, "grouping keys on the change, never the base or label");
+        let group = groups.iter().find(|group| group.target_key == "/wt-a").unwrap();
+        assert_eq!(group.change_label, "feature-a");
+        assert_eq!(group.repo_path, REPO);
+        assert_eq!(group.open_count, 2);
+        assert_eq!(group.threads.len(), 2);
+        assert_eq!(group.threads[0].root_comment_id, newer, "newest activity first inside the group");
+        assert_eq!(group.threads[1].root_comment_id, older);
+        assert_eq!(groups[0].target_key, "/wt-b", "groups order by their newest thread");
+    }
+
+    #[tokio::test]
+    async fn state_voice_text_and_repo_filters_narrow_threads() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        seed_repo(&pool, "/other").await;
+        // Human-rooted with an agent reply on /demo; agent-rooted on
+        // /other; a resolved human thread on /demo.
+        let human = seed_thread(&pool, REPO, "base-h", "/wt-h", ("human", "dana"), "how does this hold up", 1_000, None).await;
+        seed_reply(&pool, human, ("agent", "reviewer-bot"), "checked the zebra path", 1_500).await;
+        seed_thread(&pool, "/other", "base-a", "/wt-a", ("agent", "coder-bot"), "agent note", 2_000, None).await;
+        let settled = seed_thread(&pool, REPO, "base-r", "/wt-r", ("human", "dana"), "resolved already", 3_000, None).await;
+        resolve_root(&pool, settled, 3_500).await;
+
+        // The default is open: the resolved thread drops.
+        let open = threads(&pool, &PortalThreadQuery::default()).await;
+        assert_eq!(open.iter().flat_map(|group| group.threads.iter()).count(), 2);
+
+        let all = threads(&pool, &PortalThreadQuery { state: Some(STATE_ALL.into()), ..Default::default() }).await;
+        assert_eq!(all.iter().flat_map(|group| group.threads.iter()).count(), 3);
+        let resolved = threads(&pool, &PortalThreadQuery { state: Some(THREAD_STATE_RESOLVED.into()), ..Default::default() }).await;
+        let resolved_rows: Vec<_> = resolved.iter().flat_map(|group| group.threads.iter()).collect();
+        assert_eq!(resolved_rows.len(), 1);
+        assert_eq!(resolved_rows[0].root_comment_id, settled);
+
+        // Voice reads any participant: the mixed thread answers both voices.
+        let humans = threads(&pool, &PortalThreadQuery { voice: Some(THREAD_VOICE_HUMAN.into()), state: Some(STATE_ALL.into()), ..Default::default() }).await;
+        assert_eq!(humans.iter().flat_map(|group| group.threads.iter()).filter(|thread| thread.root_comment_id == human).count(), 1);
+        let agents = threads(&pool, &PortalThreadQuery { voice: Some(THREAD_VOICE_AGENTS.into()), state: Some(STATE_ALL.into()), ..Default::default() }).await;
+        assert_eq!(agents.iter().flat_map(|group| group.threads.iter()).filter(|thread| thread.root_comment_id == human).count(), 1);
+
+        // Text matches root and reply bodies, escaped wildcards match
+        // literally, and a blank needle keeps everything.
+        let text = threads(&pool, &PortalThreadQuery { text: Some("zebra".into()), state: Some(STATE_ALL.into()), ..Default::default() }).await;
+        assert_eq!(text.iter().flat_map(|group| group.threads.iter()).map(|thread| thread.root_comment_id).collect::<Vec<_>>(), vec![human]);
+        let wildcard = threads(&pool, &PortalThreadQuery { text: Some("o_e".into()), state: Some(STATE_ALL.into()), ..Default::default() }).await;
+        assert_eq!(wildcard.iter().flat_map(|group| group.threads.iter()).count(), 0);
+        let percent = threads(&pool, &PortalThreadQuery { text: Some("%".into()), state: Some(STATE_ALL.into()), ..Default::default() }).await;
+        assert_eq!(percent.iter().flat_map(|group| group.threads.iter()).count(), 0);
+        let blank = threads(&pool, &PortalThreadQuery { text: Some("  ".into()), state: Some(STATE_ALL.into()), ..Default::default() }).await;
+        assert_eq!(blank.iter().flat_map(|group| group.threads.iter()).count(), 3);
+
+        // Exact repo filter.
+        let by_repo = threads(&pool, &PortalThreadQuery { repo_path: Some("/other".into()), state: Some(STATE_ALL.into()), ..Default::default() }).await;
+        assert_eq!(by_repo.len(), 1);
+        assert_eq!(by_repo[0].repo_path, "/other");
+
+        // Unknown state and voice values are refused like the reviews
+        // listing refuses unknown states.
+        let error = list_portal_threads_in_pool(&pool, &PortalThreadQuery { state: Some("closed".into()), ..Default::default() }).await.unwrap_err();
+        assert_eq!(error.code, "invalid_request");
+        let error = list_portal_threads_in_pool(&pool, &PortalThreadQuery { voice: Some("robots".into()), ..Default::default() }).await.unwrap_err();
+        assert_eq!(error.code, "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn thread_rows_carry_anchors_badges_and_participants() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+
+        // An anchored thread on an identity whose recorded head moved past
+        // the reviewed head: the moved badge fires.
+        let anchored = seed_thread(
+            &pool, REPO, "base-moved", "/wt-m", ("agent", "reviewer-bot"), "P1: broken loop", 1_000,
+            Some(("src/app.ts", "RIGHT", 41)),
+        ).await;
+        set_severity(&pool, anchored, "P1").await;
+        seed_reply(&pool, anchored, ("agent", "reviewer-bot"), "confirmed on my side", 1_200).await;
+        seed_reply(&pool, anchored, ("agent", "reviewer-bot"), "confirmed twice", 1_300).await;
+        create(&pool, REPO, "base-moved", "/wt-m", "old-head", &Actor::Agent(coder)).await;
+        crate::retrospection::record_surface_open(
+            &pool, REPO, "worktree", "/wt-m", "feature-m", "/wt-m", "moved-head",
+        )
+        .await;
+
+        // A review-level thread with no request ever: no anchor, no badge.
+        let review_level = seed_thread(&pool, REPO, "base-plain", "/wt-p", ("human", "dana"), "overall note", 2_000, None).await;
+
+        let groups = threads(&pool, &PortalThreadQuery { state: Some(STATE_ALL.into()), ..Default::default() }).await;
+        let moved = thread_of(&groups, "base-moved");
+        assert_eq!(moved.anchor.as_deref(), Some("src/app.ts:41"));
+        assert_eq!(moved.severity.as_deref(), Some("P1"));
+        assert!(moved.head_moved, "the recorded head differs from the reviewed head");
+        assert_eq!(moved.reply_count, 2);
+        assert_eq!(moved.last_activity_at, 1_300, "root plus newest reply");
+        assert_eq!(
+            moved.participants,
+            vec![PortalParticipant { author_kind: "agent".into(), author_name: "reviewer-bot".into() }],
+            "participants dedupe by kind and name"
+        );
+
+        let plain = thread_of(&groups, "base-plain");
+        assert_eq!(plain.anchor, None, "review-level threads carry no anchor");
+        assert_eq!(plain.severity, None);
+        assert!(!plain.head_moved, "request-less identities show no moved badge");
+        assert_eq!(review_level, plain.root_comment_id);
+    }
+
+    #[tokio::test]
+    async fn thread_detail_returns_the_stored_conversation() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+        let root = seed_thread(
+            &pool, REPO, "base-detail", "/wt-d", ("human", "dana"), "thread root", 1_000,
+            Some(("src/lib.rs", "LEFT", 7)),
+        ).await;
+        let first = seed_reply(&pool, root, ("agent", "reviewer-bot"), "first reply", 1_100).await;
+        let second = seed_reply(&pool, root, ("human", "dana"), "second reply", 1_200).await;
+        create(&pool, REPO, "base-detail", "/wt-d", "head-d", &Actor::Agent(coder)).await;
+
+        let detail = get_portal_thread_in_pool(&pool, root).await.unwrap();
+        assert_eq!(detail.root_comment_id, root);
+        assert_eq!(detail.repo_path, REPO);
+        assert_eq!(detail.change_label, "/wt-d".rsplit('/').next().unwrap());
+        assert!(!detail.head_moved, "the recorded head matches the reviewed head");
+        assert_eq!(detail.resolved_at, None);
+        assert_eq!(detail.root.id(), root);
+        assert_eq!(detail.replies.iter().map(|reply| reply.id()).collect::<Vec<_>>(), vec![first, second], "replies in stored order");
+        assert_eq!(
+            detail.participants,
+            vec![
+                PortalParticipant { author_kind: "human".into(), author_name: "dana".into() },
+                PortalParticipant { author_kind: "agent".into(), author_name: "reviewer-bot".into() },
+            ]
+        );
+
+        resolve_root(&pool, root, 2_000).await;
+        let detail = get_portal_thread_in_pool(&pool, root).await.unwrap();
+        assert_eq!(detail.resolved_at, Some(2_000));
+
+        // Unknown and non-root ids are refused with the comment error code.
+        let error = get_portal_thread_in_pool(&pool, 99_999).await.unwrap_err();
+        assert_eq!(error.code, "invalid_comment");
+        let error = get_portal_thread_in_pool(&pool, first).await.unwrap_err();
+        assert_eq!(error.code, "invalid_comment");
+    }
+
+    #[tokio::test]
+    async fn the_thread_listing_is_bounded_by_the_thread_cap() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        for index in 0..(THREAD_ROW_LIMIT + 5) {
+            seed_thread(
+                &pool, REPO, &format!("base-{index:04}"), &format!("/wt-{index:04}"),
+                ("human", "dana"), "thread", 1_000 + index as i64, None,
+            ).await;
+        }
+        let groups = threads(&pool, &PortalThreadQuery { state: Some(STATE_ALL.into()), ..Default::default() }).await;
+        let listed: Vec<_> = groups.iter().flat_map(|group| group.threads.iter()).collect();
+        assert_eq!(listed.len(), THREAD_ROW_LIMIT);
+        assert_eq!(listed[0].last_activity_at, 1_000 + THREAD_ROW_LIMIT as i64 + 4, "newest activity first");
+        assert_eq!(listed[THREAD_ROW_LIMIT - 1].last_activity_at, 1_005, "the five oldest threads drop");
+    }
+
+    #[tokio::test]
+    async fn search_matches_comments_requests_and_commits() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+
+        let root = seed_thread(&pool, REPO, "base-c", "/wt-c", ("human", "dana"), "quicksort edge case", 1_000, None).await;
+        seed_reply(&pool, root, ("agent", "reviewer-bot"), "the quicksort loop overflows", 1_100).await;
+        let mut zebras = draft("head-search");
+        zebras.note = Some("watch the quicksort rewrite".into());
+        create_request_in_pool(&pool, REPO, "base-r", "/wt-r", "worktree", &zebras, &Actor::Agent(coder), &noop_notify())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO commits (sha, subject, author, date, refs, parents) \
+             VALUES (?, ?, 'dana', '2026-01-02T03:04:05+00:00', '[]', '[]')",
+        )
+        .bind("a".repeat(40))
+        .bind("fix quicksort pivot")
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The log page attributes the commit to the repo, like the cache
+        // stores it: commit_shas is a JSON array.
+        sqlx::query(
+            "INSERT OR IGNORE INTO log_pages (repo_path, start_sha, against_sha, skip, limit_value, commit_shas, has_more) \
+             VALUES (?, 'start', '', 0, 1, ?, 0)",
+        )
+        .bind(REPO)
+        .bind(format!("[\"{}\"]", "a".repeat(40)))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let matches = search_portal_in_pool(&pool, "quicksort").await.unwrap();
+        assert_eq!(matches.comments.len(), 2, "root and reply bodies both match");
+        assert!(matches.comments.iter().all(|row| row.root_comment_id == root));
+        assert_eq!(matches.requests.len(), 1, "the request note matches");
+        assert_eq!(matches.requests[0].note, "watch the quicksort rewrite");
+        assert_eq!(matches.commits.len(), 1, "the cached commit subject matches");
+        assert_eq!(matches.commits[0].sha, "a".repeat(40));
+        assert_eq!(matches.commits[0].repo_path, REPO);
+        assert_eq!(matches.commits[0].parents, Vec::<String>::new());
+
+        // The request's change label matches too: the label comes from the
+        // worktree path's folder name with no recorded surface.
+        let matches = search_portal_in_pool(&pool, "WT-R").await.unwrap();
+        assert_eq!(matches.requests.len(), 1);
+        assert!(matches.comments.is_empty());
+        assert!(matches.commits.is_empty());
+
+        // Wildcards match literally, and a blank needle answers empty.
+        let matches = search_portal_in_pool(&pool, "q_icksort").await.unwrap();
+        assert!(matches.comments.is_empty());
+        let matches = search_portal_in_pool(&pool, "   ").await.unwrap();
+        assert!(matches.comments.is_empty() && matches.requests.is_empty() && matches.commits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_comment_search_scope_stays_bounded() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        for index in 0..(SEARCH_SCOPE_LIMIT + 2) {
+            seed_thread(
+                &pool, REPO, &format!("base-{index:04}"), &format!("/wt-{index:04}"),
+                ("human", "dana"), "needle haystack", index as i64, None,
+            ).await;
+        }
+        let matches = search_portal_in_pool(&pool, "needle").await.unwrap();
+        assert_eq!(matches.comments.len(), SEARCH_SCOPE_LIMIT, "each scope caps at its constant");
     }
 }

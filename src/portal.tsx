@@ -1,17 +1,30 @@
 import { useEffect, useRef, useState } from "react";
-import { MessageSquare, Search } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { Check, Copy, MessageSquare, Search } from "lucide-react";
 import { attentionAge, isNarrowAttention } from "./requests.ts";
+import { copyText } from "./clipboard.ts";
+import { CommentThreadView, type CommentsApi } from "./comments.tsx";
 import {
-  reviewsProjectOptions,
+  projectOptions,
   reviewsStateCounts,
   reviewsStatusChip,
   rowsForProject,
   rowsForReviewsState,
+  rowsForThreadsState,
+  rowsForThreadsVoice,
   shortSha,
+  threadRouteLabel,
+  threadsStateCounts,
   REVIEWS_STATE_FILTERS,
+  THREADS_STATE_FILTERS,
+  THREADS_VOICE_FILTERS,
+  type PortalReviewRow,
+  type PortalThreadDetail,
+  type PortalThreadGroup,
   type ReviewIdentityRef,
   type ReviewsStateFilter,
-  type PortalReviewRow,
+  type ThreadsStateFilter,
+  type ThreadsVoiceFilter,
 } from "./portal.ts";
 
 // The Reviews tab's fetched listing; null until the first load lands.
@@ -36,7 +49,7 @@ export function PortalReviewsTab({ payload, repoNames, reviewsState, reviewsProj
   const projectRows = rowsForProject(rows, reviewsProject);
   const counts = reviewsStateCounts(projectRows);
   const visible = rowsForReviewsState(projectRows, reviewsState);
-  const projects = reviewsProjectOptions(rows);
+  const projects = projectOptions(rows);
   const activeChip = REVIEWS_STATE_FILTERS.find((chip) => chip.id === reviewsState) ?? REVIEWS_STATE_FILTERS[0];
   const paneRef = useRef<HTMLElement | null>(null);
   const [paneWidth, setPaneWidth] = useState(0);
@@ -91,4 +104,172 @@ export function PortalReviewsTab({ payload, repoNames, reviewsState, reviewsProj
 
 function ReviewsEmpty({ title, detail }: { title: string; detail: string }) {
   return <div className="empty-state"><MessageSquare size={24} /><strong>{title}</strong><span>{detail}</span></div>;
+}
+
+// The Threads tab's fetched listing; null until the first load lands.
+export type PortalThreadsPayload = { groups: PortalThreadGroup[]; loading: boolean; error: string };
+
+// The Pulse Threads tab: every root comment across every review identity,
+// grouped by change. Grouping, filters, ordering, and bounds arrive from
+// the backend; this view counts, narrows by carried fields, and renders.
+export function PortalThreadsTab({ payload, repoNames, threadsState, threadsVoice, threadsProject, threadsText, onState, onVoice, onProject, onText, onOpenThread }: {
+  payload: PortalThreadsPayload | null;
+  repoNames: Map<string, string>;
+  threadsState: ThreadsStateFilter;
+  threadsVoice: ThreadsVoiceFilter;
+  threadsProject: string;
+  threadsText: string;
+  onState: (state: ThreadsStateFilter) => void;
+  onVoice: (voice: ThreadsVoiceFilter) => void;
+  onProject: (project: string) => void;
+  onText: (text: string) => void;
+  onOpenThread: (rootCommentId: number) => void;
+}) {
+  const groups = payload?.groups ?? [];
+  const projectGroups = groups
+    .map((group) => ({ ...group, threads: rowsForProject(group.threads, threadsProject) }))
+    .filter((group) => group.threads.length > 0);
+  const flat = projectGroups.flatMap((group) => group.threads);
+  const counts = threadsStateCounts(flat);
+  const visibleGroups = projectGroups
+    .map((group) => ({ ...group, threads: rowsForThreadsVoice(rowsForThreadsState(group.threads, threadsState), threadsVoice) }))
+    .filter((group) => group.threads.length > 0);
+  const activeChip = THREADS_STATE_FILTERS.find((chip) => chip.id === threadsState) ?? THREADS_STATE_FILTERS[0];
+  const projects = projectOptions(groups.flatMap((group) => group.threads));
+  const now = Date.now();
+  return <section className="inbox-pane attention-pane threads-pane" aria-labelledby="threads-heading">
+    <div className="section-heading"><div className="project-heading"><h1 id="threads-heading">Threads</h1></div></div>
+    <div className="reviews-filter-row">
+      <div className="overview-tabs" role="tablist" aria-label="Thread states">{THREADS_STATE_FILTERS.map((chip) => <button key={chip.id} role="tab" type="button" aria-selected={threadsState === chip.id} className={`overview-tab ${threadsState === chip.id ? "active" : ""}`} onClick={() => onState(chip.id)}>{chip.label}<span className="tab-count">{counts[chip.id]}</span></button>)}</div>
+      <div className="overview-tabs" role="tablist" aria-label="Thread voices">{THREADS_VOICE_FILTERS.map((chip) => <button key={chip.id} role="tab" type="button" aria-selected={threadsVoice === chip.id} className={`overview-tab ${threadsVoice === chip.id ? "active" : ""}`} onClick={() => onVoice(chip.id)}>{chip.label}</button>)}</div>
+      <label className="overview-filter-input reviews-project"><select aria-label="Filter by project" value={threadsProject} onChange={(event) => onProject(event.currentTarget.value)}><option value="">All projects</option>{projects.map((path) => <option key={path} value={path}>{repoNames.get(path) ?? path}</option>)}</select></label>
+      <div className="overview-filter-input"><Search size={12} /><input type="text" aria-label="Search threads" placeholder="Search thread text" value={threadsText} onChange={(event) => onText(event.currentTarget.value)} /></div>
+    </div>
+    {payload?.error ? <ReviewsEmpty title="Threads could not be loaded" detail={payload.error} /> : payload === null || (payload.loading && groups.length === 0) ? <ReviewsEmpty title="Loading threads..." detail="Reading stored conversations." /> : flat.length === 0 ? <ReviewsEmpty title="No threads yet" detail="Threads appear here once a review carries comments." /> : <>
+      {visibleGroups.map((group) => <div key={`${group.repo_path}:${group.target_key}`} className="thread-group">
+        <div className="thread-group-head">
+          <strong title={group.change_label}>{group.change_label}</strong>
+          <span className="thread-group-meta">
+            <span className="path-text" title={group.repo_path}>{repoNames.get(group.repo_path) ?? group.repo_path}</span>
+            {group.target_kind === "head"
+              ? <code title={group.target_key}>{shortSha(group.target_key)}</code>
+              : <span className="path-text" title={group.target_key}>{group.target_key}</span>}
+            <span>{group.open_count} open</span>
+          </span>
+        </div>
+        <div className="worktree-list attention-list">{group.threads.map((thread) => {
+          const openThread = () => onOpenThread(thread.root_comment_id);
+          const resolved = thread.resolved_at !== null;
+          return <div key={thread.root_comment_id} className={`attention-row thread-row ${resolved ? "thread-resolved" : ""}`} role="button" tabIndex={0} onClick={openThread} onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openThread(); } }}>
+            <div className="thread-excerpt"><span className={`thread-spine severity-${thread.severity ?? "none"}`} aria-hidden="true" /><strong title={thread.excerpt}>{thread.excerpt}</strong></div>
+            <div className="thread-anchor">{thread.anchor && <code className="path-text" title={thread.anchor}>{thread.anchor}</code>}</div>
+            <div className="thread-participants">{thread.participants.map((participant) => <span key={`${participant.author_kind}:${participant.author_name}`} className="comment-badge" title={`${participant.author_kind} ${participant.author_name}`}>{participant.author_name}</span>)}</div>
+            <div className="thread-reply-count">{thread.reply_count > 0 && <span title={`${thread.reply_count} ${thread.reply_count === 1 ? "reply" : "replies"}`}>{thread.reply_count}</span>}</div>
+            <div className="thread-badges">{resolved && <span className="comment-badge comment-resolved-badge">resolved</span>}{thread.head_moved && <span className="comment-badge comment-state-badge" title="The surface's head moved past the reviewed head">moved</span>}</div>
+            <div className="thread-age">{attentionAge(thread.last_activity_at, now)}</div>
+          </div>;
+        })}</div>
+      </div>)}
+      {visibleGroups.reduce((total, group) => total + group.threads.length, 0) === 0 && <div className="filter-empty">{activeChip.empty}</div>}
+    </>}
+  </section>;
+}
+
+// A portal thread's fetched detail; null until the load lands.
+export type PortalThreadPayload = { detail: PortalThreadDetail | null; loading: boolean; error: string };
+
+// The Copy link action: hash serialization is deferred, so this shares the
+// thread's in-app route label as text; a tooltip says so, and no URL is
+// implied.
+function CopyRouteButton({ rootCommentId }: { rootCommentId: number }) {
+  const [copied, setCopied] = useState(false);
+  const label = `Copy in-app path ${threadRouteLabel(rootCommentId)}`;
+  return <button className={`copy-button ${copied ? "copied" : ""}`} type="button" aria-label={label} title={copied ? "Copied" : `${label} (an in-app path, not a URL)`} onClick={async (event) => { event.stopPropagation(); if (await copyText(threadRouteLabel(rootCommentId))) { setCopied(true); setTimeout(() => setCopied(false), 1200); } }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button>;
+}
+
+// The portal thread detail: the stored conversation, resolve/reopen and
+// reply through the same comment commands the review surface uses, the
+// anchored snippet as stored, and the change's other threads alongside.
+export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, onOpenReview, onChanged }: {
+  payload: PortalThreadPayload;
+  groups: PortalThreadGroup[];
+  repoNames: Map<string, string>;
+  onOpenThread: (rootCommentId: number) => void;
+  onOpenReview: (row: ReviewIdentityRef, focusedCommentId: number) => void;
+  onChanged: () => void;
+}) {
+  const { detail } = payload;
+  const group = detail
+    ? groups.find((candidate) => candidate.repo_path === detail.repo_path && candidate.target_key === detail.target_key && candidate.target_kind === detail.target_kind)
+    : null;
+  const otherThreads = group?.threads.filter((thread) => thread.root_comment_id !== detail?.root_comment_id) ?? [];
+  if (payload.error && !detail) return <section className="inbox-pane attention-pane threads-pane" aria-labelledby="thread-detail-heading"><div className="section-heading"><div className="project-heading"><h1 id="thread-detail-heading">Thread</h1></div></div><ReviewsEmpty title="Thread could not be loaded" detail={payload.error} /></section>;
+  if (!detail) return <section className="inbox-pane attention-pane threads-pane" aria-labelledby="thread-detail-heading"><div className="section-heading"><div className="project-heading"><h1 id="thread-detail-heading">Thread</h1></div></div><ReviewsEmpty title="Loading thread..." detail="Reading the stored conversation." /></section>;
+  const resolved = detail.resolved_at !== null;
+  // The conversation renders through the review surface's own thread view;
+  // its actions route to the same store commands, so the portal adds no
+  // new mutation path.
+  const commentsApi: CommentsApi = {
+    key: null,
+    threads: [{ comment: detail.root, replies: detail.replies }],
+    visibleThreads: [],
+    statuses: {},
+    author: "all",
+    setAuthor() { },
+    composer: null,
+    openComposer() { },
+    openFileComposer() { },
+    closeComposer() { },
+    async refresh() { onChanged(); },
+    async create() { },
+    async reply(parentId, body) {
+      await invoke("reply_comment", { parentId, body, severity: null });
+      onChanged();
+    },
+    async setResolved(commentId, resolvedValue) {
+      await invoke("set_comment_resolved", { commentId, resolved: resolvedValue });
+      onChanged();
+    },
+    async edit(commentId, body) {
+      await invoke("edit_comment", { commentId, body });
+      onChanged();
+    },
+    async remove(commentId) {
+      await invoke("delete_comment", { commentId });
+      onChanged();
+    },
+  };
+  const openReview = () => onOpenReview({ repo_path: detail.repo_path, base_sha: detail.base_sha, target_key: detail.target_key, target_kind: detail.target_kind, head_sha: detail.head_sha }, detail.root_comment_id);
+  return <section className="inbox-pane attention-pane threads-pane thread-detail" aria-labelledby="thread-detail-heading">
+    <div className="thread-breadcrumb" aria-label="Thread location">
+      <span title={detail.repo_path}>{repoNames.get(detail.repo_path) ?? detail.repo_path}</span>
+      <span className="crumb-sep">/</span>
+      <span title={detail.change_label}>{detail.change_label}</span>
+      {detail.root.file_path && <><span className="crumb-sep">/</span><code className="path-text" title={detail.root.file_path}>{detail.root.file_path}{detail.root.start_line !== null ? `:${detail.root.start_line}` : ""}</code></>}
+      <span className={`status-chip ${resolved ? "clean" : "reviews-quiet"}`}>{resolved ? "resolved" : "open"}</span>
+      {detail.head_moved && <span className="comment-badge comment-state-badge" title="The surface's head moved past the reviewed head">moved</span>}
+      <span className="thread-breadcrumb-actions">
+        <CopyRouteButton rootCommentId={detail.root_comment_id} />
+        <button className="secondary-button" type="button" title="Open the review this thread lives on" onClick={openReview}>Open in review</button>
+      </span>
+    </div>
+    <div className="thread-detail-body">
+      <div className="thread-conversation">
+        <CommentThreadView thread={{ comment: detail.root, replies: detail.replies }} status={null} comments={commentsApi} />
+      </div>
+      <aside className="thread-others" aria-label="Other threads on this change">
+        <div className="pane-heading"><strong>Other threads</strong><span>{otherThreads.length}</span></div>
+        <div className="thread-others-list">
+          {otherThreads.length === 0 && <div className="filter-empty">No other threads on this change</div>}
+          {otherThreads.map((thread) => {
+            const openThread = () => onOpenThread(thread.root_comment_id);
+            return <div key={thread.root_comment_id} className={`thread-others-row ${thread.resolved_at !== null ? "thread-resolved" : ""}`} role="button" tabIndex={0} onClick={openThread} onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openThread(); } }}>
+              <strong title={thread.excerpt}>{thread.excerpt}</strong>
+              <span className="thread-others-meta">{thread.resolved_at !== null ? "resolved" : "open"} · {thread.reply_count} {thread.reply_count === 1 ? "reply" : "replies"}</span>
+            </div>;
+          })}
+        </div>
+      </aside>
+    </div>
+  </section>;
 }

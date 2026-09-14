@@ -109,6 +109,7 @@ All tools are stateless `tools/call`s carrying
 | `edit_own_comment` / `delete_own_comment` | Only comments authored by your token. |
 | `request_review` | Ask the fleet to review one identity at a recorded head. Your token becomes the requester. |
 | `list_review_requests` | The request queue. No filters: the cross-repo open feed (the agent inbox feed). Optional `repo_path` / `status` filters. |
+| `list_threads` | Sweep every open thread across projects, grouped by change. Optional `repo_path`, `state` (`open`/`resolved`), `since` (epoch ms), `participant` (exact name). Omitting `state` answers open threads; `reply_comment` / `resolve_thread` act on the `root_comment_id`. |
 | `update_review_request` | Advance one request: `claim`, `approve`, `request_changes`, `withdraw` (requester-only), `re_request` (requester-only, new head). |
 | `refresh_repo` | Run the app's bounded fetch for a repo, then it re-lists surfaces. |
 
@@ -131,6 +132,10 @@ Workflows:
 - **Respond in threads**: read the thread with `list_comments`,
   `reply_comment` on the root, `resolve_thread` when the point is
   addressed. Only edit or delete comments your own token authored.
+- **Sweep open threads**: on a sparse cadence, `list_threads` with no
+  filters answers every open thread grouped by change; work them oldest
+  activity first (or narrow with `repo_path`, `participant`, or `since`),
+  and re-check with `state: "resolved"` only when you need history.
 - **Update remote state**: `refresh_repo` after pushing or when the human
   asks for fresh remote-tracking refs.
 

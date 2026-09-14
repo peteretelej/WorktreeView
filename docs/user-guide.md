@@ -230,7 +230,7 @@ agents cannot reach it.
 
 Pulse is one of the app's routed surfaces: the slim bar above the
 content shows back and forward buttons, the current route
-(`pulse/inbox`, `pulse/reviews`, `projects/<name>`, or `settings`), and a
+(`pulse/inbox`, `pulse/reviews`, `pulse/threads`, `pulse/thread/<id>`, `projects/<name>`, or `settings`), and a
 search trigger, so browsing between projects, inbox categories, and
 settings traverses history; Alt + ArrowLeft and Alt + ArrowRight do the
 same from the keyboard, on review surfaces too.
@@ -264,6 +264,39 @@ requester, and note text as you type.
 Clicking a row opens the review the same way the inbox does, at its
 recorded head and base; if the reviewed worktree is gone, the usual
 degraded state explains that the content is no longer available.
+
+## Read the Threads tab
+
+The **Threads** tab in Pulse gathers every root comment across every
+review identity into one readable surface. Threads group under their
+change (the project plus the reviewed worktree or commit), so threads
+stay together even when review bases move; each group heading shows the
+change, the project, and how many of its threads are still open, and the
+rows inside sort by latest activity.
+
+A thread row shows the first line of the comment, a mono `file:line`
+anchor (review-level threads carry none), participant chips for every
+human and agent that joined, a reply count, the age of the last
+activity, and badges for resolved threads and for surfaces whose head
+moved past the reviewed head. A colored spine carries the comment's
+P0-P3 severity. The chips above the list narrow by state (Open,
+Resolved, All) and by voice (All, Human, Agents, reading any
+participant), the project select narrows to one repository, and the
+search box matches thread and reply text as you type.
+
+## Open a thread's conversation
+
+Clicking a thread row opens its conversation: the stored root comment
+and every reply in order, with each author's human or agent card. The
+breadcrumb names the project, the change, and the anchor; the state chip
+shows whether the thread is resolved. Resolve or reopen the thread and
+reply to it right here, exactly as in a review, and the change's other
+threads sit in the side column.
+
+**Copy link** shares the thread's in-app path (`pulse/thread/<id>`) as
+text; it is an in-app route label, not a URL. **Open in review** jumps to
+the review this thread lives on and scrolls the comments pane to the
+thread, so precise anchor drift keeps being a review-surface question.
 
 ## Keep projects current
 
