@@ -47,6 +47,19 @@ pub(crate) async fn record_surface_open(
     detail: &str,
     head_sha: &str,
 ) {
+    // A move is a recorded surface whose head changed between opens; a
+    // first record narrates nothing. The read races nothing: opens are
+    // human-paced and the upsert below is the only head writer.
+    let previous: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT head_sha FROM retrospected_surfaces \
+         WHERE repo_path = ? AND kind = ? AND identity_key = ?",
+    )
+    .bind(repo_path)
+    .bind(kind)
+    .bind(identity_key)
+    .fetch_optional(pool)
+    .await
+    .ok();
     let _ = sqlx::query(
         "INSERT INTO retrospected_surfaces \
          (repo_path, kind, identity_key, label, detail, head_sha, last_seen_at) \
@@ -67,6 +80,30 @@ pub(crate) async fn record_surface_open(
     .bind(now_millis())
     .execute(pool)
     .await;
+    if previous.flatten().is_some_and(|previous| previous != head_sha) {
+        let recorded = crate::events::record_event(
+            pool,
+            crate::events::NewEvent {
+                repo_path: repo_path.to_string(),
+                kind: crate::events::SURFACE_HEAD_MOVED,
+                base_sha: None,
+                target_key: Some(identity_key.to_string()),
+                target_kind: Some(kind.to_string()),
+                request_id: None,
+                comment_id: None,
+                actor_kind: crate::events::ACTOR_HUMAN,
+                actor_name: "human".to_string(),
+                summary: format!("head moved to {}", crate::requests::short_sha(head_sha)),
+            },
+        )
+        .await;
+        // The recording contract is best-effort end to end: this cache
+        // write has no error channel to fail, so narration failure only
+        // logs.
+        if let Err(error) = recorded {
+            log::warn!("head-move event for {identity_key} was not recorded: {error}");
+        }
+    }
 }
 
 // Gone detection reads live inventory on every listing; nothing here is
@@ -1096,5 +1133,86 @@ mod tests {
         assert_eq!(pinned, [None]);
 
         std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn head_moves_narrate_once_per_changed_head() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        // A first record and a same-head re-open narrate nothing; a changed
+        // head narrates once, not once per re-open at the same head.
+        record_surface_open(
+            &pool,
+            "/demo",
+            "worktree",
+            "/wt",
+            "feature",
+            "/wt",
+            &"a".repeat(40),
+        )
+        .await;
+        record_surface_open(
+            &pool,
+            "/demo",
+            "worktree",
+            "/wt",
+            "feature",
+            "/wt",
+            &"a".repeat(40),
+        )
+        .await;
+        record_surface_open(
+            &pool,
+            "/demo",
+            "branch",
+            "refs/heads/feature",
+            "feature",
+            "refs/heads/feature",
+            &"a".repeat(40),
+        )
+        .await;
+        record_surface_open(
+            &pool,
+            "/demo",
+            "worktree",
+            "/wt",
+            "feature",
+            "/wt",
+            &"b".repeat(40),
+        )
+        .await;
+        record_surface_open(
+            &pool,
+            "/demo",
+            "worktree",
+            "/wt",
+            "feature",
+            "/wt",
+            &"b".repeat(40),
+        )
+        .await;
+
+        let rows = crate::events::list_events_in_pool(
+            &pool,
+            &crate::events::EventQuery {
+                since_id: 0,
+                repo_path: None,
+                limit: 100,
+                ascending: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, crate::events::SURFACE_HEAD_MOVED);
+        assert_eq!(rows[0].repo_path, "/demo");
+        assert_eq!(rows[0].target_key.as_deref(), Some("/wt"));
+        assert_eq!(rows[0].target_kind.as_deref(), Some("worktree"));
+        assert_eq!(rows[0].base_sha, None);
+        assert_eq!(rows[0].actor_kind, crate::events::ACTOR_HUMAN);
+        assert_eq!(
+            rows[0].summary,
+            format!("head moved to {}", crate::requests::short_sha(&"b".repeat(40)))
+        );
     }
 }

@@ -110,6 +110,7 @@ All tools are stateless `tools/call`s carrying
 | `request_review` | Ask the fleet to review one identity at a recorded head. Your token becomes the requester. |
 | `list_review_requests` | The request queue. No filters: the cross-repo open feed (the agent inbox feed). Optional `repo_path` / `status` filters. |
 | `list_threads` | Sweep every open thread across projects, grouped by change. Optional `repo_path`, `state` (`open`/`resolved`), `since` (epoch ms), `participant` (exact name). Omitting `state` answers open threads; `reply_comment` / `resolve_thread` act on the `root_comment_id`. |
+| `list_activity` | Bounded activity feed across projects: request lifecycle, submissions, comments, surface head moves, repo adds, ascending by id with a `next_cursor`. Optional `since_id` (event-id cursor), `repo_path`, `limit` (default 100, capped). |
 | `update_review_request` | Advance one request: `claim`, `approve`, `request_changes`, `withdraw` (requester-only), `re_request` (requester-only, new head). |
 | `refresh_repo` | Run the app's bounded fetch for a repo, then it re-lists surfaces. |
 
@@ -136,6 +137,10 @@ Workflows:
   filters answers every open thread grouped by change; work them oldest
   activity first (or narrow with `repo_path`, `participant`, or `since`),
   and re-check with `state: "resolved"` only when you need history.
+- **Poll for what changed**: keep one event cursor per client and call
+  `list_activity` with `since_id` set to the last event id you saw; the
+  bounded answer is only what is new, and `next_cursor` carries forward.
+  Never re-poll the whole log; start from `since_id` 0 once.
 - **Update remote state**: `refresh_repo` after pushing or when the human
   asks for fresh remote-tracking refs.
 

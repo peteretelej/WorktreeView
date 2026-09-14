@@ -1,3 +1,4 @@
+use crate::events;
 use crate::store::now_millis;
 use crate::transport::{RequestChange, RequestChangeSink};
 use crate::CommandError;
@@ -279,6 +280,55 @@ fn requester_key(actor: &Actor) -> Option<i64> {
     }
 }
 
+// Event attribution: the engine knows only the acting token id, so the
+// name resolves at emission; human transitions are human.
+async fn event_actor(
+    pool: &SqlitePool,
+    actor: &Actor,
+) -> Result<(&'static str, String), sqlx::Error> {
+    match actor {
+        Actor::Human => Ok((events::ACTOR_HUMAN, "human".to_string())),
+        Actor::Agent(token_id) => {
+            let name: Option<String> =
+                sqlx::query_scalar("SELECT name FROM agent_tokens WHERE id = ?")
+                    .bind(token_id)
+                    .fetch_optional(pool)
+                    .await?;
+            Ok((events::ACTOR_AGENT, name.unwrap_or_else(|| "agent".to_string())))
+        }
+    }
+}
+
+// One event per successful lifecycle transition, written on the same
+// connection after the guarded UPDATE wins; a failed insert fails the
+// mutation, so narration never silently trails the store.
+async fn emit_request_event(
+    pool: &SqlitePool,
+    kind: &'static str,
+    request: &ReviewRequest,
+    actor_kind: &'static str,
+    actor_name: &str,
+    summary: String,
+) -> Result<(), CommandError> {
+    events::record_event(
+        pool,
+        events::NewEvent {
+            repo_path: request.repo_path.clone(),
+            kind,
+            base_sha: Some(request.base_sha.clone()),
+            target_key: Some(request.target_key.clone()),
+            target_kind: Some(request.target_kind.clone()),
+            request_id: Some(request.id),
+            comment_id: None,
+            actor_kind,
+            actor_name: actor_name.to_string(),
+            summary,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 // Create resolves against the identity's requests of the same requester
 // (dedup keys on identity, requester, head; different requesters never
 // dedup against each other): a same-head open request updates in place, a
@@ -418,6 +468,16 @@ pub(crate) async fn create_request_in_pool(
     .execute(pool)
     .await?;
     let created = require_request(pool, result.last_insert_rowid()).await?;
+    let (actor_kind, actor_name) = event_actor(pool, actor).await?;
+    emit_request_event(
+        pool,
+        events::REQUEST_CREATED,
+        &created,
+        actor_kind,
+        &actor_name,
+        format!("review requested by {actor_name}"),
+    )
+    .await?;
     fire_change(notify, &created);
     Ok(created)
 }
@@ -463,6 +523,16 @@ pub(crate) async fn claim_request_in_pool(
         return Err(invalid_transition("Only a requested review can be claimed."));
     }
     let claimed = require_request(pool, request.id).await?;
+    let (actor_kind, actor_name) = event_actor(pool, actor).await?;
+    emit_request_event(
+        pool,
+        events::REQUEST_CLAIMED,
+        &claimed,
+        actor_kind,
+        &actor_name,
+        format!("claimed by {actor_name}"),
+    )
+    .await?;
     fire_change(notify, &claimed);
     Ok(claimed)
 }
@@ -476,7 +546,7 @@ pub(crate) async fn set_request_verdict_in_pool(
     pool: &SqlitePool,
     request_id: i64,
     approve: bool,
-    _actor: &Actor,
+    actor: &Actor,
     notify: &RequestChangeSink,
 ) -> Result<ReviewRequest, CommandError> {
     let request = require_request(pool, request_id).await?;
@@ -494,6 +564,17 @@ pub(crate) async fn set_request_verdict_in_pool(
         ));
     }
     let updated = require_request(pool, request.id).await?;
+    let (actor_kind, actor_name) = event_actor(pool, actor).await?;
+    let verdict = if approve { "approved" } else { "changes requested" };
+    emit_request_event(
+        pool,
+        events::REQUEST_VERDICT,
+        &updated,
+        actor_kind,
+        &actor_name,
+        format!("{verdict} by {actor_name}"),
+    )
+    .await?;
     fire_change(notify, &updated);
     Ok(updated)
 }
@@ -523,6 +604,16 @@ pub(crate) async fn withdraw_request_in_pool(
     }
     set_status(pool, request.id, WITHDRAWN).await?;
     let withdrawn = require_request(pool, request.id).await?;
+    let (actor_kind, actor_name) = event_actor(pool, actor).await?;
+    emit_request_event(
+        pool,
+        events::REQUEST_WITHDRAWN,
+        &withdrawn,
+        actor_kind,
+        &actor_name,
+        format!("withdrawn by {actor_name}"),
+    )
+    .await?;
     fire_change(notify, &withdrawn);
     Ok(withdrawn)
 }
@@ -594,6 +685,16 @@ pub(crate) async fn re_request_in_pool(
         ));
     }
     let updated = require_request(pool, request.id).await?;
+    let (actor_kind, actor_name) = event_actor(pool, actor).await?;
+    emit_request_event(
+        pool,
+        events::REQUEST_RE_REQUESTED,
+        &updated,
+        actor_kind,
+        &actor_name,
+        format!("re-requested by {actor_name}"),
+    )
+    .await?;
     fire_change(notify, &updated);
     Ok(updated)
 }
@@ -2539,5 +2640,67 @@ mod tests {
         assert_eq!(rows[0].request_id, Some(requested.id));
         assert_eq!(rows[0].category, CATEGORY_REQUESTED);
         assert_eq!(rows[0].unresolved_p0, 0);
+    }
+
+    async fn listed_events(pool: &SqlitePool) -> Vec<crate::events::EventRow> {
+        crate::events::list_events_in_pool(
+            pool,
+            &crate::events::EventQuery {
+                since_id: 0,
+                repo_path: None,
+                limit: 100,
+                ascending: true,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn lifecycle_transitions_narrate_events_with_actor_attribution() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+        let reviewer = agent_token(&pool, "reviewer-bot").await;
+
+        // The create narrates once with the requester token's name; a
+        // same-head re-ask restates the existing ask and narrates nothing;
+        // a refused transition never narrates.
+        let request = create(&pool, &Actor::Agent(coder), "head-1").await;
+        create(&pool, &Actor::Agent(coder), "head-1").await;
+        assert!(claim_request_in_pool(&pool, request.id, &Actor::Human, &noop_notify())
+            .await
+            .is_err());
+        claim(&pool, request.id, &Actor::Agent(reviewer)).await;
+        verdict(&pool, request.id, false, &Actor::Human).await;
+        re_request(&pool, request.id, "head-2", &Actor::Agent(coder)).await;
+        withdraw(&pool, request.id, &Actor::Agent(coder)).await;
+        let human_request = create(&pool, &Actor::Human, "head-3").await;
+
+        let rows = listed_events(&pool).await;
+        let narrated: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|row| (row.kind.as_str(), row.actor_kind.as_str(), row.actor_name.as_str()))
+            .collect();
+        assert_eq!(
+            narrated,
+            [
+                ("request_created", "agent", "coder-bot"),
+                ("request_claimed", "agent", "reviewer-bot"),
+                ("request_verdict", "human", "human"),
+                ("request_re_requested", "agent", "coder-bot"),
+                ("request_withdrawn", "agent", "coder-bot"),
+                ("request_created", "human", "human"),
+            ]
+        );
+        assert_eq!(rows[0].request_id, Some(request.id));
+        assert_eq!(rows[5].request_id, Some(human_request.id));
+        assert_eq!(rows[0].repo_path, REPO);
+        assert_eq!(rows[0].base_sha.as_deref(), Some(BASE));
+        assert_eq!(rows[0].target_key.as_deref(), Some(KEY));
+        assert_eq!(rows[0].target_kind.as_deref(), Some(KIND));
+        assert_eq!(rows[0].comment_id, None);
+        assert!(rows[0].summary.contains("coder-bot"));
+        assert!(rows[2].summary.starts_with("changes requested by "));
     }
 }

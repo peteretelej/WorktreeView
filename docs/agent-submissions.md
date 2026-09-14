@@ -372,6 +372,7 @@ the transport layer (HTTP 401, `-32001`).
 | `list_review_requests` | optional `repo_path`, `status` | array of request rows plus derived `age_ms`, `comment_count`, `unresolved_finding_counts` (per severity), and `requester` | unknown `status` value |
 | `update_review_request` | `id`, `action` (`claim`/`approve`/`request_changes`/`withdraw`/`re_request`); optional `note` and `head_sha`, both only with `re_request` (`head_sha` is required there) | the updated request row | unknown request id; actor-rule violations (claim gating, requester-only withdraw and re-request); round budget exhausted; `re_request` with the same `head_sha`; invalid refreshed `note` |
 | `list_threads` | optional `repo_path`, `state` (`open`/`resolved`), `since` (epoch ms on last activity), `participant` (exact name) | array of thread groups, one per change (`repo_path`, `target_key`, `target_kind`, `change_label`, `open_count`), each with its thread rows: `root_comment_id`, `excerpt`, `severity`, `anchor`, `participants`, `reply_count`, `resolved_at`, `last_activity_at`, `head_moved` | unknown `state` value; unknown repo |
+| `list_activity` | optional `since_id` (event-id cursor, default 0), `repo_path`, `limit` (default 100, capped) | `{ "events": [...], "next_cursor": <last answered id> }`, events ascending by id: each carries `id`, `repo_path`, `kind`, optional `base_sha`, `target_key`, `target_kind`, `request_id`, `comment_id`, `actor_kind` (`human`/`agent`), `actor_name`, a short human-readable `summary`, and `created_at` | unknown repo |
 | `refresh_repo` | `repo_path` | `{ "ok": true }` | unknown repo; fetch failure |
 
 Reads are find-only: a review identity with no comments yet answers an
@@ -440,6 +441,23 @@ app does not poll: it is pushed a `review-request-changed` event on every
 successful request mutation, so the human sees agent actions live. That
 event stays app-internal; the synchronous tool result remains the only
 thing a client depends on.
+
+### The activity cursor
+
+`list_activity` is the bounded alternative to poll-everything: it answers
+the review activity log as an append-only feed, ascending by event id.
+Keep one cursor per client: pass the last event id you have seen as
+`since_id`, and the answer is exactly the events you have not seen,
+bounded by `limit`, with `next_cursor` to carry forward (your own cursor
+when nothing is new, so an empty poll never moves it backward). Kinds
+cover the request lifecycle (`request_created`, `request_claimed`,
+`request_verdict`, `request_re_requested`, `request_withdrawn`),
+deliveries (`submission_delivered`), comments (`comment_posted`,
+`comment_replied`, `comment_resolved`, `comment_reopened`), and store
+narration (`surface_head_moved`, `repo_added`), each attributed with
+`actor_kind` and `actor_name` for both human and agent actions. The list
+is closed: edits and deletions have no kind, so existing events keep
+narrating and a replayed poll answers nothing new.
 
 ### Identity and ownership
 

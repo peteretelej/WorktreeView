@@ -1,5 +1,6 @@
 use crate::agents::AgentIdentity;
 use crate::commands::{list_worktrees_in_path, refresh_repo};
+use crate::events::{list_events_in_pool, EventQuery, EVENT_LIST_LIMIT};
 use crate::overview::branch_inventory;
 use crate::portal::{
     list_portal_threads_in_pool, PortalThreadQuery, THREAD_STATE_OPEN, THREAD_STATE_RESOLVED,
@@ -52,6 +53,10 @@ const UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
 // The tool set is static per boot, so a generous private cache hint is
 // honest; no tool result can change without an app restart.
 const TOOL_CACHE_TTL_MS: u64 = 3_600_000;
+
+// The activity cursor's default page: one bounded poll answers a useful
+// slice, and the store's cap bounds whatever the caller asks for.
+const LIST_ACTIVITY_DEFAULT_LIMIT: i64 = 100;
 
 // The request statuses agents can filter by, mirroring the engine's
 // lifecycle vocabulary.
@@ -250,6 +255,14 @@ struct ListThreadsArgs {
     state: Option<String>,
     since: Option<i64>,
     participant: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListActivityArgs {
+    since_id: Option<i64>,
+    repo_path: Option<String>,
+    limit: Option<i64>,
 }
 
 // The transition vocabulary is a closed set: serde refuses any other value
@@ -489,6 +502,24 @@ fn tool_descriptors() -> Value {
             ),
         ),
         tool(
+            "list_activity",
+            "List review activity events (requests, submissions, comments, surface head moves, repo adds) across every open repository, ascending by id with a next_cursor. Poll with the cursor to answer exactly the events you have not seen yet.",
+            schema(
+                json!({
+                    "since_id": {
+                        "type": "integer",
+                        "description": "Optional event-id cursor: only events with a greater id are answered; omit it (or pass 0) to start from the beginning of the log.",
+                    },
+                    "repo_path": path_arg("Optional exact repository path as listed by list_repos; omit for every open repository."),
+                    "limit": {
+                        "type": "integer",
+                        "description": "Optional page size (default 100); the answer never exceeds the store's event page cap.",
+                    },
+                }),
+                &[],
+            ),
+        ),
+        tool(
             "create_comment",
             "Create a comment on a review; the author is your agent token, so you can edit and delete it later. Anchor shapes: no file for review-level, file only for file-level, file with side and start_line for line-level.",
             schema(
@@ -699,6 +730,10 @@ async fn handle_tools_call(
         "list_threads" => {
             let args = tool_args(id, &arguments)?;
             list_threads(state, args).await
+        }
+        "list_activity" => {
+            let args = tool_args(id, &arguments)?;
+            list_activity(state, args).await
         }
         "create_comment" => {
             let args = tool_args(id, &arguments)?;
@@ -953,6 +988,35 @@ async fn list_threads(state: &TransportState, args: ListThreadsArgs) -> ToolOutc
     }
     groups.retain(|group| !group.threads.is_empty());
     payload(groups)
+}
+
+// The bounded activity cursor: everything after the caller's last seen
+// event id, ascending, so a sparse poll replays nothing and cannot pull
+// the whole log. An empty answer keeps the cursor where it was.
+async fn list_activity(state: &TransportState, args: ListActivityArgs) -> ToolOutcome {
+    if let Some(repo_path) = &args.repo_path {
+        ensure_repo_open(state, repo_path)
+            .await
+            .map_err(|error| error.message)?;
+    }
+    let since_id = args.since_id.unwrap_or(0).max(0);
+    let limit = args
+        .limit
+        .unwrap_or(LIST_ACTIVITY_DEFAULT_LIMIT)
+        .clamp(1, EVENT_LIST_LIMIT as i64) as usize;
+    let events = list_events_in_pool(
+        &state.pool,
+        &EventQuery {
+            since_id,
+            repo_path: args.repo_path,
+            limit,
+            ascending: true,
+        },
+    )
+    .await
+    .map_err(|error| format!("The activity log could not be read: {error}"))?;
+    let next_cursor = events.last().map_or(since_id, |event| event.id);
+    payload(json!({ "events": events, "next_cursor": next_cursor }))
 }
 
 // One stored request plus its derived triage fields from the grouped query.
@@ -1259,13 +1323,14 @@ mod tests {
     const OWNERSHIP_MESSAGE: &str =
         "Only the agent token that authored a comment can edit or delete it.";
     const UNKNOWN_REPO_MESSAGE: &str = "No repository with that path is open in WorktreeView.";
-    const TOOL_NAMES: [&str; 15] = [
+    const TOOL_NAMES: [&str; 16] = [
         "list_repos",
         "list_review_targets",
         "list_comments",
         "list_submissions",
         "list_review_requests",
         "list_threads",
+        "list_activity",
         "create_comment",
         "reply_comment",
         "resolve_thread",
@@ -1819,6 +1884,91 @@ mod tests {
             .unwrap()
             .contains("Unknown state 'all'"));
         let bad_repo = call_tool_raw(&state, &secret, "list_threads", json!({ "repo_path": "/nowhere" })).await;
+        assert_eq!(bad_repo["result"]["isError"], true);
+        assert_eq!(bad_repo["result"]["content"][0]["text"], UNKNOWN_REPO_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn list_activity_answers_the_cursor_bounded_and_per_repo() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        seed_repo(&pool, "/other").await;
+        let (state, secret) = test_state(pool.clone()).await;
+
+        // Two production mutations on one repo narrate their events; a
+        // foreign repo's row exists only so the repo filter has scope.
+        call_tool_raw(
+            &state,
+            &secret,
+            "request_review",
+            json!({
+                "repo_path": "/demo",
+                "base_sha": "base",
+                "target_key": "/demo",
+                "target_kind": "worktree",
+                "head_sha": "head-1",
+            }),
+        )
+        .await;
+        call_tool_raw(
+            &state,
+            &secret,
+            "create_comment",
+            json!({
+                "repo_path": "/demo",
+                "base_sha": "base",
+                "target_key": "/demo",
+                "target_kind": "worktree",
+                "body": "root comment",
+            }),
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO events (repo_path, kind, actor_kind, actor_name, summary, created_at) \
+             VALUES ('/other', 'repo_added', 'human', 'human', 'repo added', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // No filters: ascending by id, attributed to the calling token.
+        let payload = call_tool_raw(&state, &secret, "list_activity", json!({})).await;
+        assert_eq!(payload["result"]["isError"], false);
+        let answer = result_text(&payload);
+        let events = answer["events"].as_array().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["kind"], "request_created");
+        assert_eq!(events[0]["actor_kind"], "agent");
+        assert_eq!(events[0]["actor_name"], "mcp-agent");
+        assert_eq!(events[1]["kind"], "comment_posted");
+        assert_eq!(events[1]["actor_name"], "mcp-agent");
+        assert_eq!(events[2]["repo_path"], "/other");
+        let cursor = answer["next_cursor"].as_i64().unwrap();
+        assert_eq!(cursor, events[2]["id"].as_i64().unwrap());
+
+        // The cursor is strictly greater and never moves backward.
+        let replay = call_tool_raw(&state, &secret, "list_activity", json!({ "since_id": cursor })).await;
+        let replayed = result_text(&replay);
+        assert_eq!(replayed["events"].as_array().unwrap().len(), 0);
+        assert_eq!(replayed["next_cursor"], json!(cursor));
+
+        // The repo filter is exact.
+        let other = call_tool_raw(&state, &secret, "list_activity", json!({ "repo_path": "/other" })).await;
+        let other_answer = result_text(&other);
+        let others = other_answer["events"].as_array().unwrap();
+        assert_eq!(others.len(), 1);
+        assert_eq!(others[0]["kind"], "repo_added");
+
+        // The page size bounds the answer and the cursor bridges the pages.
+        let paged = call_tool_raw(&state, &secret, "list_activity", json!({ "limit": 1 })).await;
+        let page = result_text(&paged);
+        assert_eq!(page["events"].as_array().unwrap().len(), 1);
+        let first_cursor = page["next_cursor"].as_i64().unwrap();
+        let rest = call_tool_raw(&state, &secret, "list_activity", json!({ "since_id": first_cursor })).await;
+        assert_eq!(result_text(&rest)["events"].as_array().unwrap().len(), 2);
+
+        // Unknown repo is a clean failure.
+        let bad_repo = call_tool_raw(&state, &secret, "list_activity", json!({ "repo_path": "/nowhere" })).await;
         assert_eq!(bad_repo["result"]["isError"], true);
         assert_eq!(bad_repo["result"]["content"][0]["text"], UNKNOWN_REPO_MESSAGE);
     }

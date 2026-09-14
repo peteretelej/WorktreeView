@@ -1,3 +1,4 @@
+use crate::events;
 use crate::git::{ensure_work_tree, Worktree};
 use crate::{canonical_path, plain_path, CommandError};
 use serde::{Deserialize, Serialize};
@@ -280,7 +281,32 @@ pub(crate) async fn open_repo_path(path: &str, pool: &SqlitePool) -> Result<Repo
         .ok_or_else(|| {
             CommandError::new("invalid_path", "The selected folder has no valid name.")
         })?;
+    // Only a genuinely new registry row narrates: re-opening an existing
+    // repository refreshes it in place, and no add happened. The failed
+    // insert fails the open, so the narration never trails the store.
+    let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM repos WHERE path = ?")
+        .bind(path)
+        .fetch_one(pool)
+        .await?;
     upsert_repo(pool, path, name, now_millis()).await?;
+    if existing == 0 {
+        events::record_event(
+            pool,
+            events::NewEvent {
+                repo_path: path.to_string(),
+                kind: events::REPO_ADDED,
+                base_sha: None,
+                target_key: None,
+                target_kind: None,
+                request_id: None,
+                comment_id: None,
+                actor_kind: events::ACTOR_HUMAN,
+                actor_name: "human".to_string(),
+                summary: "repo added".to_string(),
+            },
+        )
+        .await?;
+    }
     let pinned_at = sqlx::query_scalar::<_, Option<i64>>("SELECT pinned_at FROM repos WHERE path = ?")
         .bind(path)
         .fetch_one(pool)
@@ -456,7 +482,7 @@ pub(crate) async fn set_settings_in_pool(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{test_path, test_pool};
+    use crate::testutil::{test_path, test_pool, test_repo};
 
     #[tokio::test]
     async fn upsert_is_monotonic_and_preserves_creation() {
@@ -970,5 +996,40 @@ mod tests {
         let commit_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM commits").fetch_one(&pool).await.unwrap();
         assert_eq!(commit_count, 1);
+    }
+
+    #[tokio::test]
+    async fn open_narrates_repo_added_only_for_genuinely_new_rows() {
+        let pool = test_pool().await;
+        let repo = test_repo("events-repo-added");
+        let canonical = plain_path(&repo.canonicalize().unwrap());
+        let path = canonical.to_str().unwrap();
+
+        // Re-opening refreshes in place and narrates nothing; removal plus
+        // re-open is a genuine add again (events survive the removal by
+        // design, since repo_path carries no foreign key).
+        open_repo_path(path, &pool).await.unwrap();
+        open_repo_path(path, &pool).await.unwrap();
+        remove_repo_in_pool(&pool, path).await.unwrap();
+        open_repo_path(path, &pool).await.unwrap();
+
+        let rows = crate::events::list_events_in_pool(
+            &pool,
+            &crate::events::EventQuery {
+                since_id: 0,
+                repo_path: None,
+                limit: 100,
+                ascending: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.kind == crate::events::REPO_ADDED
+            && row.repo_path == path
+            && row.base_sha.is_none()
+            && row.target_key.is_none()
+            && row.actor_kind == crate::events::ACTOR_HUMAN));
+        std::fs::remove_dir_all(repo).unwrap();
     }
 }

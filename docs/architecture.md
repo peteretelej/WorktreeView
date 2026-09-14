@@ -79,6 +79,13 @@ normalized domain data through narrow, typed Tauri commands.
   findings as agent comments with severity, submission reference, and the
   calling token's ownership in one transaction. `list_submissions`
   returns stored sections as typed entries, never raw JSON.
+- `events.rs`: owns the activity-log SQL: `record_event` takes the
+  caller's executor (connection or transaction) so an event commits with
+  the mutation it narrates, and `list_events_in_pool` serves both order
+  directions under a fixed row cap with the `since_id` cursor and
+  `repo_path` filters. Mutation modules call it from their own production
+  mutation functions; no emission lives in a handler layer or announce
+  sink.
 - `requests.rs`: the review-request store and lifecycle engine over the
   `review_requests` table: strict schema validation (note cap, lens
   vocabulary, reviewer token names, 1-3 round budget), the state machine
@@ -202,8 +209,24 @@ cascade from the `repos` row too; their requester token reference is set
 null when the token is deleted, which makes the request human-keyed from
 then on. The schema is one consolidated `0001` migration plus
 append-only additive migrations (`0002` adds the `agent_tokens` table and
-comment ownership; `0003` adds review requests); migration divergence
-handling is described at the end of this section.
+comment ownership; `0003` adds review requests; `0004` adds the `events`
+table); migration divergence handling is described at the end of this
+section.
+
+The `events` table is the append-only activity log: every review-relevant
+mutation (request lifecycle, submission delivery, comment posts and
+resolutions, surface head moves, repository registrations) writes one row
+at the shared store-layer mutation function, so human IPC and agent
+endpoint paths narrate identically and emission never sits in a handler
+layer. Rows carry the review identity when one exists (nullable
+`base_sha`/`target_key`/`target_kind`, `request_id`, `comment_id`), the
+actor (`actor_kind`/`actor_name`), a short human-readable `summary`, and
+a closed `kind` vocabulary enforced by CHECK. `repo_path` carries no
+foreign key by design: removing a repository cascades its reviews and
+requests but the event narration survives in the activity feed. Events
+are never deleted or rewritten (no edit or deletion kinds exist), there
+is no backfill (the feed starts when emission activates), and retention
+is deferred until volume demands it.
 
 Retrospected surfaces key on `(repo_path, kind, identity_key)` and carry the
 recorded label, head, pin state, and row origin (`review` for recorded

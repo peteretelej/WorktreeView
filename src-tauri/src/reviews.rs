@@ -1,3 +1,4 @@
+use crate::events;
 use crate::store::now_millis;
 use crate::transport::RequestChangeSink;
 use crate::{agents::AgentIdentity, CommandError};
@@ -408,6 +409,43 @@ pub(crate) async fn review_identity_of_comment(
     }))
 }
 
+// One event per successful comment mutation, written after the comment
+// commits; a failed insert fails the mutation. Human authors narrate as
+// "human" even though their stored comment name is "you". The ingest's
+// delivery event is the exception: it rides the ingest transaction, and
+// the finding comments it auto-creates emit nothing.
+async fn emit_comment_event(
+    pool: &SqlitePool,
+    kind: &'static str,
+    identity: &ReviewIdentity,
+    comment_id: i64,
+    actor: &Actor,
+    action: &str,
+) -> Result<(), CommandError> {
+    let (actor_kind, actor_name) = match actor {
+        Actor::Human => (events::ACTOR_HUMAN, "human".to_string()),
+        Actor::Agent(author) => (events::ACTOR_AGENT, author.name.clone()),
+    };
+    let summary = format!("{action} by {actor_name}");
+    events::record_event(
+        pool,
+        events::NewEvent {
+            repo_path: identity.repo_path.clone(),
+            kind,
+            base_sha: Some(identity.base_sha.clone()),
+            target_key: Some(identity.target_key.clone()),
+            target_kind: Some(identity.target_kind.clone()),
+            request_id: None,
+            comment_id: Some(comment_id),
+            actor_kind,
+            actor_name,
+            summary,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_comment(
     pool: &SqlitePool,
@@ -489,7 +527,7 @@ async fn create_comment_with_anchor(
             Some(*end_line),
         ),
     };
-    insert_comment(
+    let comment = insert_comment(
         pool,
         review_id,
         None,
@@ -503,7 +541,23 @@ async fn create_comment_with_anchor(
         end_line,
         Some(anchor),
     )
-    .await
+    .await?;
+    let identity = ReviewIdentity {
+        repo_path: repo_path.to_string(),
+        base_sha: base_sha.to_string(),
+        target_key: target_key.to_string(),
+        target_kind: target_kind.to_string(),
+    };
+    emit_comment_event(
+        pool,
+        events::COMMENT_POSTED,
+        &identity,
+        comment.id,
+        actor,
+        "comment posted",
+    )
+    .await?;
+    Ok(comment)
 }
 
 pub(crate) async fn create_comment_in_pool(
@@ -601,7 +655,7 @@ pub(crate) async fn reply_comment_in_pool(
             "Replies can only be added to a thread's root comment.",
         ));
     }
-    insert_comment(
+    let comment = insert_comment(
         pool,
         parent.review_id,
         Some(parent.id),
@@ -615,7 +669,21 @@ pub(crate) async fn reply_comment_in_pool(
         None,
         None,
     )
-    .await
+    .await?;
+    // The parent's review row exists (its comment does, and the FK
+    // cascades), so the identity join always answers here.
+    if let Some(identity) = review_identity_of_comment(pool, parent.id).await? {
+        emit_comment_event(
+            pool,
+            events::COMMENT_REPLIED,
+            &identity,
+            comment.id,
+            actor,
+            "reply posted",
+        )
+        .await?;
+    }
+    Ok(comment)
 }
 
 // Resolve/reopen lives on the root; replies follow their thread. Resolving
@@ -624,7 +692,7 @@ pub(crate) async fn set_comment_resolved_in_pool(
     pool: &SqlitePool,
     comment_id: i64,
     resolved: bool,
-    _actor: &Actor,
+    actor: &Actor,
 ) -> Result<Comment, CommandError> {
     let comment = load_comment(pool, comment_id).await?.ok_or_else(comment_not_found)?;
     if comment.parent_id.is_some() {
@@ -639,6 +707,14 @@ pub(crate) async fn set_comment_resolved_in_pool(
         .bind(comment_id)
         .execute(pool)
         .await?;
+    if let Some(identity) = review_identity_of_comment(pool, comment_id).await? {
+        let (kind, action) = if resolved {
+            (events::COMMENT_RESOLVED, "thread resolved")
+        } else {
+            (events::COMMENT_REOPENED, "thread reopened")
+        };
+        emit_comment_event(pool, kind, &identity, comment_id, actor, action).await?;
+    }
     load_comment(pool, comment_id).await?.ok_or_else(comment_not_found)
 }
 
@@ -994,6 +1070,29 @@ pub(crate) async fn ingest_submission_in_pool(
         .execute(&mut *tx)
         .await?;
     }
+    // The delivery is the one event a submission narrates: the finding
+    // comments above are part of the delivery and emit nothing. Riding the
+    // transaction keeps event and submission atomic.
+    let (actor_kind, actor_name) = match author {
+        Actor::Human => (events::ACTOR_HUMAN, "human".to_string()),
+        Actor::Agent(_) => (events::ACTOR_AGENT, payload.agent_name.to_string()),
+    };
+    events::record_event(
+        &mut *tx,
+        events::NewEvent {
+            repo_path: repo_path.to_string(),
+            kind: events::SUBMISSION_DELIVERED,
+            base_sha: Some(base_sha.to_string()),
+            target_key: Some(target_key.to_string()),
+            target_kind: Some(target_kind.to_string()),
+            request_id: None,
+            comment_id: None,
+            actor_kind,
+            actor_name,
+            summary: format!("submission delivered by {}", payload.agent_name),
+        },
+    )
+    .await?;
     tx.commit().await?;
     let blocking = payload
         .findings
@@ -2156,5 +2255,94 @@ mod tests {
         .unwrap();
         assert_eq!(status(blocking_target.id).await, "changes_requested");
         assert_eq!(status(clean_target.id).await, "approved");
+    }
+
+    async fn listed_events(pool: &SqlitePool) -> Vec<crate::events::EventRow> {
+        crate::events::list_events_in_pool(
+            pool,
+            &crate::events::EventQuery {
+                since_id: 0,
+                repo_path: None,
+                limit: 100,
+                ascending: true,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn comment_mutations_narrate_events_and_edits_and_deletes_emit_nothing() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let author = agent_actor(&pool, "reviewer-bot").await;
+
+        // Human roots post as "human" (the stored comment name is "you",
+        // but narration is cross-surface); agent replies carry the token's
+        // name; resolve/reopen narrate their own kinds. Edits and deletes
+        // have no kind in the closed vocabulary, so they narrate nothing.
+        let root = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("root"), &HUMAN, None)
+            .await
+            .unwrap();
+        let reply = reply_comment_in_pool(&pool, root.id, "reply", None, &author, None).await.unwrap();
+        set_comment_resolved_in_pool(&pool, root.id, true, &HUMAN).await.unwrap();
+        set_comment_resolved_in_pool(&pool, root.id, false, &author).await.unwrap();
+        edit_comment_in_pool(&pool, root.id, "edited", &HUMAN).await.unwrap();
+        delete_comment_in_pool(&pool, reply.id, &author).await.unwrap();
+
+        let rows = listed_events(&pool).await;
+        let narrated: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|row| (row.kind.as_str(), row.actor_kind.as_str(), row.actor_name.as_str()))
+            .collect();
+        assert_eq!(
+            narrated,
+            [
+                ("comment_posted", "human", "human"),
+                ("comment_replied", "agent", "reviewer-bot"),
+                ("comment_resolved", "human", "human"),
+                ("comment_reopened", "agent", "reviewer-bot"),
+            ]
+        );
+        assert_eq!(rows[0].comment_id, Some(root.id));
+        assert_eq!(rows[0].base_sha.as_deref(), Some("base"));
+        assert_eq!(rows[0].target_key.as_deref(), Some("/demo"));
+        assert_eq!(rows[0].target_kind.as_deref(), Some("worktree"));
+        assert_eq!(rows[0].repo_path, "/demo");
+        assert_eq!(rows[0].request_id, None);
+    }
+
+    #[tokio::test]
+    async fn ingest_narrates_exactly_one_delivery_and_its_findings_emit_nothing() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        ingest(&pool, "/demo", &payload(), &agent_actor(&pool, "reviewer-bot").await)
+            .await
+            .unwrap();
+
+        let rows = listed_events(&pool).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, crate::events::SUBMISSION_DELIVERED);
+        assert_eq!(rows[0].actor_kind, crate::events::ACTOR_AGENT);
+        assert_eq!(rows[0].actor_name, "reviewer-bot");
+        assert_eq!(rows[0].summary, "submission delivered by reviewer-bot");
+        assert_eq!(rows[0].comment_id, None);
+    }
+
+    #[tokio::test]
+    async fn a_failing_delivery_event_fails_the_ingest_and_stores_nothing() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        // The delivery event rides the ingest transaction: when its insert
+        // cannot land, the submission and its finding comments roll back.
+        sqlx::query("DROP TABLE events").execute(&pool).await.unwrap();
+        let failed = ingest(&pool, "/demo", &payload(), &agent_actor(&pool, "reviewer-bot").await).await;
+        assert_eq!(failed.unwrap_err().code, "persistence");
+        let submissions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM submissions").fetch_one(&pool).await.unwrap();
+        assert_eq!(submissions, 0);
+        let comments: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM comments").fetch_one(&pool).await.unwrap();
+        assert_eq!(comments, 0);
     }
 }
