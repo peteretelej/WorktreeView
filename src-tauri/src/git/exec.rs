@@ -117,6 +117,28 @@ async fn reap_after_kill(child: &mut Child) {
     let _ = child.wait().await;
 }
 
+// One-line command identity for failure logs: spawns use explicit argument
+// arrays, so joining argv is faithful, and the cap keeps a runaway pathspec
+// from writing an enormous line.
+fn command_label(command: &Command) -> String {
+    let mut label = String::from("git");
+    for argument in command.as_std().get_args() {
+        label.push(' ');
+        label.push_str(&argument.to_string_lossy());
+    }
+    label.chars().take(400).collect()
+}
+
+// Git stderr rides the app log so support can see why a surface failed even
+// when the UI shows a shortened message.
+fn log_excerpt(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .map(|character| if character.is_control() { ' ' } else { character })
+        .take(400)
+        .collect()
+}
+
 pub(crate) fn git_execution_error(stderr: &[u8]) -> CommandError {
     let message = if stderr.is_empty() {
         "Git command failed.".to_string()
@@ -198,6 +220,29 @@ pub(crate) async fn fetch_remotes(path: &Path) -> Result<(i32, Vec<u8>, Vec<u8>)
     run_bounded(command, FETCH_TIMEOUT).await
 }
 
+// The review-content fetch: one named branch's objects, fetched with the
+// configured partial-clone filter suspended so a blobless clone gains the
+// blobs a review needs without converting the whole clone. It shares
+// fetch_remotes' safety shape: the repository's own configured remote and
+// credential helpers stay in play, with bounded output, a deadline, and
+// kill-on-drop. Like the refresh fetch it never runs as part of a review
+// computation; the review then re-reads whatever state it left behind.
+pub(crate) async fn fetch_remote_branch(path: &Path, remote: &str, branch: &str) -> Result<(), CommandError> {
+    let mut command = dir_git_command(
+        path,
+        // The `--` keeps repository-configured remote names from parsing as
+        // fetch options; refspec metacharacters are refused by validation.
+        &["fetch", "--quiet", "--refetch", "--no-filter", "--", remote, branch],
+        &[],
+    )?;
+    command.env_remove("GIT_NO_LAZY_FETCH");
+    let (exit_code, _, stderr) = run_bounded(command, FETCH_TIMEOUT).await?;
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    Ok(())
+}
+
 async fn run_bounded(
     mut command: Command,
     budget: Duration,
@@ -232,13 +277,27 @@ async fn run_bounded(
     })
     .await;
     match result {
-        Ok(Ok((status, stdout, stderr))) => Ok((status.code().unwrap_or(-1), stdout, stderr)),
+        Ok(Ok((status, stdout, stderr))) => {
+            if !status.success() {
+                log::warn!(
+                    "git failed ({}): {} | stderr: {}",
+                    status,
+                    command_label(&command),
+                    log_excerpt(&stderr)
+                );
+            }
+            Ok((status.code().unwrap_or(-1), stdout, stderr))
+        }
         Ok(Err(error)) => {
             reap_after_kill(&mut child).await;
             Err(error)
         }
         Err(_) => {
             reap_after_kill(&mut child).await;
+            log::warn!(
+                "git timed out after {budget:?}: {}",
+                command_label(&command)
+            );
             Err(CommandError::new(
                 "git_timeout",
                 "Git took too long to respond. If this keeps happening, the repository may be busy or still being indexed; try again.",
@@ -318,7 +377,17 @@ pub(crate) async fn run_git_with_stdin(
     })
     .await;
     match result {
-        Ok(Ok((status, stdout, stderr))) => Ok((status.code().unwrap_or(-1), stdout, stderr)),
+        Ok(Ok((status, stdout, stderr))) => {
+            if !status.success() {
+                log::warn!(
+                    "git failed ({}): {} | stderr: {}",
+                    status,
+                    command_label(&command),
+                    log_excerpt(&stderr)
+                );
+            }
+            Ok((status.code().unwrap_or(-1), stdout, stderr))
+        }
         Ok(Err(error)) => {
             stdin_task.abort();
             stdout_task.abort();
@@ -337,6 +406,10 @@ pub(crate) async fn run_git_with_stdin(
             let _ = stdout_task.await;
             let _ = stderr_task.await;
             reap_after_kill(&mut child).await;
+            log::warn!(
+                "git timed out after {GIT_TIMEOUT:?}: {}",
+                command_label(&command)
+            );
             Err(CommandError::new(
                 "git_timeout",
                 "Git took too long to respond. If this keeps happening, the repository may be busy or still being indexed; try again.",

@@ -20,6 +20,26 @@ pub(crate) fn validate_ref(value: &str, name: &str) -> Result<(), CommandError> 
     Ok(())
 }
 
+// Fetch positionals must stay positionals: nothing option-shaped, no refspec
+// separator or force marker, and only refname-safe characters, so a hostile
+// repository cannot turn its own configured remote name into fetch options
+// or smuggle a `src:dst` refspec that rewrites local branches.
+pub(crate) fn validate_fetch_name(value: &str, name: &str) -> Result<(), CommandError> {
+    validate_ref(value, name)?;
+    let unsafe_name = value.starts_with('+')
+        || value.contains(':')
+        || value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control());
+    if unsafe_name {
+        return Err(CommandError::new(
+            "invalid_path",
+            format!("The {name} contains characters that are not valid in a ref name."),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_file(value: &str) -> Result<(), CommandError> {
     let path = Path::new(value);
     if value.is_empty()
@@ -168,11 +188,83 @@ pub(crate) fn primary_branch(branches: &[String]) -> Option<&str> {
     }
 }
 
+// A partial clone stores no blob content until something fetches it, and
+// review reads refuse lazy fetches, so a diff over unfetched content fails
+// with a distinctive promisor diagnostic. Git localizes that stderr, so the
+// failing diff is re-run once in the C locale before matching, and the
+// repository must also actually configure a promisor remote, so an
+// unrelated failure never masquerades as one.
+pub(crate) async fn partial_clone_failure(path: &Path, failing_args: &[&str]) -> Option<CommandError> {
+    let (exit_code, stdout, _) = run_git_with_env(
+        path,
+        &["config", "--get-regexp", r"^remote\..*\.promisor$"],
+        DIAGNOSTIC_ENV,
+    )
+    .await
+    .ok()?;
+    if exit_code != 0 {
+        return None;
+    }
+    let configured = std::str::from_utf8(&stdout).ok()?;
+    let is_promisor = configured
+        .lines()
+        .any(|line| line.split_whitespace().last() == Some("true"));
+    if !is_promisor {
+        return None;
+    }
+    let (exit_code, _, rerun_stderr) = run_git_with_env(path, failing_args, DIAGNOSTIC_ENV).await.ok()?;
+    if exit_code == 0 || !is_promisor_failure(&rerun_stderr) {
+        return None;
+    }
+    Some(CommandError::new(
+        "partial_clone_content",
+        "This repository is a partial clone, and the file content for this review is not stored on disk. Fetch the branch content to continue.",
+    ))
+}
+
+fn is_promisor_failure(stderr: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    text.contains("from promisor remote")
+        || (text.contains("promisor") && text.contains("could not fetch"))
+}
+
+// Splits a remote-tracking ref ("refs/remotes/origin/feature") into its
+// remote and the branch on that remote. Remote names may contain slashes,
+// so the configured remotes disambiguate by longest match; a name no remote
+// claims yields None and the caller keeps the generic failure.
+pub(crate) async fn remote_branch_of_tracking_ref(
+    path: &Path,
+    ref_name: &str,
+) -> Option<(String, String)> {
+    let remainder = ref_name.strip_prefix("refs/remotes/")?;
+    let (exit_code, stdout, _) = run_git_with_env(path, &["remote"], DIAGNOSTIC_ENV)
+        .await
+        .ok()?;
+    if exit_code != 0 {
+        return None;
+    }
+    let listing = std::str::from_utf8(&stdout).ok()?;
+    let mut remotes: Vec<&str> = listing
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    remotes.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    let remote = remotes
+        .into_iter()
+        .find(|name| remainder.starts_with(&format!("{name}/")))?;
+    let branch = &remainder[remote.len() + 1..];
+    if branch.is_empty() {
+        return None;
+    }
+    Some((remote.to_string(), branch.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::review::review_changes;
-    use crate::testutil::{test_pool, test_repo};
+    use crate::testutil::{test_pool, test_repo, test_git};
 
     #[test]
     fn validates_review_arguments() {
@@ -220,6 +312,55 @@ mod tests {
         assert!(validate_untracked_combination(true, false, true).is_err());
         assert!(validate_untracked_combination(true, false, false).is_ok());
     }
+
+    #[tokio::test]
+    async fn splits_remote_tracking_refs_by_longest_configured_remote() {
+        let repo = test_repo("tracking-ref-split");
+        test_git(&repo, &["remote", "add", "origin", "https://example.com/origin.git"]);
+        test_git(&repo, &["remote", "add", "feature/one", "https://example.com/feature.git"]);
+        assert_eq!(
+            remote_branch_of_tracking_ref(&repo, "refs/remotes/feature/one/topic").await,
+            Some(("feature/one".into(), "topic".into()))
+        );
+        assert_eq!(
+            remote_branch_of_tracking_ref(&repo, "refs/remotes/origin/main").await,
+            Some(("origin".into(), "main".into()))
+        );
+        // Local refs, bare remote namespaces, and unclaimed remotes do not split.
+        assert_eq!(remote_branch_of_tracking_ref(&repo, "refs/heads/main").await, None);
+        assert_eq!(remote_branch_of_tracking_ref(&repo, "refs/remotes/origin").await, None);
+        assert_eq!(remote_branch_of_tracking_ref(&repo, "refs/remotes/unknown/main").await, None);
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn matches_only_promisor_failure_markers() {
+        // Real git output for a blocked lazy fetch, byte for byte.
+        assert!(is_promisor_failure(
+            b"warning: lazy fetching disabled; some objects may not be available\n\
+              fatal: could not fetch abc123 from promisor remote"
+        ));
+        assert!(!is_promisor_failure(b"fatal: bad object HEAD"));
+        assert!(!is_promisor_failure(b"error: could not fetch refs/heads/main"));
+        assert!(!is_promisor_failure(b""));
+    }
+
+    #[tokio::test]
+    async fn classifies_promisor_failures_only_with_promisor_config() {
+        let repo = test_repo("promisor-classify");
+        // A failing diff with no promisor config stays generic: the config
+        // probe finds nothing, so no re-run or classification happens.
+        let failing = ["diff", "--numstat", "refs/heads/main~1..refs/heads/main"];
+        assert!(partial_clone_failure(&repo, &failing).await.is_none());
+        test_git(&repo, &["config", "remote.origin.promisor", "true"]);
+        test_git(&repo, &["config", "remote.origin.url", "https://example.com/repo.git"]);
+        // With promisor config but a re-run whose stderr carries no promisor
+        // marker, the failure stays generic too.
+        let not_a_diff = ["rev-parse", "--verify", "refs/heads/missing-probe"];
+        assert!(partial_clone_failure(&repo, &not_a_diff).await.is_none());
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
     #[test]
     fn rejects_non_worktree_all_changes_scope() {
         let error =

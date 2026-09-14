@@ -16,14 +16,13 @@ mod transport;
 
 use commands::{
     create_agent_token, create_comment, create_review_request, delete_agent_token,
-    delete_comment, describe_commit, edit_comment, fetch_project, get_branch_inventory,
-    get_mcp_status, get_settings, list_agent_tokens, list_attention, list_comments, list_commits,
-    list_refs, list_repos, list_requests, list_review_changes, list_submissions, list_surfaces,
-    list_worktree_status, list_worktrees, match_comment_anchors, open_log_dir, open_repo,
-    open_review_file,
-    read_review_file, read_review_file_bytes, read_review_patch, remove_repo, reply_comment,
-    restart_mcp, update_review_request, set_comment_resolved, set_repo_pinned,
-    set_settings, set_surface_pinned,
+    delete_comment, describe_commit, edit_comment, fetch_project, fetch_review_objects,
+    get_branch_inventory, get_mcp_status, get_settings, list_agent_tokens, list_attention,
+    list_comments, list_commits, list_refs, list_repos, list_requests, list_review_changes,
+    list_submissions, list_surfaces, list_worktree_status, list_worktrees, match_comment_anchors,
+    open_log_dir, open_repo, open_review_file, read_review_file, read_review_file_bytes,
+    read_review_patch, remove_repo, reply_comment, restart_mcp, update_review_request,
+    set_comment_resolved, set_repo_pinned, set_settings, set_surface_pinned,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -60,7 +59,7 @@ impl From<sqlx::Error> for CommandError {
 fn sanitize(value: &str) -> String {
     value
         .chars()
-        .filter(|character| !character.is_control())
+        .map(|character| if character.is_control() { ' ' } else { character })
         .take(512)
         .collect()
 }
@@ -277,6 +276,7 @@ pub fn run() {
             remove_repo,
             get_branch_inventory,
             fetch_project,
+            fetch_review_objects,
             set_repo_pinned,
             set_surface_pinned,
             list_refs,

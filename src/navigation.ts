@@ -11,7 +11,10 @@ export type BranchSummary = { ref_name: string; head: string; author: string; su
 export type BranchInventory = { default_branch: string | null; origin_url: string | null; remote_branch_count: number; branches: BranchSummary[]; remote_branches: BranchSummary[] };
 export type ReviewScope = "all" | "committed";
 export type ReviewTarget = { kind: "worktree"; worktree: Worktree } | { kind: "ref"; name: string } | { kind: "commit"; sha: string; parents: string[]; defaultBaseAncestor: boolean };
-export type ReviewIdentity = { repoPath: string; base: string; target: ReviewTarget; scope: ReviewScope; reversed: boolean };
+// originRef records the remote-tracking ref a review came from (a remote
+// branch target itself, or the history a commit was opened from), so a
+// partial-clone review failure can offer to fetch that branch's content.
+export type ReviewIdentity = { repoPath: string; base: string; target: ReviewTarget; scope: ReviewScope; reversed: boolean; originRef?: string };
 export type CommitInfo = { sha: string; subject: string; author: string; date: string; refs: string[]; parents: string[]; default_base_ancestor: boolean };
 // One describe_commit record: a rev (abbreviated hashes included) resolved to
 // its full SHA plus author, git's default formatted commit date, title, body,

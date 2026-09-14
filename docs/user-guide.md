@@ -251,10 +251,22 @@ Logs row opens the diagnostic log folder.
 The app writes small rolling log files (at most four: the active file
 plus three rotated, one megabyte each) into its log folder; open it from
 **Settings > About > Logs**.
-The log records app lifecycle events, review-request status changes, and
+The log records app lifecycle events, review-request status changes,
+failed Git commands (the command line and Git's own error output), and
 endpoint rejections at a level that is safe to share: agent token
 secrets, request notes, and comment or review text are never written to
 it. Attach a log file when reporting an issue.
+
+### Partial clone repositories
+
+Repositories cloned with `--filter=blob:none` (common for large Azure
+DevOps repos) keep most file content on the server. History reads fine,
+but a review needs the actual file blobs, and the app never fetches
+during a review. When such a review fails, the changed-files pane
+explains the cause and offers **Fetch branch content**: it downloads only
+that branch's objects with the clone filter suspended, then the review
+reloads. Other branches stay unfetched. Plain shallow clones (`--depth`,
+no filter) are not covered by this recovery flow.
 
 ![Settings: General page](images/guide-settings-general.webp)
 

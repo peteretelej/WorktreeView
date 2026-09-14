@@ -74,13 +74,22 @@ repository cannot mutate it or execute code it defines.
 
 - Review computations make no network requests; inspection commands spawn
   with `GIT_NO_LAZY_FETCH`, so reading a repository can never pull objects
-  from a remote.
-- The refresh fetch is the single deliberate outbound network operation: it
-  contacts only the repository's own configured remotes, exactly as the
-  user's Git would from a terminal, with a wider 60 second deadline for
-  slow links. The endpoint's `refresh_repo` method pings this same fetch;
-  it adds no new Git surface, only an authenticated trigger for the one
-  the app already owns.
+  from a remote. A blobless partial clone therefore reviews only what is
+  already on disk: history renders, but a diff over unfetched content fails
+  with an explicit `partial_clone_content` error instead of silently
+  lazy-fetching.
+- Two deliberate outbound network operations exist, both user-initiated
+  (or agent-pinged through the endpoint) and never part of review
+  computation. The refresh fetch contacts only the repository's own
+  configured remotes and updates remote-tracking refs, exactly as the
+  user's Git would from a terminal; the endpoint's `refresh_repo` method
+  pings this same fetch. The review-content fetch, offered when a review
+  fails on missing partial-clone content, re-fetches one named branch with
+  the configured clone filter suspended so that branch's blobs land on
+  disk; it never converts the whole clone. Both run through the same
+  hardened spawn (explicit argv, bounded output, kill-on-drop, a wide
+  deadline for slow links), and every review computation reads whatever
+  state the last fetch left behind.
 - The agent endpoint is the app's one inbound network surface, served
   inside the app process: it binds the address and port configured in
   Settings (loopback `127.0.0.1:9888` by default; a bind failure is shown

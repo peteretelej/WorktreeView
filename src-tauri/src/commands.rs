@@ -3,7 +3,8 @@ use crate::agents::{
     AgentToken, CreatedAgentToken,
 };
 use crate::git::{
-    fetch_remotes, git_execution_error, parse_status_count, parse_worktrees, run_git, CommitPage,
+    fetch_remote_branch, fetch_remotes, git_execution_error, parse_status_count, parse_worktrees,
+    remote_branch_of_tracking_ref, run_git, validate_fetch_name, validate_ref, CommitPage,
     Worktree,
 };
 use crate::overview::{branch_inventory, BranchInventory};
@@ -206,6 +207,29 @@ pub(crate) async fn fetch_project(
 ) -> Result<(), CommandError> {
     let path = canonical_path(&path)?;
     refresh_repo(&path, &refreshes).await
+}
+
+// The review-content fetch: one remote branch's objects with the configured
+// partial-clone filter suspended, so a blobless clone gains the blobs a
+// review needs without converting the whole clone. Like the refresh action
+// it is user-initiated, never runs as part of a review computation, and
+// every subsequent review reads whatever state it left behind.
+#[tauri::command]
+pub(crate) async fn fetch_review_objects(
+    path: String,
+    target_ref: String,
+) -> Result<(), CommandError> {
+    validate_ref(&target_ref, "target_ref")?;
+    let path = canonical_path(&path)?;
+    let Some((remote, branch)) = remote_branch_of_tracking_ref(&path, &target_ref).await else {
+        return Err(CommandError::new(
+            "unresolvable_ref",
+            format!("'{target_ref}' does not name a remote branch."),
+        ));
+    };
+    validate_fetch_name(&remote, "remote")?;
+    validate_fetch_name(&branch, "branch")?;
+    fetch_remote_branch(&path, &remote, &branch).await
 }
 
 #[tauri::command]
@@ -776,13 +800,14 @@ pub(crate) async fn match_comment_anchors(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_request_as_human, refresh_repo, update_request_in_pool, worktree_change_count,
-        RequestAction, RefreshSink,
+        create_request_as_human, fetch_remote_branch, refresh_repo, update_request_in_pool,
+        worktree_change_count, RequestAction, RefreshSink,
     };
     use crate::agents::create_agent_token_in_pool;
     use crate::overview::branch_inventory;
     use crate::requests::{create_request_in_pool, set_request_verdict_in_pool, Actor as RequestActor, RequestDraft};
-    use crate::testutil::{seed_repo, test_git, test_path, test_pool, test_repo};
+    use crate::review::review_changes;
+    use crate::testutil::{seed_repo, test_git, test_path, test_pool, test_repo, test_rev_parse};
     use crate::transport::RequestChangeSink;
     use std::process::Command as StdCommand;
     use std::sync::{Arc, Mutex};
@@ -868,6 +893,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&origin);
         let _ = std::fs::remove_dir_all(&clone);
         let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    // The review-content fetch materializes exactly the named branch's blobs
+    // in a partial clone: that branch becomes reviewable while another
+    // branch's new blob stays unfetched, proving the operation never
+    // converts the whole clone.
+    #[tokio::test]
+    async fn review_fetch_downloads_only_the_named_branchs_blobs() {
+        let origin = test_repo("review-fetch-origin");
+        test_git(&origin, &["branch", "-M", "main"]);
+        test_git(&origin, &["config", "uploadpack.allowFilter", "true"]);
+        test_git(&origin, &["checkout", "--quiet", "-b", "side"]);
+        std::fs::write(origin.join("side.txt"), "side content\n").unwrap();
+        test_git(&origin, &["add", "side.txt"]);
+        test_git(&origin, &["commit", "--quiet", "-m", "side work"]);
+        test_git(&origin, &["checkout", "--quiet", "main"]);
+        std::fs::write(origin.join("other.txt"), "main only\n").unwrap();
+        test_git(&origin, &["add", "other.txt"]);
+        test_git(&origin, &["commit", "--quiet", "-m", "main work"]);
+
+        let clone = test_path("review-fetch-clone");
+        let cloned = StdCommand::new("git")
+            .args([
+                "clone",
+                "--quiet",
+                "--no-local",
+                "--filter=blob:none",
+                "--no-checkout",
+            ])
+            .arg(origin.to_str().unwrap())
+            .arg(clone.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            cloned.status.success(),
+            "{}",
+            String::from_utf8_lossy(&cloned.stderr)
+        );
+
+        // GIT_NO_LAZY_FETCH keeps the probe itself from backfilling the blob
+        // it checks for.
+        let blob_on_disk = |revision: &str| {
+            let sha = test_rev_parse(&clone, revision);
+            StdCommand::new("git")
+                .arg("-C")
+                .arg(&clone)
+                .args(["cat-file", "-e", &sha])
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(!blob_on_disk("refs/remotes/origin/side:side.txt"));
+
+        // The full review flow on the unfetched branch: the review index
+        // classifies the missing blobs as partial-clone content, and the
+        // scoped fetch makes the same review succeed.
+        let pool = test_pool().await;
+        seed_repo(&pool, clone.to_str().unwrap()).await;
+        let side_parent = test_rev_parse(&clone, "refs/remotes/origin/side~1");
+        let error = review_changes(
+            &pool,
+            clone.to_str().unwrap(),
+            clone.to_str().unwrap().into(),
+            side_parent.clone(),
+            Some("refs/remotes/origin/side".into()),
+            true,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "partial_clone_content");
+        fetch_remote_branch(&clone, "origin", "side").await.unwrap();
+        assert!(blob_on_disk("refs/remotes/origin/side:side.txt"));
+        assert!(!blob_on_disk("refs/remotes/origin/main:other.txt"));
+        let index = review_changes(
+            &pool,
+            clone.to_str().unwrap(),
+            clone.to_str().unwrap().into(),
+            side_parent,
+            Some("refs/remotes/origin/side".into()),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(index.files.iter().any(|file| file.path == "side.txt"));
+
+        let _ = std::fs::remove_dir_all(&origin);
+        let _ = std::fs::remove_dir_all(&clone);
     }
 
     #[tokio::test]

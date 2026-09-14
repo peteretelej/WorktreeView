@@ -2,10 +2,10 @@ use crate::cache;
 use crate::git::{
     acceptable_diff_exit, configured_filter_names, effective_head_ref, ensure_work_tree,
     filter_override_args, git_args, git_execution_error, parse_commits, parse_name_status,
-    parse_numstat, parse_untracked_paths, primary_branch, reject_applicable_filters,
-    resolve_empty_tree, resolve_ref, run_git, run_git_with_stdin, stdin_git_command,
-    validate_file, validate_ref, validate_scope_combination, validate_untracked_combination,
-    ChangedFile, CommitInfo, CommitPage, MAX_OUTPUT,
+    parse_numstat, parse_untracked_paths, partial_clone_failure, primary_branch,
+    reject_applicable_filters, resolve_empty_tree, resolve_ref, run_git, run_git_with_stdin,
+    stdin_git_command, validate_file, validate_ref, validate_scope_combination,
+    validate_untracked_combination, ChangedFile, CommitInfo, CommitPage, MAX_OUTPUT,
 };
 use crate::retrospection;
 use crate::{canonical_path, CommandError};
@@ -680,7 +680,10 @@ pub(crate) async fn review_changes(
     let name_args = git_args(&name_owned);
     let (exit_code, stdout, stderr) = run_git(&path, &name_args).await?;
     if exit_code != 0 {
-        return Err(git_execution_error(&stderr));
+        return Err(match partial_clone_failure(&path, &name_args).await {
+            Some(failure) => failure,
+            None => git_execution_error(&stderr),
+        });
     }
     let mut files = parse_name_status(&stdout)?;
     if !filters.is_empty() {
@@ -693,7 +696,10 @@ pub(crate) async fn review_changes(
     let num_args = git_args(&num_owned);
     let (exit_code, stdout, stderr) = run_git(&path, &num_args).await?;
     if exit_code != 0 {
-        return Err(git_execution_error(&stderr));
+        return Err(match partial_clone_failure(&path, &num_args).await {
+            Some(failure) => failure,
+            None => git_execution_error(&stderr),
+        });
     }
     let (additions, deletions, _) = parse_numstat(&stdout)?;
 
