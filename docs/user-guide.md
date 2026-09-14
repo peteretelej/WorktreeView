@@ -253,12 +253,15 @@ The **Reviews** tab in Pulse answers "has this been reviewed?" across
 every project. It lists every review identity that carries a review
 request or any comment or submission activity, including approved and
 withdrawn reviews and surfaces that were commented on without a request;
-rows show the project, the change with its recorded head, the requester,
-a status chip, the round, unresolved findings, and how recently anything
-happened, newest activity first.
+rows show the project, the change with its recorded head (worktree rows
+carry a `worktree` mark), a requester badge with the human or agent
+glyph, a status chip, the round, the unresolved P0 and P1 findings, the
+last event with its age (the newest narrated activity, composed from the
+row's own facts for work that predates the event log), and the age,
+newest activity first.
 
-Each row carries one of four states, and the chips above the list narrow
-by state with live counts:
+Each row carries one of four states, and the chips above the list (All,
+Open, Settled, Stale, No request) narrow by state with live counts:
 
 - **Open**: a review request is still in flight (requested, in review,
   or changes requested).

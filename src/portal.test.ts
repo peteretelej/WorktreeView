@@ -8,6 +8,7 @@ import {
   normalizeReviewsSearch,
   normalizeThreadsText,
   projectOptions,
+  reviewEventText,
   reviewsStateCounts,
   reviewsStatusChip,
   rowsForProject,
@@ -39,6 +40,7 @@ function row(overrides: Partial<PortalReviewRow> = {}): PortalReviewRow {
     change_label: "feature",
     head_sha: "recorded-head",
     requester: "coder-bot",
+    requester_kind: "agent",
     status: "requested",
     note: "",
     round: 0,
@@ -49,6 +51,7 @@ function row(overrides: Partial<PortalReviewRow> = {}): PortalReviewRow {
     last_activity_at: 1000,
     state: "open",
     age_basis: 1000,
+    last_event: "review requested by coder-bot",
     ...overrides,
   };
 }
@@ -84,16 +87,22 @@ test("project options list distinct paths sorted", () => {
 });
 
 test("status chips read the backend state, not a re-derived rule", () => {
-  assert.deepEqual(reviewsStatusChip(row({ state: "open", status: "changes_requested" })), { label: "changes requested", tone: "open" });
-  assert.deepEqual(reviewsStatusChip(row({ state: "open", status: "in_review" })), { label: "in review", tone: "open" });
-  assert.deepEqual(reviewsStatusChip(row({ state: "settled", status: "approved" })), { label: "approved", tone: "settled" });
-  assert.deepEqual(reviewsStatusChip(row({ state: "settled", status: "withdrawn" })), { label: "withdrawn", tone: "settled" });
-  assert.deepEqual(reviewsStatusChip(row({ state: "stale", status: "approved" })), { label: "changed since review", tone: "stale" });
-  assert.deepEqual(reviewsStatusChip(row({ state: "no_request", status: "" })), { label: "no request", tone: "quiet" });
+  assert.deepEqual(reviewsStatusChip(row({ state: "open", status: "changes_requested" })), { label: "changes requested", tone: "warn" });
+  assert.deepEqual(reviewsStatusChip(row({ state: "open", status: "in_review" })), { label: "in review", tone: "plain" });
+  assert.deepEqual(reviewsStatusChip(row({ state: "settled", status: "approved" })), { label: "approved", tone: "ok" });
+  assert.deepEqual(reviewsStatusChip(row({ state: "settled", status: "withdrawn" })), { label: "withdrawn", tone: "muted" });
+  assert.deepEqual(reviewsStatusChip(row({ state: "stale", status: "approved" })), { label: "approved · stale", tone: "warn" });
+  assert.deepEqual(reviewsStatusChip(row({ state: "no_request", status: "" })), { label: "no request", tone: "muted" });
 });
 
 test("the chip vocabulary is the filter set the tab renders", () => {
-  assert.deepEqual(REVIEWS_STATE_FILTERS.map((chip) => chip.id), ["open", "settled", "stale", "no_request", "all"]);
+  assert.deepEqual(REVIEWS_STATE_FILTERS.map((chip) => chip.id), ["all", "open", "settled", "stale", "no_request"]);
+});
+
+test("the last-event line joins the narrated summary with the age", () => {
+  const now = 1_000_000;
+  assert.equal(reviewEventText(row({ last_event: "approved by you", age_basis: now }), now), "approved by you · just now");
+  assert.equal(reviewEventText(row({ last_event: "claimed by reviewer-bot", age_basis: now - 45 * 60_000 }), now), "claimed by reviewer-bot · 45m ago");
 });
 
 test("search normalization trims and empties whitespace-only needles", () => {

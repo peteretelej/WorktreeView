@@ -6,7 +6,7 @@
 // payload.
 
 import type { ReviewComment } from "./comments.ts";
-import { requestStatusLabel } from "./requests.ts";
+import { attentionAge, requestStatusLabel } from "./requests.ts";
 
 export type PortalReviewState = "open" | "settled" | "stale" | "no_request";
 export type ReviewsStateFilter = PortalReviewState | "all";
@@ -19,6 +19,7 @@ export type PortalReviewRow = {
   change_label: string;
   head_sha: string | null;
   requester: string;
+  requester_kind: "human" | "agent";
   status: string;
   note: string;
   round: number;
@@ -29,19 +30,21 @@ export type PortalReviewRow = {
   last_activity_at: number;
   state: PortalReviewState;
   age_basis: number;
+  last_event: string;
 };
 
 // The identity fields a row click needs to open the review at its recorded
 // head and base; AttentionRow is structurally compatible.
 export type ReviewIdentityRef = Pick<PortalReviewRow, "repo_path" | "base_sha" | "target_key" | "target_kind" | "head_sha">;
 
-// Chip order and copy; the tab's empty state reuses the All chip's copy.
+// Chip order and copy; All leads like the mockup, and the tab's empty
+// state reuses its copy.
 export const REVIEWS_STATE_FILTERS: Array<{ id: ReviewsStateFilter; label: string; empty: string }> = [
+  { id: "all", label: "All", empty: "No review activity yet" },
   { id: "open", label: "Open", empty: "No open reviews" },
   { id: "settled", label: "Settled", empty: "No settled reviews" },
   { id: "stale", label: "Stale", empty: "Nothing changed after review" },
   { id: "no_request", label: "No request", empty: "No request-less activity" },
-  { id: "all", label: "All", empty: "No review activity yet" },
 ];
 
 // The search needle is matched server-side as a plain substring; only
@@ -78,15 +81,25 @@ export function projectOptions<T extends { repo_path: string }>(rows: T[]): stri
   return [...new Set(rows.map((row) => row.repo_path))].sort((left, right) => left.localeCompare(right));
 }
 
-// The row's status chip: the backend's state decides the tone, an open row
-// reads as its lifecycle status, and a request-less row says so.
-export function reviewsStatusChip(row: PortalReviewRow): { label: string; tone: "stale" | "settled" | "open" | "quiet" } {
+// The row's status chip: the backend's state picks the tone (approved
+// reads settled-green, changes requested and drift read warning, withdrawn
+// and request-less read muted), and the label reads the lifecycle status,
+// with the stale rows carrying the drift suffix.
+export type ReviewsStatusTone = "ok" | "warn" | "muted" | "plain";
+export function reviewsStatusChip(row: PortalReviewRow): { label: string; tone: ReviewsStatusTone } {
   switch (row.state) {
-    case "stale": return { label: "changed since review", tone: "stale" };
-    case "settled": return { label: requestStatusLabel(row.status), tone: "settled" };
-    case "open": return { label: requestStatusLabel(row.status), tone: "open" };
-    case "no_request": return { label: "no request", tone: "quiet" };
+    case "stale": return { label: `${requestStatusLabel(row.status)} · stale`, tone: "warn" };
+    case "settled": return { label: requestStatusLabel(row.status), tone: row.status === "withdrawn" ? "muted" : "ok" };
+    case "open": return { label: requestStatusLabel(row.status), tone: row.status === "changes_requested" ? "warn" : "plain" };
+    case "no_request": return { label: "no request", tone: "muted" };
   }
+}
+
+// The last-event line: the backend's narrated summary plus the compact age
+// of the row's activity basis, so the column reads "who did what, when".
+export function reviewEventText(row: Pick<PortalReviewRow, "last_event" | "age_basis">, now: number): string {
+  const compact = attentionAge(row.age_basis, now);
+  return `${row.last_event} · ${compact === "now" ? "just now" : `${compact} ago`}`;
 }
 
 // ===== Threads tab =====
