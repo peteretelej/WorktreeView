@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronsLeft, FolderGit2, MessageSquare, ChevronDown, ChevronRight, CircleDot, Copy, CornerUpLeft, GitBranch, GitCommitHorizontal, HardDrive, Inbox, ListTree, MessagesSquare, MoreVertical, Pin, PinOff, RefreshCw, Search, Settings as SettingsIcon, Trash2, X } from "lucide-react";
+import { ChevronsLeft, FolderGit2, MessageSquare, ChevronDown, ChevronRight, CircleDot, Copy, CornerUpLeft, GitBranch, GitCommitHorizontal, HardDrive, Inbox, MessagesSquare, MoreVertical, Pin, PinOff, RefreshCw, Search, Settings as SettingsIcon, Trash2, X } from "lucide-react";
 import { createNavigationHistory, DEFAULT_PORTAL_FILTERS, sameReviewTarget, type AppLocation, type BranchInventory, type BranchSummary, type ChangedFile, type CommitInfo, type GoneSurface, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type ReviewsStateFilter, type SurfaceListing, type ThreadsStateFilter, type ThreadsVoiceFilter, type Worktree } from "./navigation";
 import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
 import { SettingsPage, applyTheme, defaultSettings, getSettings, persistSettings, type ChangedFilesView, type Settings } from "./settings";
@@ -918,7 +918,7 @@ function App() {
   const currentWorktree = repo.path === activeRepoPath
     ? repo.worktrees.find((worktree) => worktree.path === selectedWorktreePath)
     : undefined;
-  return <>{pinned.map(surfaceRow)}{currentWorktree && !pinnedWorktrees.has(worktreeKey(currentWorktree.path)) && surfaceRow({ kind: "worktree", identityKey: currentWorktree.path, label: shortToken(currentWorktree.branch), startRef: null, worktreePath: currentWorktree.path, pinnedAt: null, gone: false })}<button className="sidebar-link-row" type="button" onClick={() => activateRepo(repo)}><ListTree size={12} /><span>All worktrees &amp; branches</span></button></>;
+  return <>{pinned.map(surfaceRow)}{currentWorktree && !pinnedWorktrees.has(worktreeKey(currentWorktree.path)) && surfaceRow({ kind: "worktree", identityKey: currentWorktree.path, label: shortToken(currentWorktree.branch), startRef: null, worktreePath: currentWorktree.path, pinnedAt: null, gone: false })}</>;
 };
   const statusMessage = loadError || (loading ? "Loading repositories..." : hydrating ? "Loading worktrees..." : ""); const paletteRows: PaletteRow[] = [...matchingResults.map((result): PaletteRow => ({ section: "repos", result })), ...(portalSearch?.comments.map((match): PaletteRow => ({ section: "comments", match })) ?? []), ...(portalSearch?.requests.map((match): PaletteRow => ({ section: "requests", match })) ?? []), ...(portalSearch?.commits.map((match): PaletteRow => ({ section: "commits", match })) ?? [])]; const palettePageCount = Math.max(1, Math.ceil(paletteRows.length / SEARCH_PAGE_SIZE)); const visiblePalettePage = Math.min(searchPage, palettePageCount - 1); const visiblePaletteRows = paletteRows.slice(visiblePalettePage * SEARCH_PAGE_SIZE, (visiblePalettePage + 1) * SEARCH_PAGE_SIZE);
   const statusByPath: Record<string, number | null> = {};

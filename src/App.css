@@ -2197,9 +2197,6 @@ button:disabled {
 
 .project-row-wrap .sidebar-worktree-row,
 .project-row-wrap .sidebar-branch-row { padding-right: 26px; }
-.sidebar-link-row { display: flex; width: calc(100% - 4px); min-height: 28px; align-items: center; gap: 6px; margin-left: 4px; padding: 4px 6px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); cursor: pointer; font: 10px var(--font-mono); text-align: left; }
-.sidebar-link-row:hover { background: var(--surface-2); color: var(--primary); }
-.sidebar-link-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gone-badge, .main-badge, .detached-badge, .stale-badge, .in-worktree-badge { flex: none; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 9px; text-transform: uppercase; }
 .main-badge { color: var(--primary); border-color: var(--primary); }
 .detached-badge { color: var(--info); }
