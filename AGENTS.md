@@ -12,12 +12,14 @@ the only Git engine; the rationale lives in
 
 ## Project structure
 
-- `src/`: React + Vite frontend. `App.tsx` is the shell and review
-  views; `diff.ts`, `highlight.ts`, `navigation.ts`, `reviewPresets.ts`,
-  `surfaces.ts`, `comments.tsx`, `canvas.tsx`, and `markdown.tsx` carry
-  the domain helpers. Git semantics and filesystem access stay out of
-  this layer; the webview receives normalized domain data through
-  narrow, typed Tauri commands.
+- `src/`: React + Vite frontend. `App.tsx` is the shell (state, effects,
+  actions, render switch); `review.tsx` is the review surface and
+  `history.tsx` the commit-history quick look; `format.ts` and `ui.tsx`
+  carry shared helpers and widgets; `diff.ts`, `highlight.ts`,
+  `navigation.ts`, `reviewPresets.ts`, `surfaces.ts`, `comments.tsx`,
+  `canvas.tsx`, and `markdown.tsx` carry the domain helpers. Git
+  semantics and filesystem access stay out of this layer; the webview
+  receives normalized domain data through narrow, typed Tauri commands.
 - `src-tauri/src/`: Rust backend. `commands.rs` is the thin typed IPC
   surface; `git/` spawns and parses the CLI (`exec.rs`, `validate.rs`,
   `filters.rs`, `parse.rs`); `review.rs`, `reviews.rs`, `overview.rs`,

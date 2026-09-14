@@ -162,11 +162,16 @@ locale to C.
 
 ## Frontend (`src/`)
 
-A flat React + Vite app: `App.tsx` (shell, project overview, review views,
-the agent submission arrival cue, and the endpoint event listeners:
+A flat React + Vite app: `App.tsx` (shell, project overview, state and
+effects, and the agent submission arrival cue and endpoint event listeners:
 `submission-received` queues the arrival cue, `comment-changed` refetches
 the loaded review's comments when the change names it, and
 `project-refreshed` re-lists the open repository's surfaces),
+`format.ts` (shared formatting and error-message helpers),
+`ui.tsx` (shared widgets: copy button, empty state, pager, brand mark,
+top bar), `review.tsx` (the review surface: review view, changed-file
+tree and diff panes, ref picker, review request bar and forms),
+`history.tsx` (the commit-history quick look),
 `settings.tsx`,
 `diff.ts` (diff presentation helpers),
 `highlight.ts` (progressive diff token highlighting over Shiki),
