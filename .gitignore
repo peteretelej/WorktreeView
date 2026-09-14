@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 artifacts/tauri-e2e/
+target/
 
 # Editor directories and files
 .vscode/*
