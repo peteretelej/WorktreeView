@@ -188,9 +188,10 @@ pub(crate) fn primary_branch(branches: &[String]) -> Option<&str> {
     }
 }
 
-// A partial clone stores no blob content until something fetches it, and
-// review reads refuse lazy fetches, so a diff over unfetched content fails
-// with a distinctive promisor diagnostic. Git localizes that stderr, so the
+// A partial clone stores no blob content until something fetches it (and a
+// treeless clone stores no trees either), and review reads refuse lazy
+// fetches, so a diff over unfetched content fails with a distinctive
+// promisor or missing-object diagnostic. Git localizes that stderr, so the
 // failing diff is re-run once in the C locale before matching, and the
 // repository must also actually configure a promisor remote, so an
 // unrelated failure never masquerades as one.
@@ -224,8 +225,13 @@ pub(crate) async fn partial_clone_failure(path: &Path, failing_args: &[&str]) ->
 
 fn is_promisor_failure(stderr: &[u8]) -> bool {
     let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    // Promisor-fetch diagnostics (blobless clones) and missing-object
+    // diagnostics (treeless clones fail diffs with "unable to read tree").
     text.contains("from promisor remote")
         || (text.contains("promisor") && text.contains("could not fetch"))
+        || text.contains("unable to read tree")
+        || text.contains("unable to read blob")
+        || text.contains("unable to read commit")
 }
 
 // Splits a remote-tracking ref ("refs/remotes/origin/feature") into its
@@ -340,6 +346,13 @@ mod tests {
             b"warning: lazy fetching disabled; some objects may not be available\n\
               fatal: could not fetch abc123 from promisor remote"
         ));
+        // Real git output for a treeless clone's diff, byte for byte
+        // (field log, work PC).
+        assert!(is_promisor_failure(
+            b"fatal: unable to read tree (50e4819897caa16292a5262f3b438585cd8496b7)"
+        ));
+        assert!(is_promisor_failure(b"fatal: unable to read blob object abc123"));
+        // Corruptions and unrelated fetch errors stay generic.
         assert!(!is_promisor_failure(b"fatal: bad object HEAD"));
         assert!(!is_promisor_failure(b"error: could not fetch refs/heads/main"));
         assert!(!is_promisor_failure(b""));

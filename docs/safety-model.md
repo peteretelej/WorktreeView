@@ -74,10 +74,10 @@ repository cannot mutate it or execute code it defines.
 
 - Review computations make no network requests; inspection commands spawn
   with `GIT_NO_LAZY_FETCH`, so reading a repository can never pull objects
-  from a remote. A blobless partial clone therefore reviews only what is
-  already on disk: history renders, but a diff over unfetched content fails
-  with an explicit `partial_clone_content` error instead of silently
-  lazy-fetching.
+  from a remote. A filtered partial clone (blobless or treeless) therefore
+  reviews only what is already on disk: history renders, but a diff over
+  unfetched content fails with an explicit `partial_clone_content` error
+  instead of silently lazy-fetching.
 - Two deliberate outbound network operations exist, both user-initiated
   (or agent-pinged through the endpoint) and never part of review
   computation. The refresh fetch contacts only the repository's own

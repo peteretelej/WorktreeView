@@ -1002,12 +1002,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&bare);
     }
 
-    // The review-content fetch materializes exactly the named branch's blobs
-    // in a partial clone: that branch becomes reviewable while another
-    // branch's new blob stays unfetched, proving the operation never
-    // converts the whole clone.
-    #[tokio::test]
-    async fn review_fetch_downloads_only_the_named_branchs_blobs() {
+    // The review-content fetch materializes exactly the named branch's
+    // objects in a partial clone: that branch becomes reviewable while
+    // another branch's new blob stays unfetched, proving the operation
+    // never converts the whole clone. Blobless (blob:none) and treeless
+    // (tree:0) clones both go through the same recovery.
+    async fn review_fetch_recovers_a_filtered_clone(filter: &str) {
         let origin = test_repo("review-fetch-origin");
         test_git(&origin, &["branch", "-M", "main"]);
         test_git(&origin, &["config", "uploadpack.allowFilter", "true"]);
@@ -1020,15 +1020,14 @@ mod tests {
         test_git(&origin, &["add", "other.txt"]);
         test_git(&origin, &["commit", "--quiet", "-m", "main work"]);
 
+        // Blob SHAs come from the origin: a treeless clone cannot resolve
+        // `<rev>:<path>` itself because it lacks the tree.
+        let side_blob = test_rev_parse(&origin, "side:side.txt");
+        let main_blob = test_rev_parse(&origin, "main:other.txt");
+
         let clone = test_path("review-fetch-clone");
         let cloned = StdCommand::new("git")
-            .args([
-                "clone",
-                "--quiet",
-                "--no-local",
-                "--filter=blob:none",
-                "--no-checkout",
-            ])
+            .args(["clone", "--quiet", "--no-local", filter, "--no-checkout"])
             .arg(origin.to_str().unwrap())
             .arg(clone.to_str().unwrap())
             .output()
@@ -1041,22 +1040,21 @@ mod tests {
 
         // GIT_NO_LAZY_FETCH keeps the probe itself from backfilling the blob
         // it checks for.
-        let blob_on_disk = |revision: &str| {
-            let sha = test_rev_parse(&clone, revision);
+        let blob_on_disk = |sha: &str| {
             StdCommand::new("git")
                 .arg("-C")
                 .arg(&clone)
-                .args(["cat-file", "-e", &sha])
+                .args(["cat-file", "-e", sha])
                 .env("GIT_NO_LAZY_FETCH", "1")
                 .output()
                 .unwrap()
                 .status
                 .success()
         };
-        assert!(!blob_on_disk("refs/remotes/origin/side:side.txt"));
+        assert!(!blob_on_disk(&side_blob));
 
         // The full review flow on the unfetched branch: the review index
-        // classifies the missing blobs as partial-clone content, and the
+        // classifies the missing content as partial-clone content, and the
         // scoped fetch makes the same review succeed.
         let pool = test_pool().await;
         seed_repo(&pool, clone.to_str().unwrap()).await;
@@ -1074,8 +1072,8 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "partial_clone_content");
         fetch_remote_branch(&clone, "origin", "side").await.unwrap();
-        assert!(blob_on_disk("refs/remotes/origin/side:side.txt"));
-        assert!(!blob_on_disk("refs/remotes/origin/main:other.txt"));
+        assert!(blob_on_disk(&side_blob));
+        assert!(!blob_on_disk(&main_blob));
         let index = review_changes(
             &pool,
             clone.to_str().unwrap(),
@@ -1091,6 +1089,16 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&origin);
         let _ = std::fs::remove_dir_all(&clone);
+    }
+
+    #[tokio::test]
+    async fn review_fetch_downloads_only_the_named_branchs_blobs() {
+        review_fetch_recovers_a_filtered_clone("--filter=blob:none").await;
+    }
+
+    #[tokio::test]
+    async fn review_fetch_recovers_treeless_clones() {
+        review_fetch_recovers_a_filtered_clone("--filter=tree:0").await;
     }
 
     #[tokio::test]

@@ -369,14 +369,16 @@ it. Attach a log file when reporting an issue.
 
 ### Partial clone repositories
 
-Repositories cloned with `--filter=blob:none` (common for large Azure
-DevOps repos) keep most file content on the server. History reads fine,
-but a review needs the actual file blobs, and the app never fetches
-during a review. When such a review fails, the changed-files pane
-explains the cause and offers **Fetch branch content**: it downloads only
-that branch's objects with the clone filter suspended, then the review
-reloads. Other branches stay unfetched. Plain shallow clones (`--depth`,
-no filter) are not covered by this recovery flow.
+Partially cloned repositories keep most repository content on the server:
+`--filter=blob:none` clones omit file content, and treeless clones
+(`--filter=tree:0`) omit directory trees as well. History reads fine, but
+a review needs that content, and the app never fetches during a review.
+When such a review fails, the changed-files pane explains the cause and
+offers **Fetch branch content**: it downloads only that branch's objects
+with the clone filter suspended, then the review reloads. Other branches
+stay unfetched. On shallow clones the fetch recovers the branch within
+the existing depth window. Plain shallow clones without a filter keep
+every fetched object locally and never need this recovery.
 
 ![Settings: General page](images/guide-settings-general.webp)
 
