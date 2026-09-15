@@ -166,25 +166,26 @@ or global Docker pruning.
 
 ## Releases
 
-A release is a version-bump commit plus a tag. Run
-`npm run set-version -- X.Y.Z` to sync the version across `package.json`,
-`package-lock.json`, `src-tauri/tauri.conf.json`, and
-`src-tauri/Cargo.toml`, commit, then tag. Between releases the manifests
-on `main` keep the last released version, and development builds report
-that version. Before tagging, make sure `main` is pushed and the desktop
-e2e suite is green: pushing the tag publishes the release.
+A release is a pushed tag. The Release workflow reads the version from the
+tag (`vX.Y.Z`), stamps it into `package.json`, `package-lock.json`,
+`src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` at build time, and
+after the installers publish, commits the stamped files back to `main` as
+`bump version to X.Y.Z`. Between releases the manifests on `main` keep the
+last released version, and development builds report that version. Before
+tagging, make sure `main` is pushed and the desktop e2e suite is green:
+pushing the tag publishes the release.
 
 ```sh
-npm run set-version -- 0.2.2
-git commit -am "bump version to 0.2.2"
 git tag v0.2.2
-git push origin main v0.2.2
+git push origin v0.2.2
 ```
 
-The Release workflow re-derives the version from the pushed tag with the
-same script and injects it into the manifests at build time, so a
-forgotten bump commit cannot mislabel a release; it only leaves
-development builds reporting the previous version.
+The stamping build cannot mislabel a release, since the tag is the only
+version input. The follow-up bump commit is best-effort: if other work
+landed on `main` mid-release, the push can lose the rebase race and the
+step is skipped (visible as a warning on the workflow run); run
+`npm run set-version -- X.Y.Z` locally and commit then if you want the
+manifests aligned.
 
 The Release workflow builds Windows, macOS, and Linux bundles and
 publishes them directly as the GitHub Release for the tag, with
