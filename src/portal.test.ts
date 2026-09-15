@@ -17,6 +17,7 @@ import {
   rowsForThreadsVoice,
   searchResultCount,
   shortSha,
+  threadIdentityRef,
   threadRouteLabel,
   threadsStateCounts,
   REVIEWS_STATE_FILTERS,
@@ -129,6 +130,7 @@ function thread(overrides: Partial<PortalThreadRow> = {}): PortalThreadRow {
     base_sha: `base-${nextThread}`,
     target_key: "/wt-a",
     target_kind: "worktree",
+    head_sha: "recorded-head",
     excerpt: "first line",
     severity: null,
     anchor: null,
@@ -140,6 +142,13 @@ function thread(overrides: Partial<PortalThreadRow> = {}): PortalThreadRow {
     ...overrides,
   };
 }
+
+test("thread rows carry the same identity refs review rows open through", () => {
+  const worktree = thread({ head_sha: "recorded-head" });
+  assert.deepEqual(threadIdentityRef(worktree), { repo_path: "/demo", base_sha: worktree.base_sha, target_key: "/wt-a", target_kind: "worktree", head_sha: "recorded-head" });
+  const head = thread({ target_kind: "head", target_key: "abc123", head_sha: null });
+  assert.deepEqual(threadIdentityRef(head), { repo_path: "/demo", base_sha: head.base_sha, target_key: "abc123", target_kind: "head", head_sha: null });
+});
 
 test("thread state counts cover every chip and the all total", () => {
   const rows = [thread(), thread({ resolved_at: 500 }), thread()];

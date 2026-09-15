@@ -487,6 +487,7 @@ pub(crate) struct PortalThreadRow {
     pub(crate) base_sha: String,
     pub(crate) target_key: String,
     pub(crate) target_kind: String,
+    pub(crate) head_sha: Option<String>,
     pub(crate) excerpt: String,
     pub(crate) severity: Option<String>,
     pub(crate) anchor: Option<String>,
@@ -675,6 +676,7 @@ pub(crate) async fn list_portal_threads_in_pool(
             base_sha: row.try_get("base_sha")?,
             target_key: row.try_get("target_key")?,
             target_kind: row.try_get("target_kind")?,
+            head_sha: None,
             excerpt: row
                 .try_get::<String, _>("body")?
                 .lines()
@@ -724,6 +726,12 @@ pub(crate) async fn list_portal_threads_in_pool(
         } else {
             None
         };
+        // The recorded head when the surface was retrospected, else the
+        // identity itself for head-kind rows; the same open path the
+        // reviews listing's rows carry.
+        row.head_sha = recorded
+            .map(|head| head.head_sha.clone())
+            .or_else(|| (row.target_kind == "head").then(|| row.target_key.clone()));
         row.head_moved = latest_by_identity
             .get(&(
                 row.repo_path.clone(),
@@ -1801,11 +1809,30 @@ mod tests {
         // A review-level thread with no request ever: no anchor, no badge.
         let review_level = seed_thread(&pool, REPO, "base-plain", "/wt-p", ("human", "dana"), "overall note", 2_000, None).await;
 
+        // A head-kind thread carries the identity itself as its head.
+        sqlx::query(
+            "INSERT OR IGNORE INTO reviews (repo_path, base_sha, target_key, target_kind, created_at) \
+             VALUES (?, 'base-head', 'head-sha-9', 'head', 1)",
+        )
+        .bind(REPO)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO comments (review_id, parent_id, author_kind, author_name, body, created_at) \
+             VALUES ((SELECT id FROM reviews WHERE repo_path = ? AND base_sha = 'base-head'), NULL, 'human', 'dana', 'head note', 4_000)",
+        )
+        .bind(REPO)
+        .execute(&pool)
+        .await
+        .unwrap();
+
         let groups = threads(&pool, &PortalThreadQuery { state: Some(STATE_ALL.into()), ..Default::default() }).await;
         let moved = thread_of(&groups, "base-moved");
         assert_eq!(moved.anchor.as_deref(), Some("src/app.ts:41"));
         assert_eq!(moved.severity.as_deref(), Some("P1"));
         assert!(moved.head_moved, "the recorded head differs from the reviewed head");
+        assert_eq!(moved.head_sha.as_deref(), Some("moved-head"), "worktree rows carry their recorded head");
         assert_eq!(moved.reply_count, 2);
         assert_eq!(moved.last_activity_at, 1_300, "root plus newest reply");
         assert_eq!(
@@ -1818,7 +1845,11 @@ mod tests {
         assert_eq!(plain.anchor, None, "review-level threads carry no anchor");
         assert_eq!(plain.severity, None);
         assert!(!plain.head_moved, "request-less identities show no moved badge");
+        assert_eq!(plain.head_sha, None, "worktree rows without a recorded head carry none");
         assert_eq!(review_level, plain.root_comment_id);
+
+        let head_kind = thread_of(&groups, "base-head");
+        assert_eq!(head_kind.head_sha.as_deref(), Some("head-sha-9"), "head-kind rows carry the identity itself");
     }
 
     #[tokio::test]

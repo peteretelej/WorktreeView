@@ -37,6 +37,12 @@ export type PortalReviewRow = {
 // head and base; AttentionRow is structurally compatible.
 export type ReviewIdentityRef = Pick<PortalReviewRow, "repo_path" | "base_sha" | "target_key" | "target_kind" | "head_sha">;
 
+// A thread row opens the same review at the same recorded head the reviews
+// rows use.
+export function threadIdentityRef(thread: Pick<PortalThreadRow, "repo_path" | "base_sha" | "target_key" | "target_kind" | "head_sha">): ReviewIdentityRef {
+  return { repo_path: thread.repo_path, base_sha: thread.base_sha, target_key: thread.target_key, target_kind: thread.target_kind, head_sha: thread.head_sha };
+}
+
 // Chip order and copy; All leads like the mockup, and the tab's empty
 // state reuses its copy.
 export const REVIEWS_STATE_FILTERS: Array<{ id: ReviewsStateFilter; label: string; empty: string }> = [
@@ -115,6 +121,7 @@ export type PortalThreadRow = {
   base_sha: string;
   target_key: string;
   target_kind: "worktree" | "head";
+  head_sha: string | null;
   excerpt: string;
   severity: "P0" | "P1" | "P2" | "P3" | null;
   anchor: string | null;

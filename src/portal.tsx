@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Bot, Check, Copy, FolderGit2, GitBranch, Inbox, ListTree, MessageSquare, Search, User } from "lucide-react";
+import { Bot, Check, Copy, ExternalLink, FolderGit2, GitBranch, Inbox, ListTree, MessageSquare, Search, User } from "lucide-react";
 import { attentionAge, isNarrowAttention } from "./requests.ts";
 import { copyText } from "./clipboard.ts";
 import { CommentThreadView, type CommentsApi } from "./comments.tsx";
@@ -19,6 +19,7 @@ import {
   rowsForThreadsState,
   rowsForThreadsVoice,
   shortSha,
+  threadIdentityRef,
   threadRouteLabel,
   threadsStateCounts,
   REVIEWS_STATE_FILTERS,
@@ -28,6 +29,7 @@ import {
   type PortalReviewRow,
   type PortalThreadDetail,
   type PortalThreadGroup,
+  type PortalThreadRow,
   type ReviewIdentityRef,
   type ReviewsStateFilter,
   type ThreadsStateFilter,
@@ -131,7 +133,7 @@ export function PortalThreadsTab({ payload, repoNames, threadsState, threadsVoic
   onVoice: (voice: ThreadsVoiceFilter) => void;
   onProject: (project: string) => void;
   onText: (text: string) => void;
-  onOpenThread: (rootCommentId: number) => void;
+  onOpenThread: (thread: PortalThreadRow) => void;
 }) {
   const groups = payload?.groups ?? [];
   const projectGroups = groups
@@ -165,7 +167,7 @@ export function PortalThreadsTab({ payload, repoNames, threadsState, threadsVoic
           </span>
         </div>
         <div className="worktree-list attention-list">{group.threads.map((thread) => {
-          const openThread = () => onOpenThread(thread.root_comment_id);
+          const openThread = () => onOpenThread(thread);
           const resolved = thread.resolved_at !== null;
           return <div key={thread.root_comment_id} className={`attention-row thread-row ${resolved ? "thread-resolved" : ""}`} role="button" tabIndex={0} onClick={openThread} onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openThread(); } }}>
             <div className="thread-excerpt"><span className={`thread-spine severity-${thread.severity ?? "none"}`} aria-hidden="true" /><strong title={thread.excerpt}>{thread.excerpt}</strong></div>
@@ -246,18 +248,18 @@ export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, o
       onChanged();
     },
   };
-  const openReview = () => onOpenReview({ repo_path: detail.repo_path, base_sha: detail.base_sha, target_key: detail.target_key, target_kind: detail.target_kind, head_sha: detail.head_sha }, detail.root_comment_id);
+  const openReview = () => onOpenReview(threadIdentityRef(detail), detail.root_comment_id);
   return <section className="inbox-pane attention-pane threads-pane thread-detail" aria-labelledby="thread-detail-heading">
     <div className="thread-breadcrumb" aria-label="Thread location">
       <span title={detail.repo_path}>{repoNames.get(detail.repo_path) ?? detail.repo_path}</span>
       <span className="crumb-sep">/</span>
       <span title={detail.change_label}>{detail.change_label}</span>
       {detail.root.file_path && <><span className="crumb-sep">/</span><code className="path-text" title={detail.root.file_path}>{detail.root.file_path}{detail.root.start_line !== null ? `:${detail.root.start_line}` : ""}</code></>}
+      <button className="secondary-button thread-open-review" type="button" title="Open the review this thread lives on" onClick={openReview}><ExternalLink size={12} />Open in review</button>
       <span className={`status-chip ${resolved ? "clean" : "reviews-muted"}`}>{resolved ? "resolved" : "open"}</span>
       {detail.head_moved && <span className="comment-badge comment-state-badge" title="The surface's head moved past the reviewed head">moved</span>}
       <span className="thread-breadcrumb-actions">
         <CopyRouteButton rootCommentId={detail.root_comment_id} />
-        <button className="secondary-button" type="button" title="Open the review this thread lives on" onClick={openReview}>Open in review</button>
       </span>
     </div>
     <div className="thread-detail-body">

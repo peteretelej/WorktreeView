@@ -9,6 +9,7 @@ import { MarkdownComposer } from "./composer.tsx";
 import {
   anchorLabel,
   commentThreads,
+  degradedReviewKey,
   draftFromSelection,
   exportThreadsMarkdown,
   filterThreadsByAuthor,
@@ -54,7 +55,10 @@ export type CommentsApi = {
 };
 
 export function useReviewComments(identity: ReviewIdentity | null, index: ReviewIndexSummary | null, file: { path: string; lines: DiffLine[] } | null, reversed: boolean): CommentsApi {
-  const key = useMemo(() => (identity && index ? reviewKeyOf(identity, index) : null), [identity, index]);
+  // The resolved key wins once the index lands; until then (or when it
+  // never resolves), the identity's recorded refs key the stored
+  // conversation, so a review stays readable after its Git surface is gone.
+  const key = useMemo(() => (identity ? (index && reviewKeyOf(identity, index)) ?? degradedReviewKey(identity) : null), [identity, index]);
   const [comments, setComments] = useState<ReviewComment[]>([]);
   const [statuses, setStatuses] = useState<Record<number, AnchorStatus>>({});
   const [author, setAuthor] = useState<AuthorFilter>("all");

@@ -4,14 +4,14 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ChevronsLeft, Clock, FileCheck, FolderGit2, MessageSquare, ChevronDown, ChevronRight, CircleDot, Copy, CornerUpLeft, GitBranch, GitCommitHorizontal, HardDrive, Inbox, MessagesSquare, MoreVertical, Pin, PinOff, RefreshCw, Search, Settings as SettingsIcon, Trash2, X } from "lucide-react";
-import { createNavigationHistory, DEFAULT_PORTAL_FILTERS, sameReviewTarget, type AppLocation, type BranchInventory, type BranchSummary, type ChangedFile, type CommitInfo, type GoneSurface, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type ReviewsStateFilter, type SurfaceListing, type ThreadsStateFilter, type ThreadsVoiceFilter, type Worktree } from "./navigation";
+import { createNavigationHistory, DEFAULT_PORTAL_FILTERS, sameReviewTarget, type AppLocation, type BranchInventory, type BranchSummary, type ChangedFile, type CommitInfo, type GoneSurface, type RecordedKey, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type ReviewsStateFilter, type SurfaceListing, type ThreadsStateFilter, type ThreadsVoiceFilter, type Worktree } from "./navigation";
 import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
 import { SettingsPage, applyTheme, defaultSettings, getSettings, persistSettings, type ChangedFilesView, type Settings } from "./settings";
 import { DEFAULT_ZOOM, snapZoom, stepZoom, zoomShortcut } from "./zoom";
 import { imageMimeForPath } from "./stream";
 import { filterGoneSurfaces, goneSurfaceLabel, pinnedSurfaces, surfacePinIndex, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces";
 import { ATTENTION_TABS, attentionAge, attentionPreview, attentionRows, attentionStatus, attentionTabCounts, groupedChangeLabel, isNarrowAttention, requestStatusLabel, rowsForAttentionTab, type AttentionCategory, type AttentionQueue, type AttentionRow, type RequestChange, } from "./requests.ts";
-import { normalizeReviewsSearch, normalizeThreadsText, type PortalReviewRow, type PortalSearchMatches, type ReviewIdentityRef } from "./portal.ts";
+import { normalizeReviewsSearch, normalizeThreadsText, threadIdentityRef, type PortalReviewRow, type PortalSearchMatches, type ReviewIdentityRef } from "./portal.ts";
 import { PortalActivityTab, PortalReviewsTab, PortalThreadDetail, PortalThreadsTab, type PortalActivityPayload, type PortalReviewsPayload, type PortalThreadPayload, type PortalThreadsPayload } from "./portal.tsx";
 import { useReviewComments } from "./comments.tsx";
 import { copyText } from "./clipboard";
@@ -137,6 +137,10 @@ function App() {
   // Display names for cross-project rows; a project removed from the app
   // falls back to its path.
   const repoNames = useMemo(() => new Map(repos.map((repo) => [repo.path, repo.name])), [repos]);
+  // The review page reads repo-scoped props from the reviewed project, not
+  // the active one: a row opened for an unregistered project must not
+  // inherit another repo's worktrees.
+  const reviewRepo = reviewLocation ? repos.find((repo) => repo.path === reviewLocation.identity.repoPath) : null;
   const historyAnchor = historyAnchorOf(location, activeRepo, selectedWorktreePath); const historyAnchorKey = historyKeyOf(historyAnchor);
   // The comment layer attaches to whichever review identity is rendered:
   // the review surface's identity, or the commit history quick-look's.
@@ -424,11 +428,14 @@ function App() {
     return false;
   }
 
-  async function openReview(target: ReviewTarget, repoPath = activeRepoPath, preset?: { base?: string; scope?: ReviewScope; reversed?: boolean }, originRef?: string, focusedCommentId: number | null = null) {
+  async function openReview(target: ReviewTarget, repoPath = activeRepoPath, preset?: { base?: string; scope?: ReviewScope; reversed?: boolean; recordedKey?: RecordedKey }, originRef?: string, focusedCommentId: number | null = null) {
     const nextScope = preset?.scope ?? (target.kind === "worktree" ? scope : "committed");
     const nextReversed = preset?.reversed ?? reversed;
     const nextOriginRef = originRef ?? (target.kind === "ref" && target.name.startsWith("refs/remotes/") ? target.name : undefined);
-    const identity: ReviewIdentity = { repoPath, base: "", target, scope: nextScope, reversed: nextReversed, originRef: nextOriginRef };
+    // A preset base rides the pushed location immediately: when list_refs
+    // cannot resolve (moved project, gone surface), the review still
+    // carries the recorded base its stored conversation keys by.
+    const identity: ReviewIdentity = { repoPath, base: preset?.base ?? "", target, scope: nextScope, reversed: nextReversed, originRef: nextOriginRef, recordedKey: preset?.recordedKey };
     const generation = ++indexGenerationRef.current;
     ++patchGenerationRef.current;
     reviewIdentityRef.current = identity;
@@ -672,8 +679,9 @@ function App() {
   }
 
   // A review degrades to "content no longer available" only when its own
-  // surface is recorded gone and the index failure means the objects behind
-  // it are gone; commit targets match by head SHA, ref targets by full ref.
+  // surface is recorded gone, the index failure means the objects behind
+  // it are gone, and nothing is stored on the identity: a stored
+  // conversation keeps the review page up in its degraded form.
   function goneSurfaceMatching(repoPath: string, target: ReviewTarget): GoneSurface | null {
     const gone = surfaces[repoPath]?.gone ?? [];
     if (target.kind === "commit") return gone.find((surface) => surface.head_sha === target.sha) ?? null;
@@ -761,17 +769,18 @@ function App() {
     }
   }
   function goInbox() { nav.push({ kind: "inbox" }); }
-  // Opening a queue row lands on the review it points at: the live worktree
-  // review when the surface still exists, otherwise the recorded head as a
-  // commit review against the request's base, where the existing
-  // gone-surface handling shows the degraded state. Shared by the inbox
-  // and Reviews tab rows.
+  // Opening a queue or portal row lands on the review it points at: the
+  // live worktree review when the surface still exists, otherwise the
+  // recorded head as a commit review against the request's base. The
+  // project does not have to be registered: the row carries the stored
+  // refs, so a moved or removed project still opens and degrades to its
+  // stored conversation where Git cannot resolve. Shared by the inbox and
+  // the Reviews and Threads tab rows.
   function openReviewIdentity(row: ReviewIdentityRef, focusedCommentId: number | null = null) {
     const repo = repos.find((item) => item.path === row.repo_path);
-    if (!repo) return;
-    setActiveRepoPath(row.repo_path);
+    if (repo) setActiveRepoPath(repo.path);
     if (row.target_kind === "worktree") {
-      const worktree = repo.worktrees.find((item) => worktreeKey(item.path) === worktreeKey(row.target_key));
+      const worktree = repo?.worktrees.find((item) => worktreeKey(item.path) === worktreeKey(row.target_key));
       if (worktree) {
         setSelectedWorktreePath(worktree.path);
         void openReview({ kind: "worktree", worktree }, row.repo_path, undefined, undefined, focusedCommentId);
@@ -779,12 +788,14 @@ function App() {
       }
     }
     // A worktree row without a live worktree falls back to its recorded
-    // head; with none recorded there is nothing reviewable to open.
+    // head; with none recorded there is nothing reviewable to open. The
+    // recordedKey keeps the comment session on the row's stored identity,
+    // so its conversation follows the stand-in target.
     const head = row.head_sha ?? (row.target_kind === "head" ? row.target_key : null);
-    if (head) void openReview({ kind: "commit", sha: head, parents: [], defaultBaseAncestor: false }, row.repo_path, { base: row.base_sha }, undefined, focusedCommentId);
+    if (head) void openReview({ kind: "commit", sha: head, parents: [], defaultBaseAncestor: false }, row.repo_path, { base: row.base_sha, recordedKey: { targetKey: row.target_key, targetKind: row.target_kind } }, undefined, focusedCommentId);
   }
-  // A portal thread's "Open in review": the review location carries the
-  // focused comment id so the comments pane scrolls to the thread.
+  // A thread row's open: the review location carries the focused comment
+  // id so the comments pane scrolls to the thread.
   function openThreadInReview(row: ReviewIdentityRef, focusedCommentId: number) {
     openReviewIdentity(row, focusedCommentId);
   }
@@ -1068,15 +1079,15 @@ function App() {
         </div>
         {portalLocation.tab === "reviews" ?
       <PortalReviewsTab payload={portalReviews} repoNames={repoNames} reviewsState={portalLocation.filters.reviewsState} reviewsProject={portalLocation.filters.reviewsProject} reviewsSearch={portalLocation.filters.reviewsSearch} onState={(state: ReviewsStateFilter) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, reviewsState: state } })} onProject={(project) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, reviewsProject: project } })} onSearch={(search) => nav.replace({ ...portalLocation, filters: { ...portalLocation.filters, reviewsSearch: search } })} onOpenRow={openReviewIdentity} />
-      : portalLocation.tab === "threads" ? <PortalThreadsTab payload={portalThreads} repoNames={repoNames} threadsState={portalLocation.filters.threadsState} threadsVoice={portalLocation.filters.threadsVoice} threadsProject={portalLocation.filters.threadsProject} threadsText={portalLocation.filters.threadsText} onState={(state: ThreadsStateFilter) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, threadsState: state } })} onVoice={(voice: ThreadsVoiceFilter) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, threadsVoice: voice } })} onProject={(project) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, threadsProject: project } })} onText={(text) => nav.replace({ ...portalLocation, filters: { ...portalLocation.filters, threadsText: text } })} onOpenThread={openPortalThread} />
+      : portalLocation.tab === "threads" ? <PortalThreadsTab payload={portalThreads} repoNames={repoNames} threadsState={portalLocation.filters.threadsState} threadsVoice={portalLocation.filters.threadsVoice} threadsProject={portalLocation.filters.threadsProject} threadsText={portalLocation.filters.threadsText} onState={(state: ThreadsStateFilter) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, threadsState: state } })} onVoice={(voice: ThreadsVoiceFilter) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, threadsVoice: voice } })} onProject={(project) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, threadsProject: project } })} onText={(text) => nav.replace({ ...portalLocation, filters: { ...portalLocation.filters, threadsText: text } })} onOpenThread={(thread) => openThreadInReview(threadIdentityRef(thread), thread.root_comment_id)} />
       : portalLocation.tab === "activity" ? <PortalActivityTab payload={portalActivity} repoNames={repoNames} activityProject={portalLocation.filters.activityProject} onProject={(project) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, activityProject: project } })} onMarkSeen={() => void markActivitySeen()} marking={markingSeen} />
       : <AttentionQueueView queue={attention} endpointEnabled={settings.mcp_enabled} tab={portalLocation.filters.category} onTab={(category) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, category } })} onOpenRow={openAttentionRow} />}
       </div>
       : threadLocation ?
       <PortalThreadDetail payload={portalThread} groups={portalThreads?.groups ?? []} repoNames={repoNames} onOpenThread={openPortalThread} onOpenReview={openThreadInReview} onChanged={() => setThreadsNonce((nonce) => nonce + 1)} />
       : reviewLocation ?
-      goneReview ?
-      <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} repoName={repos.find((repo) => repo.path === reviewLocation.identity.repoPath)?.name ?? reviewLocation.identity.repoPath} liveWorktree={activeRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={activeRepo?.worktrees} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}focusedCommentId={reviewLocation.focusedCommentId}onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file }); void selectFile(file, reviewLocation.identity); }} branchAction={branchFetchAction} />
+      goneReview && !comments.key ?
+      <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} repoName={reviewRepo?.name ?? reviewLocation.identity.repoPath} liveWorktree={reviewRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={reviewRepo?.worktrees} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}focusedCommentId={reviewLocation.focusedCommentId}onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file }); void selectFile(file, reviewLocation.identity); }} branchAction={branchFetchAction} />
       : historyLocation ?
       <HistoryView history={history ?? { repoPath: historyLocation.repoPath, startPointLabel: historyLocation.startPointLabel, worktreePath: historyLocation.worktreePath ?? undefined, startRef: historyLocation.startRef ?? undefined, commits: [], hasMore: false, loading: true, error: "" }} historyRefs={historyRefs} index={reviewIndex} loading={reviewLoading} selectedCommit={historyLocation.selectedCommit} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { const selected = historyLocation.selectedCommit; if (selectedFile && selected) void ensureFileContent(selectedFile, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false }); }} onBack={goInbox} onBasePick={(value) => { const selected = historyLocation.selectedCommit; if (selected) void openReview(commitTargetOf(selected), historyLocation.repoPath, { base: value }, historyLocation.startRef ?? undefined); }} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}onFile={(file) => { const selected = historyLocation.selectedCommit; if (selected) { nav.replace({ ...historyLocation, selectedFile: file }); void selectFile(file, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false, originRef: historyLocation.startRef ?? undefined }); } }} branchAction={branchFetchAction} />
       : <section className="inbox-pane" aria-labelledby="inbox-heading" aria-busy={loading || activeRepoHydrating}>

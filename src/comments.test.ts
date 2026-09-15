@@ -5,6 +5,7 @@ import type { ReviewIdentity } from "./navigation.ts";
 import {
   anchorLabel,
   commentThreads,
+  degradedReviewKey,
   draftFromSelection,
   exportThreadsMarkdown,
   filterThreadsByAuthor,
@@ -84,6 +85,37 @@ test("review keys use resolved shas and the worktree path for targets", () => {
   const commit = { ...identity, target: { kind: "commit", sha: "c".repeat(40), parents: [], defaultBaseAncestor: false } as ReviewIdentity["target"] };
   assert.deepEqual(reviewKeyOf(commit, index), { repoPath: "/repo", baseSha: index.base_sha, targetKey: index.target_sha, targetKind: "head" });
   assert.equal(reviewKeyOf(identity, { base_sha: "", target_sha: "" }), null);
+  // A stand-in target sessions on the stored identity it reopens.
+  const standIn = { ...commit, recordedKey: { targetKey: "/repo-wt", targetKind: "worktree" as const } };
+  assert.deepEqual(reviewKeyOf(standIn, index), { repoPath: "/repo", baseSha: index.base_sha, targetKey: "/repo-wt", targetKind: "worktree" });
+});
+
+test("degraded keys come from the identity's recorded refs", () => {
+  const recordedBase = "b".repeat(40);
+  // A worktree target keys by path, whatever its recorded head is.
+  assert.deepEqual(degradedReviewKey({ ...identity, base: recordedBase }), { repoPath: "/repo", baseSha: recordedBase, targetKey: "/repo-wt", targetKind: "worktree" });
+  const commit = { ...identity, base: recordedBase, target: { kind: "commit", sha: "c".repeat(40), parents: [], defaultBaseAncestor: false } as ReviewIdentity["target"] };
+  assert.deepEqual(degradedReviewKey(commit), { repoPath: "/repo", baseSha: recordedBase, targetKey: "c".repeat(40), targetKind: "head" });
+  // A stand-in target keys by its stored identity.
+  assert.deepEqual(degradedReviewKey({ ...commit, recordedKey: { targetKey: "/repo-wt", targetKind: "worktree" } }), { repoPath: "/repo", baseSha: recordedBase, targetKey: "/repo-wt", targetKind: "worktree" });
+  // Symbolic bases and abbreviated shas have no stored key; ref targets never do.
+  assert.equal(degradedReviewKey(identity), null);
+  assert.equal(degradedReviewKey({ ...identity, base: "abc123" }), null);
+  assert.equal(degradedReviewKey({ ...identity, base: recordedBase, target: { kind: "commit", sha: "abc123", parents: [], defaultBaseAncestor: false } as ReviewIdentity["target"] }), null);
+  assert.equal(degradedReviewKey({ ...identity, base: recordedBase, target: { kind: "ref", name: "refs/remotes/origin/feature" } }), null);
+});
+
+test("degraded keys come from the identity's recorded refs", () => {
+  const recordedBase = "b".repeat(40);
+  // A worktree target keys by path, whatever its recorded head is.
+  assert.deepEqual(degradedReviewKey({ ...identity, base: recordedBase }), { repoPath: "/repo", baseSha: recordedBase, targetKey: "/repo-wt", targetKind: "worktree" });
+  const commit = { ...identity, base: recordedBase, target: { kind: "commit", sha: "c".repeat(40), parents: [], defaultBaseAncestor: false } as ReviewIdentity["target"] };
+  assert.deepEqual(degradedReviewKey(commit), { repoPath: "/repo", baseSha: recordedBase, targetKey: "c".repeat(40), targetKind: "head" });
+  // Symbolic bases and abbreviated shas have no stored key; ref targets never do.
+  assert.equal(degradedReviewKey(identity), null);
+  assert.equal(degradedReviewKey({ ...identity, base: "abc123" }), null);
+  assert.equal(degradedReviewKey({ ...identity, base: recordedBase, target: { kind: "commit", sha: "abc123", parents: [], defaultBaseAncestor: false } as ReviewIdentity["target"] }), null);
+  assert.equal(degradedReviewKey({ ...identity, base: recordedBase, target: { kind: "ref", name: "refs/remotes/origin/feature" } }), null);
 });
 
 test("logical side flips only under reversal", () => {

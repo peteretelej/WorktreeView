@@ -16,7 +16,10 @@ export type ReviewTarget = { kind: "worktree"; worktree: Worktree } | { kind: "r
 // originRef records the remote-tracking ref a review came from (a remote
 // branch target itself, or the history a commit was opened from), so a
 // partial-clone review failure can offer to fetch that branch's content.
-export type ReviewIdentity = { repoPath: string; base: string; target: ReviewTarget; scope: ReviewScope; reversed: boolean; originRef?: string };
+// recordedKey marks a stand-in target (a gone worktree row reopened at its
+// recorded head) with the stored identity its comment session keys by.
+export type RecordedKey = { targetKey: string; targetKind: "worktree" | "head" };
+export type ReviewIdentity = { repoPath: string; base: string; target: ReviewTarget; scope: ReviewScope; reversed: boolean; originRef?: string; recordedKey?: RecordedKey };
 export type CommitInfo = { sha: string; subject: string; author: string; date: string; refs: string[]; parents: string[]; default_base_ancestor: boolean };
 // One describe_commit record: a rev (abbreviated hashes included) resolved to
 // its full SHA plus author, git's default formatted commit date, title, body,

@@ -277,8 +277,10 @@ repository, and the search box filters by label, head or base sha,
 requester, and note text as you type.
 
 Clicking a row opens the review the same way the inbox does, at its
-recorded head and base; if the reviewed worktree is gone, the usual
-degraded state explains that the content is no longer available.
+recorded head and base. The row carries the stored refs, so the review
+still opens when the project has moved on disk or been removed from the
+app; the review page then shows its stored conversation and requests
+alongside the usual degraded state where the Git content is gone.
 
 ## Read the Threads tab
 
@@ -299,19 +301,26 @@ Resolved, All) and by voice (All, Human, Agents, reading any
 participant), the project select narrows to one repository, and the
 search box matches thread and reply text as you type.
 
+Clicking a thread row opens the review it lives on, scrolled to that
+thread and highlighting it. The row carries the stored refs, so the
+review is opened at the thread's recorded head and base even when the
+worktree or the project has since moved; a worktree row without a
+recorded head still opens while the worktree itself is live.
+
 ## Open a thread's conversation
 
-Clicking a thread row opens its conversation: the stored root comment
-and every reply in order, with each author's human or agent card. The
-breadcrumb names the project, the change, and the anchor; the state chip
-shows whether the thread is resolved. Resolve or reopen the thread and
-reply to it right here, exactly as in a review, and the change's other
-threads sit in the side column.
+Search results and a change's side column open a thread's conversation:
+the stored root comment and every reply in order, with each author's
+human or agent card. The breadcrumb names the project, the change, and
+the anchor; the state chip shows whether the thread is resolved.
+Resolve or reopen the thread and reply to it right here, exactly as in
+a review.
 
-**Copy link** shares the thread's in-app path (`pulse/thread/<id>`) as
-text; it is an in-app route label, not a URL. **Open in review** jumps to
-the review this thread lives on and scrolls the comments pane to the
-thread, so precise anchor drift keeps being a review-surface question.
+**Open in review** sits with the breadcrumb and jumps to the review this
+thread lives on, scrolling the comments pane to the thread, so precise
+anchor drift keeps being a review-surface question. **Copy link** shares
+the thread's in-app path (`pulse/thread/<id>`) as text; it is an in-app
+route label, not a URL.
 
 ## Read the Activity tab
 

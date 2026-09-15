@@ -1357,6 +1357,12 @@ h2 {
   margin-left: auto;
 }
 
+/* The review is the thread's next step, so its button sits with the
+   location crumbs instead of the far edge. */
+.thread-open-review {
+  flex: none;
+}
+
 .thread-detail-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 260px;

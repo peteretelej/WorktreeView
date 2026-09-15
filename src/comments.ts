@@ -49,11 +49,26 @@ export type CommentThread = { comment: ReviewComment; replies: ReviewComment[] }
 
 // The comment session keys on resolved SHAs from the loaded index, never
 // the symbolic base: a moved branch starts a new session by construction.
+// A stand-in target (recordedKey set) sessions on the stored identity it
+// reopens instead, so its conversation survives the swap.
 export function reviewKeyOf(identity: ReviewIdentity, index: ReviewIndexSummary): ReviewKey | null {
   if (!index.base_sha || !index.target_sha) return null;
+  if (identity.recordedKey) return { repoPath: identity.repoPath, baseSha: index.base_sha, ...identity.recordedKey };
   const target = identity.target;
   if (target.kind === "worktree") return { repoPath: identity.repoPath, baseSha: index.base_sha, targetKey: target.worktree.path, targetKind: "worktree" };
   return { repoPath: identity.repoPath, baseSha: index.base_sha, targetKey: index.target_sha, targetKind: "head" };
+}
+
+// When the index cannot resolve (moved project, gone surface), a review
+// opened from stored rows still carries its recorded refs: a full-SHA base
+// is its own resolution, worktree targets key by path, and head targets by
+// the recorded sha. Symbolic ref targets have no stored key.
+export function degradedReviewKey(identity: ReviewIdentity): ReviewKey | null {
+  const target = identity.target;
+  if (target.kind === "ref" || !/^[0-9a-f]{40}$/i.test(identity.base)) return null;
+  if (identity.recordedKey) return { repoPath: identity.repoPath, baseSha: identity.base, ...identity.recordedKey };
+  if (target.kind === "worktree") return { repoPath: identity.repoPath, baseSha: identity.base, targetKey: target.worktree.path, targetKind: "worktree" };
+  return /^[0-9a-f]{40}$/i.test(target.sha) ? { repoPath: identity.repoPath, baseSha: identity.base, targetKey: target.sha, targetKind: "head" } : null;
 }
 
 // Unified-diff lines carry a one-character marker (+, -, or space) that
