@@ -783,7 +783,10 @@ function App() {
       const worktree = repo?.worktrees.find((item) => worktreeKey(item.path) === worktreeKey(row.target_key));
       if (worktree) {
         setSelectedWorktreePath(worktree.path);
-        void openReview({ kind: "worktree", worktree }, row.repo_path, undefined, undefined, focusedCommentId);
+        // The stored base pins the session the row's requests and
+        // comments live on; the auto base would open a different,
+        // conversation-less review.
+        void openReview({ kind: "worktree", worktree }, row.repo_path, { base: row.base_sha }, undefined, focusedCommentId);
         return;
       }
     }

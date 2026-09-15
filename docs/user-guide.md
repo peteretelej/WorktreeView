@@ -229,9 +229,11 @@ activity: who acted last, what they did, how long ago, and how many
 comment threads still sit open, so the queue reads at a glance without
 opening a review.
 
-Clicking a row opens the underlying review as it exists today. If the
-reviewed worktree has since been deleted, the row still opens by its
-recorded head and shows the usual degraded state. Within a category,
+Clicking a row opens the underlying review at the base the review
+recorded, so its requests and conversation are on the page even after
+branches have moved on. The live worktree is reviewed when it still
+exists; a deleted worktree opens by its recorded head instead, and a
+moved or removed project degrades to its stored state. Within a category,
 rows sort by P0 count and then age, and background updates never reorder
 the rows while you read; concurrent requests on the same change carry
 the same labelled row so the duplication reads as intentional. The inbox
