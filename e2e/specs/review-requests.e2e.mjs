@@ -237,7 +237,8 @@ describe("desktop review request lifecycle", () => {
     shared.reviewerTwo = await mintToken("reviewer-2");
     assert.match(shared.reviewerOne, /^wv[0-9a-f]{64}$/, "reviewer-1 secret shape");
     assert.match(shared.reviewerTwo, /^wv[0-9a-f]{64}$/, "reviewer-2 secret shape");
-    await $(".back-button").click();
+    // Routed settings hides its back button; the sidebar stays reachable.
+    await $('button.nav-tab[aria-label="Projects"]').click();
     console.log("review-requests-e2e: two reviewer tokens minted");
 
     // The coder opens the feature worktree review and requests it, naming
