@@ -335,16 +335,11 @@ export function PortalActivityTab({ payload, repoNames, activityProject, onProje
           return <div key={event.id}>
             {flatIndex === divider && <div className="activity-divider" role="separator" aria-label="New since your last visit"><span>New since your last visit</span></div>}
             <div className="activity-row">
-              <span className={`activity-kind activity-kind-${family}`} title={activityKindLabel(event.kind)}><Icon size={13} /><span>{activityKindLabel(event.kind)}</span></span>
-              <span className="activity-body">
-                <strong title={event.summary}>{event.summary}</strong>
-                <span className="activity-meta">
-                  <span className="path-text" title={event.repo_path}>{repoNames.get(event.repo_path) ?? event.repo_path}</span>
-                  <span>{event.actor_kind === "human" ? "you" : event.actor_name}</span>
-                  <span>{attentionAge(event.created_at, now)}</span>
-                </span>
-              </span>
-            </div>;
+              <span className="activity-project path-text" title={event.repo_path}>{repoNames.get(event.repo_path) ?? event.repo_path}</span>
+              <span className={`activity-kind activity-kind-${family}`} title={activityKindLabel(event.kind)} aria-label={activityKindLabel(event.kind)}><Icon size={13} /></span>
+              <strong className="activity-summary" title={event.summary}>{event.summary}</strong>
+              <span className="activity-meta">{event.actor_kind === "human" ? "you" : event.actor_name} · {attentionAge(event.created_at, now)}</span>
+            </div>
           </div>;
         })}</div>
       </div>)}

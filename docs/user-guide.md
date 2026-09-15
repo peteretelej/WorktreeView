@@ -330,7 +330,8 @@ The **Activity** tab in Pulse answers "what happened" across every
 project: one feed of review requests, claims, verdicts, comments,
 submissions, head moves, and added projects, newest first. Rows group
 under day headings (Today, Yesterday, then dates), and each row shows a
-kind label, the narrated summary, the project, the actor, and the age.
+kind glyph, the narrated summary, and the actor and age on the right,
+with the project leading the row.
 The project select narrows the feed to one repository.
 
 A **New since your last visit** divider marks everything that landed
