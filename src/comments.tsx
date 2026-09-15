@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Copy, PanelRightClose, Trash2 } from "lucide-react";
+import { Check, Copy, FoldHorizontal, PanelRightClose, Trash2, UnfoldHorizontal } from "lucide-react";
 import type { DiffLine } from "./diff.ts";
 import type { ReviewIdentity } from "./navigation.ts";
 import { copyText } from "./clipboard.ts";
@@ -221,8 +221,10 @@ export function DraftComposer({ placeholder, submitLabel, initialBody = "", onSu
 
 // A thread with its actions: resolve/reopen on the root only, flat replies,
 // an inline reply composer, and last-write-wins editing. Exported for the
-// inline cards the patch panes render at anchored rows.
-export function CommentThreadView({ thread, status, comments, reversed = false }: { thread: CommentThread; status: AnchorStatus | null; comments: CommentsApi; reversed?: boolean }) {
+// inline cards the patch panes render at anchored rows. An open-anchor
+// handler turns the root's anchor label into a jump-to-diff button; inline
+// cards omit it because they already sit in the diff.
+export function CommentThreadView({ thread, status, comments, reversed = false, onOpenAnchor }: { thread: CommentThread; status: AnchorStatus | null; comments: CommentsApi; reversed?: boolean; onOpenAnchor?: (comment: ReviewComment) => void }) {
   const [replying, setReplying] = useState(false);
   const [editing, setEditing] = useState<number | null>(null);
   const root = thread.comment;
@@ -240,10 +242,13 @@ export function CommentThreadView({ thread, status, comments, reversed = false }
     : <div className="comment-actions">
       <button type="button" onClick={() => setEditing(comment.id)}>Edit</button>
     </div>;
+  const anchor = <code>{anchorLabel(root, reversed)}</code>;
   return <div className="comment-thread" data-comment-id={root.id}>
     <CommentCard comment={root} status={status} reversed={reversed} actions={<>
       <div className="comment-actions">
-        {root.file_path !== null && <span className="comment-anchor" title={`${root.side === "LEFT" ? "Old" : "New"} side of ${root.file_path}`}><code>{anchorLabel(root, reversed)}</code></span>}
+        {root.file_path !== null && (onOpenAnchor
+          ? <button className="comment-anchor" type="button" title={`Open ${anchorLabel(root, reversed)} in the diff`} onClick={() => onOpenAnchor(root)}>{anchor}</button>
+          : <span className="comment-anchor" title={`${root.side === "LEFT" ? "Old" : "New"} side of ${root.file_path}`}>{anchor}</span>)}
         <button type="button" onClick={() => void comments.setResolved(root.id, !resolved)}>{resolved ? "Reopen" : "Resolve"}</button>
         <button type="button" onClick={() => setReplying(!replying)}>{replying ? "Cancel" : "Reply"}</button>
       </div>
@@ -254,12 +259,15 @@ export function CommentThreadView({ thread, status, comments, reversed = false }
   </div>;
 }
 
-export function CommentStream({ comments, reversed = false, strip, onCollapse }: { comments: CommentsApi; reversed?: boolean; strip?: ReactNode; onCollapse?: () => void }) {
+export function CommentStream({ comments, reversed = false, strip, onCollapse, wide = false, onToggleWide, onOpenAnchor }: { comments: CommentsApi; reversed?: boolean; strip?: ReactNode; onCollapse?: () => void; wide?: boolean; onToggleWide?: () => void; onOpenAnchor?: (comment: ReviewComment) => void }) {
   const { copied, copy } = useCopied();
   if (!comments.key) return null;
   return <aside className="comment-stream" aria-label="Comments">
     <div className="pane-heading">
-      {onCollapse ? <button className="comment-copy" type="button" aria-label="Hide Comments" title="Hide Comments" onClick={onCollapse}><PanelRightClose size={12} /></button> : <span />}
+      <span className="pane-heading-tools">
+        {onCollapse && <button className="comment-copy" type="button" aria-label="Hide Comments" title="Hide Comments" onClick={onCollapse}><PanelRightClose size={12} /></button>}
+        {onToggleWide && <button className="comment-copy" type="button" aria-label={wide ? "Narrow Comments" : "Widen Comments"} title={wide ? "Narrow Comments" : "Widen Comments"} onClick={onToggleWide}>{wide ? <FoldHorizontal size={12} /> : <UnfoldHorizontal size={12} />}</button>}
+      </span>
       <span className="pane-heading-actions">
         <strong>Comments</strong>
         <span>{comments.threads.length}</span>
@@ -277,7 +285,7 @@ export function CommentStream({ comments, reversed = false, strip, onCollapse }:
       </div>}
       {comments.visibleThreads.length === 0
         ? <div className="comment-empty">No comments{comments.author === "all" ? " yet" : ` from ${comments.author} authors`}. Click a diff line to comment; shift-click or drag the line numbers for a range.</div>
-        : comments.visibleThreads.map((thread) => <CommentThreadView key={thread.comment.id} thread={thread} status={comments.statuses[thread.comment.id] ?? null} comments={comments} reversed={reversed} />)}
+        : comments.visibleThreads.map((thread) => <CommentThreadView key={thread.comment.id} thread={thread} status={comments.statuses[thread.comment.id] ?? null} comments={comments} reversed={reversed} onOpenAnchor={onOpenAnchor} />)}
     </div>
   </aside>;
 }

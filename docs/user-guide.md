@@ -106,7 +106,9 @@ and whitespace preferences live in Settings.
 
 Both review side panes collapse: **Changed files** and **Comments** each
 carry a hide control in their heading, `Ctrl B` toggles the file list, and
-a slim rail brings a hidden pane back. Visibility is remembered.
+a slim rail brings a hidden pane back. The Comments pane also carries a
+widen control for reading long findings; visibility and width are
+remembered.
 
 ## Comment on a review
 
@@ -118,10 +120,13 @@ is the target.
 
 Comments are markdown end to end, with a formatting toolbar and a
 preview tab. Threads are a root comment plus flat replies; resolving
-and reopening lives on the root. Everything is copy-first: any card
-copies as markdown with author, severity, and anchor context, and the
-stream header copies all visible threads for pasting into notes, issues,
-or other tools.
+and reopening lives on the root. A line-anchored card's mono anchor
+(`path:L34`, or a range) is a button that opens that file in the diff
+and scrolls the anchored row into view with a flash, so a finding in
+the stream is always one click from its code. Everything is copy-first:
+any card copies as markdown with author, severity, and anchor context,
+and the stream header copies all visible threads for pasting into
+notes, issues, or other tools.
 
 ![Comment stream with agent submission and filters](images/guide-comment-stream.webp)
 
@@ -304,10 +309,11 @@ participant), the project select narrows to one repository, and the
 search box matches thread and reply text as you type.
 
 Clicking a thread row opens the review it lives on, scrolled to that
-thread and highlighting it. The row carries the stored refs, so the
-review is opened at the thread's recorded head and base even when the
-worktree or the project has since moved; a worktree row without a
-recorded head still opens while the worktree itself is live.
+thread and highlighting it; a line-anchored thread also opens its file
+in the diff and lands on the anchored row. The row carries the stored
+refs, so the review is opened at the thread's recorded head and base
+even when the worktree or the project has since moved; a worktree row
+without a recorded head still opens while the worktree itself is live.
 
 ## Open a thread's conversation
 
@@ -319,10 +325,10 @@ Resolve or reopen the thread and reply to it right here, exactly as in
 a review.
 
 **Open in review** sits with the breadcrumb and jumps to the review this
-thread lives on, scrolling the comments pane to the thread, so precise
-anchor drift keeps being a review-surface question. **Copy link** shares
-the thread's in-app path (`pulse/thread/<id>`) as text; it is an in-app
-route label, not a URL.
+thread lives on, scrolling the comments pane to the thread and landing
+the diff on an anchored line, so precise anchor drift keeps being a
+review-surface question. **Copy link** shares the thread's in-app path
+(`pulse/thread/<id>`) as text; it is an in-app route label, not a URL.
 
 ## Read the Activity tab
 

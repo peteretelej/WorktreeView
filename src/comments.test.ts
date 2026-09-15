@@ -4,6 +4,7 @@ import type { DiffLine } from "./diff.ts";
 import type { ReviewIdentity } from "./navigation.ts";
 import {
   anchorLabel,
+  commentJumpTarget,
   commentThreads,
   degradedReviewKey,
   draftFromSelection,
@@ -197,6 +198,20 @@ test("inline placement follows statuses and flips under reversal", () => {
   assert.equal(inlinePlacement(reviewLevel, null, false), null);
   const fileLevel = comment({ id: 3, parent_id: null, file_path: "f" });
   assert.equal(inlinePlacement(fileLevel, null, false), null);
+});
+
+test("jump targets follow placements and fall back for outdated anchors", () => {
+  const anchored = comment({ id: 1, parent_id: null, file_path: "f", side: "LEFT", start_line: 4, end_line: 6 });
+  assert.deepEqual(commentJumpTarget(anchored, null, false), { side: "LEFT", line: 6 });
+  assert.deepEqual(commentJumpTarget(anchored, { comment_id: 1, state: "current", moved_line: null }, true), { side: "RIGHT", line: 6 });
+  assert.deepEqual(commentJumpTarget(anchored, { comment_id: 1, state: "moved", moved_line: 9 }, false), { side: "LEFT", line: 9 });
+  // An outdated anchor aims at its recorded row; whether it still renders
+  // is the pane's call.
+  assert.deepEqual(commentJumpTarget(anchored, { comment_id: 1, state: "outdated", moved_line: null }, false), { side: "LEFT", line: 6 });
+  const single = comment({ id: 2, parent_id: null, file_path: "f", side: "RIGHT", start_line: 12, end_line: null });
+  assert.deepEqual(commentJumpTarget(single, null, false), { side: "RIGHT", line: 12 });
+  assert.equal(commentJumpTarget(comment({ id: 3, parent_id: null }), null, false), null);
+  assert.equal(commentJumpTarget(comment({ id: 4, parent_id: null, file_path: "f" }), null, false), null);
 });
 
 test("quoteExcerpt block-quotes selected text and drops trailing blanks", () => {

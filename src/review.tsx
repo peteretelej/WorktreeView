@@ -16,12 +16,36 @@ import { CommentBody } from "./markdown.tsx";
 import { ReviewsStrip } from "./canvas.tsx";
 import { errorMessage, shortToken } from "./format";
 import { CopyButton, Empty, Pager } from "./ui";
-import type { CommentSelection, DisplaySide, ReviewKey } from "./comments";
+import type { CommentSelection, DisplaySide, ReviewComment, ReviewKey } from "./comments";
+import { commentJumpTarget } from "./comments";
 
 export const BRANCH_PAGE_SIZE = 50;
 
 export const STREAM_TOP_PADDING = 12;
 export const FILE_TOKEN_CHUNK_LINES = 1000;
+// A stream-card anchor click or a portal-thread focus lands the patch on
+// one row; the nonce lets repeated jumps to the same row retrigger.
+export type AnchorJump = { filePath: string; side: DisplaySide; line: number; nonce: number };
+
+// Producer half of the anchor-jump protocol shared by the review and
+// history surfaces: selects the anchored file (preferring its row in the
+// review index so untracked files keep their identity) and records where
+// PatchPane should land. File-level comments only open the file.
+export function useAnchorJump(reversed: boolean, selectedFile: ChangedFile | null, files: ChangedFile[], onFile: (file: ChangedFile) => void, comments: CommentsApi): { anchorJump: AnchorJump | null; openCommentAnchor: (comment: ReviewComment) => void } {
+  const [anchorJump, setAnchorJump] = useState<AnchorJump | null>(null);
+  function openCommentAnchor(comment: ReviewComment) {
+    if (comment.file_path === null) return;
+    if (selectedFile?.path !== comment.file_path) {
+      const known = files.find((file) => file.path === comment.file_path);
+      onFile(known ?? { path: comment.file_path, status: "", untracked: false });
+    }
+    const target = commentJumpTarget(comment, comments.statuses[comment.id] ?? null, reversed);
+    if (!target) return;
+    const filePath = comment.file_path;
+    setAnchorJump((current) => ({ filePath, side: target.side, line: target.line, nonce: (current?.nonce ?? 0) + 1 }));
+  }
+  return { anchorJump, openCommentAnchor };
+}
 export type ReviewIndex = { files: ChangedFile[]; additions: number; deletions: number; base_sha: string; target_sha: string; error?: string; error_code?: string };
 export type FilePatch = { binary: boolean; text: string };
 export type FileContent = { binary: boolean; text: string };
@@ -409,7 +433,7 @@ function RequestForm({ identityKey, headSha, onCreated }: { identityKey: ReviewK
   </form>;
 }
 
-export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target, refs, base, scope, reversed, index, loading, selectedFile, patch, patchError, patchLoading, fileView, diffPrefs, diffToggles, comments, content, contentLoading, contentError, imageSrc, imageError, imageLoading, onEnsureContent, canBack, canForward, onHistoryBack, onHistoryForward, onBack, onBaseChange, onTargetChange, onPreset, onReverse, onFileView, onFile, panes, onPaneVisibility, branchAction, focusedCommentId }: { repoPath: string; repoName: string; liveWorktree?: Worktree; worktrees?: Worktree[]; target: ReviewTarget; refs: RefInventory; base: string; scope: ReviewScope; reversed: boolean; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; fileView: ChangedFilesView; diffPrefs: DiffPreferences; diffToggles: React.ReactNode; comments: CommentsApi; content: FileContent | null; contentLoading: boolean; contentError: string; imageSrc: string | null; imageError: string; imageLoading: boolean; onEnsureContent: () => void; canBack: boolean; canForward: boolean; onHistoryBack: () => void; onHistoryForward: () => void; onBack: () => void; onBaseChange: (value: string) => void; onTargetChange: (target: ReviewTarget) => void; onPreset: (preset: WorktreeReviewPreset) => void; onReverse: () => void; onFileView: (view: ChangedFilesView) => void; onFile: (file: ChangedFile) => void; panes: { files: boolean; comments: boolean }; onPaneVisibility: (next: { files: boolean; comments: boolean }) => void; branchAction?: { ref: string; busy: boolean; run: () => void } | null; focusedCommentId: number | null }) {
+export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target, refs, base, scope, reversed, index, loading, selectedFile, patch, patchError, patchLoading, fileView, diffPrefs, diffToggles, comments, content, contentLoading, contentError, imageSrc, imageError, imageLoading, onEnsureContent, canBack, canForward, onHistoryBack, onHistoryForward, onBack, onBaseChange, onTargetChange, onPreset, onReverse, onFileView, onFile, panes, onPaneVisibility, branchAction, focusedCommentId, commentsWide, onCommentsWide }: { repoPath: string; repoName: string; liveWorktree?: Worktree; worktrees?: Worktree[]; target: ReviewTarget; refs: RefInventory; base: string; scope: ReviewScope; reversed: boolean; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; fileView: ChangedFilesView; diffPrefs: DiffPreferences; diffToggles: React.ReactNode; comments: CommentsApi; content: FileContent | null; contentLoading: boolean; contentError: string; imageSrc: string | null; imageError: string; imageLoading: boolean; onEnsureContent: () => void; canBack: boolean; canForward: boolean; onHistoryBack: () => void; onHistoryForward: () => void; onBack: () => void; onBaseChange: (value: string) => void; onTargetChange: (target: ReviewTarget) => void; onPreset: (preset: WorktreeReviewPreset) => void; onReverse: () => void; onFileView: (view: ChangedFilesView) => void; onFile: (file: ChangedFile) => void; panes: { files: boolean; comments: boolean }; onPaneVisibility: (next: { files: boolean; comments: boolean }) => void; branchAction?: { ref: string; busy: boolean; run: () => void } | null; focusedCommentId: number | null; commentsWide: boolean; onCommentsWide: (wide: boolean) => void }) {
   const targetName = target.kind === "worktree" ? target.worktree.branch : target.kind === "commit" ? target.sha : target.name;
   const allRefs = [...refs.heads, ...refs.remotes, ...refs.tags];
   const targetRefs = allRefs.filter((ref) => ref !== liveWorktree?.branch);
@@ -423,9 +447,14 @@ export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target
   const commitTitle = target.kind === "commit" ? summary?.subject ?? shortToken(target.sha) : shortToken(targetName);
   const [compareOpen, setCompareOpen] = useState(false);
   const compareRef = useRef<HTMLDivElement | null>(null);
+  // A stream card's anchor or a focused portal thread opens the anchored
+  // file in the patch and lands on the row; the pane consumes the jump
+  // once that row renders.
+  const { anchorJump, openCommentAnchor } = useAnchorJump(reversed, selectedFile, files, onFile, comments);
   // A thread opened from the portal scrolls into view in the comments
   // stream and highlights once; the comments layer loads asynchronously,
-  // so the retry rides the loaded-thread count.
+  // so the retry rides the loaded-thread count. An anchored thread also
+  // opens its file and lands the diff on the anchored row.
   const focusConsumedRef = useRef<number | null>(null);
   useEffect(() => {
     if (focusedCommentId === null || focusConsumedRef.current === focusedCommentId) return;
@@ -435,6 +464,8 @@ export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target
     card.scrollIntoView({ block: "center" });
     card.classList.add("comment-thread-focus");
     const timer = window.setTimeout(() => card.classList.remove("comment-thread-focus"), 2000);
+    const thread = comments.threads.find((item) => item.comment.id === focusedCommentId);
+    if (thread) openCommentAnchor(thread.comment);
     return () => window.clearTimeout(timer);
   }, [focusedCommentId, comments.threads.length]);
   useEffect(() => {
@@ -494,10 +525,10 @@ export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target
       </CommitRow>
       <div className="review-subbar"><span className="bar-grow" />{diffToggles}</div>
     </header>
-    {!base && !loading ? <Empty icon={<GitBranch size={24} />} title="Choose a base branch to review" detail="This review has no default base." action={<RefPicker id="prompt-review-base" label="Choose base" repoPath={repoPath} refs={allRefs} value={base} exclude={target.kind === "worktree" ? [] : [targetName]} onChange={onBaseChange} />} /> : <div className={reviewBodyClass(panes)}>
+    {!base && !loading ? <Empty icon={<GitBranch size={24} />} title="Choose a base branch to review" detail="This review has no default base." action={<RefPicker id="prompt-review-base" label="Choose base" repoPath={repoPath} refs={allRefs} value={base} exclude={target.kind === "worktree" ? [] : [targetName]} onChange={onBaseChange} />} /> : <div className={reviewBodyClass(panes, commentsWide)}>
       {panes.files ? <FileIndexPane base={base} index={index} loading={loading} selectedFile={selectedFile} view={fileView} onView={onFileView} onFile={onFile} onCollapse={() => onPaneVisibility({ files: false, comments: panes.comments })} branchAction={branchAction} /> : <PaneRail side="left" label="Changed files" onOpen={() => onPaneVisibility({ files: true, comments: panes.comments })} />}
-      <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} diffPrefs={diffPrefs} reversed={reversed} comments={comments} onDiskWorktree={reviewFileRoot(target, selectedFile, worktrees, repoPath)} content={content} contentLoading={contentLoading} contentError={contentError} imageSrc={imageSrc} imageError={imageError} imageLoading={imageLoading} onEnsureContent={onEnsureContent} />
-      {panes.comments ? <CommentStream comments={comments} reversed={reversed} strip={<ReviewsStrip reviewKey={comments.key} />} onCollapse={() => onPaneVisibility({ files: panes.files, comments: false })} /> : <PaneRail side="right" label="Comments" onOpen={() => onPaneVisibility({ files: panes.files, comments: true })} />}
+      <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} diffPrefs={diffPrefs} reversed={reversed} comments={comments} onDiskWorktree={reviewFileRoot(target, selectedFile, worktrees, repoPath)} content={content} contentLoading={contentLoading} contentError={contentError} imageSrc={imageSrc} imageError={imageError} imageLoading={imageLoading} onEnsureContent={onEnsureContent} anchorJump={anchorJump} />
+      {panes.comments ? <CommentStream comments={comments} reversed={reversed} strip={<ReviewsStrip reviewKey={comments.key} />} onCollapse={() => onPaneVisibility({ files: panes.files, comments: false })} wide={commentsWide} onToggleWide={() => onCommentsWide(!commentsWide)} onOpenAnchor={openCommentAnchor} /> : <PaneRail side="right" label="Comments" onOpen={() => onPaneVisibility({ files: panes.files, comments: true })} />}
     </div>}
   </section>;
 }
@@ -509,8 +540,8 @@ export function PaneRail({ side, label, onOpen }: { side: "left" | "right"; labe
   </aside>;
 }
 
-export function reviewBodyClass(panes: { files: boolean; comments: boolean }) {
-  return ["review-body", panes.files ? "" : "files-collapsed", panes.comments ? "" : "comments-collapsed"].filter(Boolean).join(" ");
+export function reviewBodyClass(panes: { files: boolean; comments: boolean }, commentsWide = false) {
+  return ["review-body", panes.files ? "" : "files-collapsed", panes.comments ? "" : "comments-collapsed", panes.comments && commentsWide ? "comments-wide" : ""].filter(Boolean).join(" ");
 }
 
 const FILE_VIEW_OPTIONS: { value: ChangedFilesView; label: string; title: string }[] = [
@@ -601,7 +632,7 @@ function FileRow({ file, view, depth, selected, onFile, onArrow }: { file: Chang
   </button>;
 }
 
-export function PatchPane({ selectedFile, patch, patchError, patchLoading, diffPrefs, reversed, comments, onDiskWorktree, content, contentLoading, contentError, imageSrc, imageError, imageLoading, onEnsureContent }: { selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; diffPrefs: DiffPreferences; reversed: boolean; comments: CommentsApi; onDiskWorktree?: string | null; content: FileContent | null; contentLoading: boolean; contentError: string; imageSrc: string | null; imageError: string; imageLoading: boolean; onEnsureContent: () => void }) {
+export function PatchPane({ selectedFile, patch, patchError, patchLoading, diffPrefs, reversed, comments, onDiskWorktree, content, contentLoading, contentError, imageSrc, imageError, imageLoading, onEnsureContent, anchorJump }: { selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; diffPrefs: DiffPreferences; reversed: boolean; comments: CommentsApi; onDiskWorktree?: string | null; content: FileContent | null; contentLoading: boolean; contentError: string; imageSrc: string | null; imageError: string; imageLoading: boolean; onEnsureContent: () => void; anchorJump?: AnchorJump | null }) {
   const [openError, setOpenError] = useState("");
   useEffect(() => setOpenError(""), [selectedFile?.path]);
   const openOnDisk = (reveal: boolean) => {
@@ -694,6 +725,36 @@ export function PatchPane({ selectedFile, patch, patchError, patchLoading, diffP
     clearTimeout(flashTimer.current);
     flashTimer.current = window.setTimeout(() => setFlashLine(null), 900);
   };
+
+  // An anchor jump lands once its row renders: until then it stays pending
+  // across the async patch load, and an unreachable line (outdated anchor,
+  // unexpanded gap) just leaves it waiting. A jump is a diff-view concept,
+  // so it leaves the full-file view. Consumption is once per nonce, and
+  // the flash rides a ref-held timer so the pending reset cannot cancel
+  // the row's un-highlight.
+  const [pendingAnchor, setPendingAnchor] = useState<AnchorJump | null>(null);
+  const consumedAnchorRef = useRef(0);
+  const anchorFlashTimer = useRef(0);
+  useEffect(() => () => clearTimeout(anchorFlashTimer.current), []);
+  useEffect(() => {
+    if (!anchorJump || consumedAnchorRef.current === anchorJump.nonce) return;
+    consumedAnchorRef.current = anchorJump.nonce;
+    setPendingAnchor(anchorJump);
+    if (fileMode) setPatchView("diff");
+  }, [anchorJump, fileMode]);
+  useEffect(() => {
+    if (!pendingAnchor || selectedFile?.path !== pendingAnchor.filePath) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const row = el.querySelector(`.diff-line[data-side="${pendingAnchor.side}"][data-line="${pendingAnchor.line}"]`);
+    if (!(row instanceof HTMLElement)) return;
+    const streamRow = row.closest(".stream-row");
+    el.scrollTop = (streamRow instanceof HTMLElement ? streamRow : row).offsetTop - STREAM_TOP_PADDING;
+    row.classList.add("anchor-flash");
+    clearTimeout(anchorFlashTimer.current);
+    anchorFlashTimer.current = window.setTimeout(() => row.classList.remove("anchor-flash"), 1600);
+    setPendingAnchor(null);
+  }, [pendingAnchor, rows, selectedFile?.path]);
 
   function expandGap(gap: PatchGap) {
     onEnsureContent();

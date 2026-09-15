@@ -199,3 +199,13 @@ export function inlinePlacement(comment: ReviewComment, status: AnchorStatus | n
   const side = reversed ? (comment.side === "LEFT" ? "RIGHT" : "LEFT") : comment.side;
   return { side, line, state };
 }
+
+// Where opening an anchor should land in the rendered patch: current and
+// moved comments take their display placement, while an outdated one falls
+// back to its recorded row; the caller scrolls only if that row renders.
+export function commentJumpTarget(comment: ReviewComment, status: AnchorStatus | null, reversed: boolean): { side: DisplaySide; line: number } | null {
+  if (comment.file_path === null || comment.side === null || comment.start_line === null) return null;
+  const placed = inlinePlacement(comment, status, reversed);
+  if (placed) return { side: placed.side, line: placed.line };
+  return { side: logicalSide(comment.side, reversed), line: comment.end_line ?? comment.start_line };
+}
