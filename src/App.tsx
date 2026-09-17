@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { ChevronsLeft, Clock, FileCheck, FolderGit2, MessageSquare, ChevronDown, ChevronRight, CircleDot, Copy, CornerUpLeft, GitBranch, GitCommitHorizontal, HardDrive, Inbox, MessagesSquare, MoreVertical, Pin, PinOff, RefreshCw, Search, Settings as SettingsIcon, Trash2, X } from "lucide-react";
+import { ChevronsLeft, Clock, Download, FileCheck, FolderGit2, MessageSquare, ChevronDown, ChevronRight, CircleDot, Copy, CornerUpLeft, GitBranch, GitCommitHorizontal, HardDrive, Inbox, MessagesSquare, MoreVertical, Pin, PinOff, Search, Settings as SettingsIcon, Trash2, X } from "lucide-react";
 import { createNavigationHistory, DEFAULT_PORTAL_FILTERS, sameReviewTarget, type AppLocation, type BranchInventory, type BranchSummary, type ChangedFile, type CommitInfo, type GoneSurface, type RecordedKey, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type ReviewsStateFilter, type SurfaceListing, type ThreadsStateFilter, type ThreadsVoiceFilter, type Worktree } from "./navigation";
 import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
 import { arrivalChangeLabel, arrivalProjectLabel, arrivalSentenceBody, olderArrivalsSuffix } from "./arrivals";
@@ -17,7 +17,7 @@ import { normalizeReviewsSearch, normalizeThreadsText, threadIdentityRef, type P
 import { PortalActivityTab, PortalReviewsTab, PortalThreadDetail, PortalThreadsTab, type PortalActivityPayload, type PortalReviewsPayload, type PortalThreadPayload, type PortalThreadsPayload } from "./portal.tsx";
 import { useReviewComments } from "./comments.tsx";
 import { copyText } from "./clipboard";
-import { BrandMark, CopyButton, Empty, Pager, TopBar } from "./ui";
+import { BrandMark, CopyButton, Empty, Pager, TopBar, UpdatedStamp } from "./ui";
 import { BRANCH_PAGE_SIZE, parseHunks, patchIdentityOf, sameReview, DiffToggles, ReviewView, type DiffPreferences, type FileContent, type FilePatch, type ReviewIndex } from "./review";
 import { HistoryView, type CommitPage, type HistoryEntry, type HistoryState } from "./history";
 import "./App.css";
@@ -59,6 +59,9 @@ const OVERVIEW_TABS: Array<{ id: OverviewTab; label: string; filter: string; pag
   { id: "remote", label: "Remote", filter: "Filter remote branches", pager: "Remote branch pages", pageSize: BRANCH_PAGE_SIZE },
   { id: "archived", label: "Archived", filter: "Filter archived", pager: "Archived pages", pageSize: BRANCH_PAGE_SIZE },
 ];
+
+// Cadence of the overview's quiet local re-read; focus reloads immediately.
+const OVERVIEW_RELOAD_INTERVAL_MS = 20000;
 
 // Zoom is applied to the whole webview; a failure (browser preview, refused
 // call) keeps the current scale, so the call is best-effort.
@@ -114,6 +117,9 @@ function App() {
   // reading: the open review's comment stream and submissions strip reload
   // from it without navigating away and back.
   const [reviewRefreshTick, setReviewRefreshTick] = useState(0);
+  // When each project's local overview data was last re-read, in epoch
+  // milliseconds: the header's freshness stamp reads from this.
+  const [refreshedAt, setRefreshedAt] = useState<Record<string, number>>({});
   const [attention, setAttention] = useState<AttentionQueue | null>(null);
   const [portalReviews, setPortalReviews] = useState<PortalReviewsPayload | null>(null);
   const [portalThreads, setPortalThreads] = useState<PortalThreadsPayload | null>(null);
@@ -168,7 +174,10 @@ function App() {
   useEffect(() => { if (!activeRepo) { setSelectedWorktreePath(""); return; } setSelectedWorktreePath((current) => activeRepo.worktrees.some((worktree) => worktree.path === current) ? current : activeRepo.worktrees[0]?.path ?? ""); }, [activeRepo]);
   // The overview's change badges come from one bounded status probe per
   // worktree; they refresh when the repo activates, its worktree count
-  // changes, or the overview's refresh action asks for a fresh pass.
+  // changes, the project reloads (focus, the quiet interval, or an agent
+  // ping), or a fetch asks for a fresh pass. A successful probe also
+  // stamps the freshness: the stamp marks the last local read, never the
+  // last fetch.
   useEffect(() => {
     const repoPath = activeRepoPath;
     const worktreeCount = activeRepo?.worktrees.length ?? 0;
@@ -177,7 +186,10 @@ function App() {
     void (async () => {
       try {
         const statuses = await invoke<WorktreeStatus[]>("list_worktree_status", { path: repoPath });
-        if (!cancelled) setWorktreeStatuses((current) => ({ ...current, [repoPath]: statuses }));
+        if (!cancelled) {
+          setWorktreeStatuses((current) => ({ ...current, [repoPath]: statuses }));
+          setRefreshedAt((current) => ({ ...current, [repoPath]: Date.now() }));
+        }
       } catch {
         if (!cancelled) setWorktreeStatuses((current) => ({ ...current, [repoPath]: null }));
       }
@@ -200,6 +212,31 @@ function App() {
     })();
     return () => { cancelled = true; };
   }, [activeRepoPath, statusNonce]);
+  // Agents edit worktrees and commit while the window is away or idle, so
+  // the open project re-reads its local state on focus and on a quiet
+  // interval. That pass is read-only Git; the network fetch stays a
+  // deliberate action and never runs on this path.
+  const relistRef = useRef(relistProject);
+  useEffect(() => { relistRef.current = relistProject; });
+  useEffect(() => {
+    const repoPath = activeRepoPath;
+    if (!repoPath) return;
+    let inFlight = false;
+    async function reloadIfVisible() {
+      if (document.hidden || inFlight) return;
+      inFlight = true;
+      try { await relistRef.current(repoPath); } finally { inFlight = false; }
+    }
+    const reloadSoon = () => { void reloadIfVisible(); };
+    window.addEventListener("focus", reloadSoon);
+    document.addEventListener("visibilitychange", reloadSoon);
+    const timer = window.setInterval(() => void reloadIfVisible(), OVERVIEW_RELOAD_INTERVAL_MS);
+    return () => {
+      window.removeEventListener("focus", reloadSoon);
+      document.removeEventListener("visibilitychange", reloadSoon);
+      window.clearInterval(timer);
+    };
+  }, [activeRepoPath]);
   useEffect(() => { setOverviewTab("worktrees"); setOverviewQuery(""); setOverviewPage(0); }, [activeRepoPath]);
   useEffect(() => {
     if (!menuOpen) return;
@@ -770,6 +807,8 @@ function App() {
     try {
       const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repoPath });
       setRepos((current) => current.map((item) => item.path === repoPath ? { ...item, worktrees } : item));
+      // Success clears a prior failure: the unattended reloads must self-heal.
+      setRepoErrors((current) => { if (!(repoPath in current)) return current; const next = { ...current }; delete next[repoPath]; return next; });
     } catch (error) { setRepoErrors((current) => ({ ...current, [repoPath]: errorMessage(error) })); }
     void refreshSurfaces(repoPath);
     setStatusNonce((nonce) => nonce + 1);
@@ -1114,8 +1153,8 @@ function App() {
 <div className="commits-bar-heading">
 <strong>{history.startPointLabel}</strong>
 <span className="commits-bar-actions">
-<button className={`icon-button ${fetchingRepos[history.repoPath] ? "spinning" : ""}`} type="button" aria-label="Refresh commit history" title="Fetch and refresh" disabled={Boolean(fetchingRepos[history.repoPath])} onClick={() => { if (history) void refreshCommits({ repoPath: history.repoPath, startPointLabel: history.startPointLabel, worktreePath: history.worktreePath ?? undefined, startRef: history.startRef ?? undefined }); }}>
-<RefreshCw size={12} />
+<button className={`icon-button ${fetchingRepos[history.repoPath] ? "spinning" : ""}`} type="button" aria-label="Fetch remote updates" title="Fetch from remotes, then reload history" disabled={Boolean(fetchingRepos[history.repoPath])} onClick={() => { if (history) void refreshCommits({ repoPath: history.repoPath, startPointLabel: history.startPointLabel, worktreePath: history.worktreePath ?? undefined, startRef: history.startRef ?? undefined }); }}>
+<Download size={12} />
 </button>
 </span>
 </div>{history.error ? <div className="sidebar-empty" role="status">{history.error}</div> : history.commits.length === 0 ? <div className="sidebar-empty">{history.loading ? "Loading commits..." : "No commits"}</div> : <>
@@ -1178,9 +1217,9 @@ function App() {
 <span className="meta-chip-label">default {shortToken(activeInventory.default_branch)}</span>
 <CopyButton value={shortToken(activeInventory.default_branch)} label="Copy branch name" />
 </span>}</div>}</div>{activeRepo && <div className="heading-actions" ref={menuAnchorRef}>
-<button className={`icon-button ${fetchingRepos[activeRepo.path] ? "spinning" : ""}`} type="button" aria-label="Refresh project" title="Fetch and refresh" disabled={Boolean(fetchingRepos[activeRepo.path])} onClick={() => void refreshProject()}>
-<RefreshCw size={15} />
-</button>
+<span className="sync-cluster"><UpdatedStamp at={refreshedAt[activeRepo.path]} /><button className={`icon-button ${fetchingRepos[activeRepo.path] ? "spinning" : ""}`} type="button" aria-label="Fetch remote updates" title="Fetch from remotes, then re-read local state" disabled={Boolean(fetchingRepos[activeRepo.path])} onClick={() => void refreshProject()}>
+<Download size={15} />
+</button></span>
 <button className={`icon-button ${menuOpen ? "open" : ""}`} type="button" aria-label="Project actions" title="Project actions" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
 <MoreVertical size={15} />
 </button>{menuOpen && <div className="project-menu" role="menu" aria-label="Project actions">
@@ -1217,7 +1256,7 @@ function App() {
           const pinned = branchPinIndex.get(`worktree:${worktreeKey(worktree.path)}`) !== undefined;
           const openDefaultReview = () => { setSelectedWorktreePath(worktree.path); void openReview({ kind: "worktree", worktree }); };
           return <div key={worktree.path} className="project-row-wrap"><div className={`worktree-row ${selected ? "selected" : ""}`} role="button" tabIndex={0} title={worktree.path} aria-pressed={selected} onClick={openDefaultReview} onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openDefaultReview(); } }}><div className="worktree-cell"><div className="branch-title"><GitBranch size={14} /><strong>{shortToken(worktree.branch)}</strong>{worktree.branch === activeInventory?.default_branch && <span className="main-badge">main</span>}{detached && <span className="detached-badge">detached</span>}{stale && <span className="stale-badge">stale</span>}</div><div className="worktree-path"><span className="path-text">{worktree.path}</span><CopyButton ghost value={worktree.path} label="Copy worktree path" /></div></div><div className="status-cell">{mergedChip(summary?.merged ?? false, worktree.branch)}{changes !== undefined && changes !== null && (changes ? <button className="status-chip dirty" type="button" title="Review working changes: the uncommitted diff against HEAD" onClick={(event) => { event.stopPropagation(); setSelectedWorktreePath(worktree.path); void openReview({ kind: "worktree", worktree }, activeRepoPath, { base: workingChangesBase(worktree), scope: "all", reversed: false }); }}>{changesLabel(changes)}</button> : <span className="status-chip clean">Clean</span>)}{syncChip(syncBase, ahead, behind, (base) => { setSelectedWorktreePath(worktree.path); void openReview({ kind: "worktree", worktree }, activeRepoPath, { base, scope: "committed", reversed: false }); })}</div><div className="last-commit-cell">{summary ? <><span className="row-commit-subject">{summary.subject}</span><span className="row-commit-age">{summary.author} · {relativeTime(summary.commit_date)}</span></> : <span className="row-commit-age">{detached && <span className="commit-hash"><span title={worktree.head}>HEAD {shortToken(worktree.head)}</span><CopyButton ghost value={worktree.head} label={`Copy commit hash ${shortToken(worktree.head)}`} /></span>}</span>}</div></div><button className="pin-button surface-pin" type="button" aria-label={`${pinned ? "Unpin" : "Pin"} worktree ${shortToken(worktree.branch)}`} title={`${pinned ? "Unpin" : "Pin"} worktree`} onClick={(event) => { event.stopPropagation(); void toggleSurfacePin(activeRepoPath, "worktree", worktree.path, !pinned); }}>{pinned ? <PinOff size={12} /> : <Pin size={12} />}</button></div>;
-        })}</div>{filteredWorktrees.length === 0 && <div className="filter-empty">{overviewNeedle ? `No worktrees match "${overviewQuery}"` : "No worktrees"}</div>}</>}{overviewTab !== "worktrees" && <><div className="table-header" aria-hidden="true">{overviewTab === "archived" ? <><span>Archived surface</span><span>Detail</span><span>Last seen</span></> : <><span>Branch</span><span>Sync</span><span>Last commit</span></>}</div><div className="worktree-list">{overviewTab === "archived" ? <>{overviewSlice(filteredGone).map((surface) => archivedRow(surface))}{filteredGone.length === 0 && <div className="filter-empty">{overviewNeedle ? `No archived surfaces match "${overviewQuery}"` : "No archived surfaces"}</div>}</> : <>{overviewSlice(overviewTab === "branches" ? filteredBranches : filteredRemoteBranches).map((branch) => inventoryBranchRow(branch))}{(overviewTab === "branches" ? filteredBranches : filteredRemoteBranches).length === 0 && <div className="filter-empty">{overviewNeedle ? `No branches match "${overviewQuery}"` : inventoryUnavailable ? "Branch inventory unavailable" : activeInventory ? "No branches" : "Loading branch inventory..."}</div>}</>}</div></>}{overviewPageCount > 1 && <Pager label={activeTab.pager} page={visibleOverviewPage} pages={overviewPageCount} total={overviewTotal} size={activeTab.pageSize} onPage={setOverviewPage} />}</>}</section>}</main>{settingsLocation && <SettingsPage settings={settings} saveError={settingsSaveError} onBack={() => nav.back()} onChange={(next) => void updateSettings(next)} />}</section>{latestArrival && <div className="arrival-cue" role="status" aria-label="Review arrivals"><button className="arrival-open" type="button" onClick={openOldestArrival}><Inbox size={13} /><span><strong>{latestArrival.actor}</strong> {arrivalSentenceBody(latestArrival.moment, arrivalChangeLabel(latestArrival.target_kind, latestArrival.target_key), arrivalProjectLabel(repos, latestArrival.repo_path))}{olderArrivalsSuffix(arrivals.length - 1)}</span></button><button className="arrival-dismiss" type="button" aria-label="Dismiss review arrivals" title="Dismiss" onClick={dismissArrivals}><X size={12} /></button></div>}{paletteOpen && <dialog className="palette-backdrop" ref={paletteRef} aria-label="Find repositories, worktrees, and conversations" onClose={handlePaletteClosed} onKeyDown={handlePaletteKeyDown} onMouseDown={(event) => { if (event.target === event.currentTarget) closePalette(); }}><div className="palette" onMouseDown={(event) => event.stopPropagation()}><div className="palette-input-row"><Search size={17} /><input autoFocus value={query} onChange={(event) => { setQuery(event.currentTarget.value); setSearchPage(0); }} placeholder="Find repositories, worktrees, and conversations" /><button type="button" aria-label="Close search" onClick={closePalette}><X size={16} /></button></div><div className="palette-results">{visiblePaletteRows.map((row, index) => {
+        })}</div>{filteredWorktrees.length === 0 && <div className="filter-empty">{overviewNeedle ? `No worktrees match "${overviewQuery}"` : "No worktrees"}</div>}</>}{overviewTab !== "worktrees" && <><div className="table-header" aria-hidden="true">{overviewTab === "archived" ? <><span>Archived surface</span><span>Detail</span><span>Last seen</span></> : <><span>Branch</span><span>Sync</span><span>Last commit</span></>}</div><div className="worktree-list">{overviewTab === "archived" ? <>{overviewSlice(filteredGone).map((surface) => archivedRow(surface))}{filteredGone.length === 0 && <div className="filter-empty">{overviewNeedle ? `No archived surfaces match "${overviewQuery}"` : "No archived surfaces"}</div>}</> : <>{overviewSlice(overviewTab === "branches" ? filteredBranches : filteredRemoteBranches).map((branch) => inventoryBranchRow(branch))}{(overviewTab === "branches" ? filteredBranches : filteredRemoteBranches).length === 0 && <div className="filter-empty">{overviewNeedle ? (overviewTab === "remote" ? `No remote branches match "${overviewQuery}"` : `No branches match "${overviewQuery}"`) : inventoryUnavailable ? "Branch inventory unavailable" : overviewTab === "remote" && activeInventory ? <>No remote branches yet; this tab lists what a fetch saw. <button className="link-button" type="button" disabled={Boolean(fetchingRepos[activeRepoPath])} onClick={() => void refreshProject()}>Fetch remote</button></> : activeInventory ? "No branches" : "Loading branch inventory..."}</div>}</>}</div></>}{overviewPageCount > 1 && <Pager label={activeTab.pager} page={visibleOverviewPage} pages={overviewPageCount} total={overviewTotal} size={activeTab.pageSize} onPage={setOverviewPage} />}</>}</section>}</main>{settingsLocation && <SettingsPage settings={settings} saveError={settingsSaveError} onBack={() => nav.back()} onChange={(next) => void updateSettings(next)} />}</section>{latestArrival && <div className="arrival-cue" role="status" aria-label="Review arrivals"><button className="arrival-open" type="button" onClick={openOldestArrival}><Inbox size={13} /><span><strong>{latestArrival.actor}</strong> {arrivalSentenceBody(latestArrival.moment, arrivalChangeLabel(latestArrival.target_kind, latestArrival.target_key), arrivalProjectLabel(repos, latestArrival.repo_path))}{olderArrivalsSuffix(arrivals.length - 1)}</span></button><button className="arrival-dismiss" type="button" aria-label="Dismiss review arrivals" title="Dismiss" onClick={dismissArrivals}><X size={12} /></button></div>}{paletteOpen && <dialog className="palette-backdrop" ref={paletteRef} aria-label="Find repositories, worktrees, and conversations" onClose={handlePaletteClosed} onKeyDown={handlePaletteKeyDown} onMouseDown={(event) => { if (event.target === event.currentTarget) closePalette(); }}><div className="palette" onMouseDown={(event) => event.stopPropagation()}><div className="palette-input-row"><Search size={17} /><input autoFocus value={query} onChange={(event) => { setQuery(event.currentTarget.value); setSearchPage(0); }} placeholder="Find repositories, worktrees, and conversations" /><button type="button" aria-label="Close search" onClick={closePalette}><X size={16} /></button></div><div className="palette-results">{visiblePaletteRows.map((row, index) => {
           const header = index === 0 || visiblePaletteRows[index - 1].section !== row.section;
           const sectionLabel = header && <div className="nav-section-label">{PALETTE_SECTION_LABELS[row.section]}</div>;
           if (row.section === "repos") { const result = row.result; return <Fragment key={`repos:${result.repo.path}:${result.worktree?.path ?? "repo"}`}>{sectionLabel}<button type="button" title={result.worktree?.path ?? result.repo.path} onClick={() => { activateRepo(result.repo); if (!result.worktree) { closePalette(); } else { setSelectedWorktreePath(result.worktree.path); void openReview({ kind: "worktree", worktree: result.worktree }, result.repo.path); closePalette(); } }}>{result.worktree ? <GitBranch size={16} /> : <FolderGit2 size={16} />}<span><strong>{result.worktree ? shortToken(result.worktree.branch) : result.repo.name}</strong>{result.worktree && <small>{result.repo.name}</small>}</span><kbd>Enter</kbd></button></Fragment>; }

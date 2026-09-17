@@ -619,6 +619,18 @@ kbd {
   gap: 4px;
 }
 
+.sync-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.updated-stamp {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .icon-button.open {
   background: var(--surface-3);
   color: var(--foreground);
@@ -791,6 +803,20 @@ h2 {
   padding: 18px 16px;
   color: var(--muted);
   font-size: 11px;
+}
+
+.link-button {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.link-button:disabled {
+  cursor: not-allowed;
+  opacity: .55;
 }
 
 /* Attention queue: the sidebar's cross-repo projection. Membership is the

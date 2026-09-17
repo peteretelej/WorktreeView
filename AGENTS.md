@@ -102,14 +102,14 @@ Ask first:
 Never:
 
 - Never stage, commit, checkout, push, or manage worktrees in review
-  flows. The refresh action's explicit `git fetch` (remote-tracking refs
+  flows. The Fetch action's explicit `git fetch` (remote-tracking refs
   only) is the one permitted Git write, and it never runs as part of
   review computation.
 - Never add libgit2 or any in-process Git engine.
 - Never run repository-defined code (hooks, external diff drivers, text
   converters, clean or process filters) while inspecting repositories.
 - Never add network access to review paths: the agent endpoint is the
-  one inbound surface and the refresh fetch the one outbound operation.
+  one inbound surface and the project fetch the one outbound operation.
   No remote/SSH behavior until its model is settled; see
   [docs/safety-model.md](docs/safety-model.md).
 

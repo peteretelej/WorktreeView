@@ -11,13 +11,16 @@ repository cannot mutate it or execute code it defines.
   for-each-ref, log, ls-files, ls-tree, cat-file, merge-base, worktree
   list. The per-worktree change-count probe runs status with
   --no-optional-locks so it can never refresh or lock the index.
-- The one Git write sits outside review computation: the refresh action
+- The one Git write sits outside review computation: the Fetch action
   runs `git fetch --all --prune`, which updates remote-tracking refs only.
   It never runs as a side effect of opening or reading a surface, and
   every review computation reads whatever state the last fetch left
-  behind. The refresh is initiated by the user, or pinged by an
+  behind. The fetch is initiated by the user, or pinged by an
   authenticated agent through the endpoint's `refresh_repo` method; the
   app owns the operation in both cases and runs it on the same path.
+  Local re-reads of that state are read-only and run on their own
+  schedule (on window focus and a quiet interval); the fetch itself
+  never runs automatically.
 - Agents can also register a repository through the endpoint's `add_repo`
   method: the same validation and store write the UI's folder dialog runs,
   read-only over Git (it verifies the path is a work tree and stores the
@@ -80,7 +83,7 @@ repository cannot mutate it or execute code it defines.
   instead of silently lazy-fetching.
 - Two deliberate outbound network operations exist, both user-initiated
   (or agent-pinged through the endpoint) and never part of review
-  computation. The refresh fetch contacts only the repository's own
+  computation. The project fetch contacts only the repository's own
   configured remotes and updates remote-tracking refs, exactly as the
   user's Git would from a terminal; the endpoint's `refresh_repo` method
   pings this same fetch. The review-content fetch, offered when a review

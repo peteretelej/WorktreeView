@@ -4,7 +4,7 @@ WorktreeView is a review inbox over your Git worktrees, and this page
 walks through it the way you will actually use it: add a repository,
 read the overview, open reviews, leave comments, and let your coding
 agents work alongside you. Everything here is read-only: reviews explain
-your repositories, they never modify them, and the refresh action's
+your repositories, they never modify them, and the Fetch action's
 explicit fetch is the app's only network request.
 
 ## Add a repository
@@ -363,11 +363,18 @@ app's own event log and never talks to the network.
 
 ## Keep projects current
 
-The **Refresh** action on a project runs `git fetch --all --prune`
-(remote-tracking refs only) and re-reads local state, so ahead/behind
-chips and remote branches reflect the server. Connected agents can ping
-the same refresh. Nothing else in WorktreeView ever touches your Git
-state.
+The overview keeps local state current on its own: WorktreeView re-reads
+worktrees, status chips, and the branch inventory when the window
+regains focus and on a short interval while the app is open, and the
+header shows when that last read happened. Connected agents can ping
+the same reload. These passes are read-only; they never touch the
+network.
+
+The **Fetch** action runs `git fetch --all --prune` (remote-tracking
+refs only) and then re-reads local state, so ahead/behind chips and the
+Remote tab reflect the server. Fetching is always an explicit action;
+focus and the interval never fetch. Nothing else in WorktreeView ever
+touches your Git state.
 
 ## Tune the app
 
