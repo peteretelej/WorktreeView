@@ -14,7 +14,7 @@ import { imageMimeForPath } from "./stream";
 import { filterGoneSurfaces, goneSurfaceLabel, pinnedSurfaces, surfacePinIndex, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces";
 import { ATTENTION_TABS, attentionAge, attentionPreview, attentionRows, attentionStatus, attentionTabCounts, groupedChangeLabel, isNarrowAttention, requestStatusLabel, reviewsBackLabel, rowsForAttentionTab, type AttentionCategory, type AttentionQueue, type AttentionRow, type RequestChange, } from "./requests.ts";
 import { normalizeReviewsSearch, normalizeThreadsText, threadIdentityRef, type PortalReviewRow, type PortalSearchMatches, type ReviewIdentityRef } from "./portal.ts";
-import { PortalActivityTab, PortalReviewsTab, PortalThreadDetail, PortalThreadsTab, type PortalActivityPayload, type PortalReviewsPayload, type PortalThreadPayload, type PortalThreadsPayload } from "./portal.tsx";
+import { PortalActivityTab, PortalReviewsTab, PortalThreadDetail, PortalThreadsTab, usePaneWidth, type PortalActivityPayload, type PortalReviewsPayload, type PortalThreadPayload, type PortalThreadsPayload } from "./portal.tsx";
 import { useReviewComments } from "./comments.tsx";
 import { copyText } from "./clipboard";
 import { BrandMark, CopyButton, Empty, Pager, TopBar, UpdatedStamp } from "./ui";
@@ -1278,15 +1278,7 @@ function AttentionQueueView({ queue, endpointEnabled, tab, onTab, onOpenRow }: {
   const rows = attentionRows(queue);
   const counts = attentionTabCounts(rows);
   const repoNames = new Map((queue?.repos ?? []).map((group) => [group.repo_path, group.repo_name]));
-  const paneRef = useRef<HTMLElement | null>(null);
-  const [paneWidth, setPaneWidth] = useState(0);
-  useEffect(() => {
-    const pane = paneRef.current;
-    if (!pane || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((entries) => setPaneWidth(entries[0].contentRect.width));
-    observer.observe(pane);
-    return () => observer.disconnect();
-  }, []);
+  const [paneRef, paneWidth] = usePaneWidth();
   const narrow = paneWidth > 0 && isNarrowAttention(paneWidth);
   const visible = rowsForAttentionTab(rows, tab);
   const activeTab = ATTENTION_TABS.find((item) => item.id === tab) ?? ATTENTION_TABS[0];

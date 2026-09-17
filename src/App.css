@@ -1039,7 +1039,10 @@ h2 {
 }
 
 /* Narrow reviews rows drop the event column and fold Age into the meta
-   line, landing on the same six-column template as the queue. */
+   line, landing on the same six-column template as the queue. Restating
+   the shared narrow columns here is load-bearing: the extra class
+   out-specifies the eight-column reviews template above, and without it
+   that wider rule wins the tie and the fold breaks. */
 .reviews-pane .table-header.attention-head.attention-narrow,
 .reviews-pane .attention-narrow .attention-row {
   grid-template-columns: minmax(90px, 150px) minmax(120px, 1fr) minmax(80px, 120px) 100px 48px 40px;
@@ -1166,6 +1169,17 @@ h2 {
   align-items: center;
 }
 
+/* Narrow threads fold the participant badges into the badges cell, which
+   already wraps. Must stay after the shared .attention-narrow
+   .attention-row rule: same specificity, so source order decides. */
+.attention-narrow .thread-row {
+  grid-template-columns: minmax(140px, 1fr) minmax(90px, 140px) 36px minmax(80px, auto) 40px;
+}
+
+.attention-narrow .thread-age {
+  font-size: 10px;
+}
+
 .thread-excerpt {
   display: flex;
   align-items: center;
@@ -1255,6 +1269,9 @@ h2 {
   letter-spacing: 0.04em;
 }
 
+/* Unlike the attention tables this row has no narrow-pane fold: the
+   fluid columns (ellipsizing project, 1fr summary, auto meta) degrade
+   gracefully on their own. */
 .activity-row {
   display: grid;
   grid-template-columns: minmax(64px, 180px) 16px minmax(0, 1fr) auto;

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Bot, Check, Copy, ExternalLink, FolderGit2, GitBranch, Inbox, ListTree, MessageSquare, Search, User } from "lucide-react";
 import { attentionAge, isNarrowAttention } from "./requests.ts";
@@ -39,6 +39,21 @@ import {
 // The Reviews tab's fetched listing; null until the first load lands.
 export type PortalReviewsPayload = { rows: PortalReviewRow[]; loading: boolean; error: string };
 
+// The attention panes fold on their own width, not the window's, so the
+// observer tracks the pane element rather than using a media query.
+export function usePaneWidth(): [RefObject<HTMLElement | null>, number] {
+  const paneRef = useRef<HTMLElement | null>(null);
+  const [paneWidth, setPaneWidth] = useState(0);
+  useEffect(() => {
+    const pane = paneRef.current;
+    if (!pane || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => setPaneWidth(entries[0].contentRect.width));
+    observer.observe(pane);
+    return () => observer.disconnect();
+  }, []);
+  return [paneRef, paneWidth];
+}
+
 // The Pulse Reviews tab: every review identity with a request or any
 // comment/submission activity. Membership, states, search, and ordering
 // arrive from the backend; this view counts, narrows by carried fields,
@@ -60,15 +75,7 @@ export function PortalReviewsTab({ payload, repoNames, reviewsState, reviewsProj
   const visible = rowsForReviewsState(projectRows, reviewsState);
   const projects = projectOptions(rows);
   const activeChip = REVIEWS_STATE_FILTERS.find((chip) => chip.id === reviewsState) ?? REVIEWS_STATE_FILTERS[0];
-  const paneRef = useRef<HTMLElement | null>(null);
-  const [paneWidth, setPaneWidth] = useState(0);
-  useEffect(() => {
-    const pane = paneRef.current;
-    if (!pane || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((entries) => setPaneWidth(entries[0].contentRect.width));
-    observer.observe(pane);
-    return () => observer.disconnect();
-  }, []);
+  const [paneRef, paneWidth] = usePaneWidth();
   const narrow = paneWidth > 0 && isNarrowAttention(paneWidth);
   const now = Date.now();
   return <section className="inbox-pane attention-pane reviews-pane" ref={paneRef} aria-label="Reviews">
@@ -122,6 +129,8 @@ export type PortalThreadsPayload = { groups: PortalThreadGroup[]; loading: boole
 // The Pulse Threads tab: every root comment across every review identity,
 // grouped by change. Grouping, filters, ordering, and bounds arrive from
 // the backend; this view counts, narrows by carried fields, and renders.
+// Below ~800px of pane width the participant badges fold into the badges
+// cell, which already wraps.
 export function PortalThreadsTab({ payload, repoNames, threadsState, threadsVoice, threadsProject, threadsText, onState, onVoice, onProject, onText, onOpenThread }: {
   payload: PortalThreadsPayload | null;
   repoNames: Map<string, string>;
@@ -146,8 +155,10 @@ export function PortalThreadsTab({ payload, repoNames, threadsState, threadsVoic
     .filter((group) => group.threads.length > 0);
   const activeChip = THREADS_STATE_FILTERS.find((chip) => chip.id === threadsState) ?? THREADS_STATE_FILTERS[0];
   const projects = projectOptions(groups.flatMap((group) => group.threads));
+  const [paneRef, paneWidth] = usePaneWidth();
+  const narrow = paneWidth > 0 && isNarrowAttention(paneWidth);
   const now = Date.now();
-  return <section className="inbox-pane attention-pane threads-pane" aria-label="Threads">
+  return <section className={`inbox-pane attention-pane threads-pane ${narrow ? "attention-narrow" : ""}`} ref={paneRef} aria-label="Threads">
     <div className="reviews-filter-row">
       <div className="overview-tabs" role="tablist" aria-label="Thread states">{THREADS_STATE_FILTERS.map((chip) => <button key={chip.id} role="tab" type="button" aria-selected={threadsState === chip.id} className={`overview-tab ${threadsState === chip.id ? "active" : ""}`} onClick={() => onState(chip.id)}>{chip.label}<span className="tab-count">{counts[chip.id]}</span></button>)}</div>
       <div className="overview-tabs" role="tablist" aria-label="Thread voices">{THREADS_VOICE_FILTERS.map((chip) => <button key={chip.id} role="tab" type="button" aria-selected={threadsVoice === chip.id} className={`overview-tab ${threadsVoice === chip.id ? "active" : ""}`} onClick={() => onVoice(chip.id)}>{chip.label}</button>)}</div>
@@ -169,12 +180,14 @@ export function PortalThreadsTab({ payload, repoNames, threadsState, threadsVoic
         <div className="attention-list">{group.threads.map((thread) => {
           const openThread = () => onOpenThread(thread);
           const resolved = thread.resolved_at !== null;
+          const replyTitle = `${thread.reply_count} ${thread.reply_count === 1 ? "reply" : "replies"}`;
+          const participantBadges = thread.participants.map((participant) => <span key={`${participant.author_kind}:${participant.author_name}`} className="comment-badge" title={`${participant.author_kind} ${participant.author_name}`}>{participant.author_name}</span>);
           return <div key={thread.root_comment_id} className={`attention-row thread-row ${resolved ? "thread-resolved" : ""}`} role="button" tabIndex={0} onClick={openThread} onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openThread(); } }}>
             <div className="thread-excerpt"><span className={`thread-spine severity-${thread.severity ?? "none"}`} aria-hidden="true" /><strong title={thread.excerpt}>{thread.excerpt}</strong></div>
             <div className="thread-anchor">{thread.anchor && <code className="path-text" title={thread.anchor}>{thread.anchor}</code>}</div>
-            <div className="thread-participants">{thread.participants.map((participant) => <span key={`${participant.author_kind}:${participant.author_name}`} className="comment-badge" title={`${participant.author_kind} ${participant.author_name}`}>{participant.author_name}</span>)}</div>
-            <div className="thread-reply-count">{thread.reply_count > 0 && <span title={`${thread.reply_count} ${thread.reply_count === 1 ? "reply" : "replies"}`}>{thread.reply_count}</span>}</div>
-            <div className="thread-badges">{resolved && <span className="comment-badge comment-resolved-badge">resolved</span>}{thread.head_moved && <span className="comment-badge comment-state-badge" title="The surface's head moved past the reviewed head">moved</span>}</div>
+            {!narrow && <div className="thread-participants">{participantBadges}</div>}
+            <div className="thread-reply-count">{thread.reply_count > 0 && <span title={replyTitle}>{thread.reply_count}</span>}</div>
+            <div className="thread-badges">{resolved && <span className="comment-badge comment-resolved-badge">resolved</span>}{thread.head_moved && <span className="comment-badge comment-state-badge" title="The surface's head moved past the reviewed head">moved</span>}{narrow && participantBadges}</div>
             <div className="thread-age">{attentionAge(thread.last_activity_at, now)}</div>
           </div>;
         })}</div>
