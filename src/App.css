@@ -262,7 +262,8 @@ code,
   color: var(--foreground);
 }
 
-/* The fetch-backed refresh buttons spin while fetch and re-reads run. */
+/* Fetch buttons swap their download glyph for a loader arc; a directional
+   arrow rotating in place reads as broken rather than busy. */
 .icon-button.spinning svg {
   animation: icon-spin 0.9s linear infinite;
 }

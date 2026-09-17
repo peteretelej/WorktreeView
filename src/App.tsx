@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { ChevronsLeft, Clock, Download, FileCheck, FolderGit2, MessageSquare, ChevronDown, ChevronRight, CircleDot, Copy, CornerUpLeft, GitBranch, GitCommitHorizontal, HardDrive, Inbox, MessagesSquare, MoreVertical, Pin, PinOff, Search, Settings as SettingsIcon, Trash2, X } from "lucide-react";
+import { ChevronsLeft, Clock, Download, FileCheck, FolderGit2, MessageSquare, ChevronDown, ChevronRight, CircleDot, Copy, CornerUpLeft, GitBranch, GitCommitHorizontal, HardDrive, Inbox, LoaderCircle, MessagesSquare, MoreVertical, Pin, PinOff, Search, Settings as SettingsIcon, Trash2, X } from "lucide-react";
 import { createNavigationHistory, DEFAULT_PORTAL_FILTERS, sameReviewTarget, type AppLocation, type BranchInventory, type BranchSummary, type ChangedFile, type CommitInfo, type GoneSurface, type RecordedKey, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type ReviewsStateFilter, type SurfaceListing, type ThreadsStateFilter, type ThreadsVoiceFilter, type Worktree } from "./navigation";
 import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
 import { arrivalChangeLabel, arrivalProjectLabel, arrivalSentenceBody, olderArrivalsSuffix } from "./arrivals";
@@ -1154,7 +1154,7 @@ function App() {
 <strong>{history.startPointLabel}</strong>
 <span className="commits-bar-actions">
 <button className={`icon-button ${fetchingRepos[history.repoPath] ? "spinning" : ""}`} type="button" aria-label="Fetch remote updates" title="Fetch from remotes, then reload history" disabled={Boolean(fetchingRepos[history.repoPath])} onClick={() => { if (history) void refreshCommits({ repoPath: history.repoPath, startPointLabel: history.startPointLabel, worktreePath: history.worktreePath ?? undefined, startRef: history.startRef ?? undefined }); }}>
-<Download size={12} />
+{fetchingRepos[history.repoPath] ? <LoaderCircle size={12} /> : <Download size={12} />}
 </button>
 </span>
 </div>{history.error ? <div className="sidebar-empty" role="status">{history.error}</div> : history.commits.length === 0 ? <div className="sidebar-empty">{history.loading ? "Loading commits..." : "No commits"}</div> : <>
@@ -1218,7 +1218,7 @@ function App() {
 <CopyButton value={shortToken(activeInventory.default_branch)} label="Copy branch name" />
 </span>}</div>}</div>{activeRepo && <div className="heading-actions" ref={menuAnchorRef}>
 <span className="sync-cluster"><UpdatedStamp at={refreshedAt[activeRepo.path]} /><button className={`icon-button ${fetchingRepos[activeRepo.path] ? "spinning" : ""}`} type="button" aria-label="Fetch remote updates" title="Fetch from remotes, then re-read local state" disabled={Boolean(fetchingRepos[activeRepo.path])} onClick={() => void refreshProject()}>
-<Download size={15} />
+{fetchingRepos[activeRepo.path] ? <LoaderCircle size={15} /> : <Download size={15} />}
 </button></span>
 <button className={`icon-button ${menuOpen ? "open" : ""}`} type="button" aria-label="Project actions" title="Project actions" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
 <MoreVertical size={15} />
