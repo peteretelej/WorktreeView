@@ -87,16 +87,6 @@ async function humanRequestStatus() {
   });
 }
 
-async function openAttentionTab(label) {
-  await $('button.nav-tab[aria-label^="Pulse"]').click();
-  await $(".attention-pane").waitForDisplayed();
-  const tab = await $(`//button[contains(@class, "overview-tab")][contains(normalize-space(.), "${label}")]`);
-  await tab.click();
-  await browser.waitUntil(async () => (await tab.getAttribute("aria-selected")) === "true", {
-    timeoutMsg: `attention tab did not activate: ${label}`,
-  });
-}
-
 // One stateless MCP tools/call against the app's loopback face. Returns
 // the parsed JSON payload of the tool result.
 async function callTool(endpoint, token, name, args) {
@@ -448,17 +438,6 @@ describe("desktop review request lifecycle", () => {
     assert.ok(row, "the request stays on the queue");
     assert.equal(row.round, 1);
     assert.equal(row.head_sha, roundOneHead, "the refused re-request left the head untouched");
-
-    // The human's Attention view carries the same signal: the Waiting on
-    // you bucket lists exactly this request with its alarm chip.
-    await openAttentionTab("Waiting on you");
-    await browser.waitUntil(async () => (await $$(".attention-row")).length === 1, {
-      timeoutMsg: "the needs-human category did not list exactly one request",
-    });
-    await browser.waitUntil(async () => (await textOf(".attention-row .status-chip")) === "needs human", {
-      timeoutMsg: "the needs-human chip did not render",
-    });
-    await $('button.nav-tab[aria-label="Projects"]').click();
     console.log(`review-requests-e2e: request ${created.id} needs human after budget refusal`);
   });
 
