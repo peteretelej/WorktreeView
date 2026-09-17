@@ -54,6 +54,18 @@ export function usePaneWidth(): [RefObject<HTMLElement | null>, number] {
   return [paneRef, paneWidth];
 }
 
+// Relative ages only move when a surface re-renders, so the portal
+// samples the clock on an interval; without it a parked tab would show
+// stale ages indefinitely.
+export function useNow(intervalMs: number) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((value) => value + 1), intervalMs);
+    return () => window.clearInterval(timer);
+  }, [intervalMs]);
+  return Date.now();
+}
+
 // The Pulse Reviews tab: every review identity with a request or any
 // comment/submission activity. Membership, states, search, and ordering
 // arrive from the backend; this view counts, narrows by carried fields,
@@ -77,7 +89,7 @@ export function PortalReviewsTab({ payload, repoNames, reviewsState, reviewsProj
   const activeChip = REVIEWS_STATE_FILTERS.find((chip) => chip.id === reviewsState) ?? REVIEWS_STATE_FILTERS[0];
   const [paneRef, paneWidth] = usePaneWidth();
   const narrow = paneWidth > 0 && isNarrowAttention(paneWidth);
-  const now = Date.now();
+  const now = useNow(10000);
   return <section className="inbox-pane attention-pane reviews-pane" ref={paneRef} aria-label="Reviews">
     <div className="reviews-filter-row">
       <div className="overview-tabs" role="tablist" aria-label="Review states">{REVIEWS_STATE_FILTERS.map((chip) => <button key={chip.id} role="tab" type="button" aria-selected={reviewsState === chip.id} className={`overview-tab ${reviewsState === chip.id ? "active" : ""}`} onClick={() => onState(chip.id)}>{chip.label}<span className="tab-count">{counts[chip.id]}</span></button>)}</div>
@@ -157,7 +169,7 @@ export function PortalThreadsTab({ payload, repoNames, threadsState, threadsVoic
   const projects = projectOptions(groups.flatMap((group) => group.threads));
   const [paneRef, paneWidth] = usePaneWidth();
   const narrow = paneWidth > 0 && isNarrowAttention(paneWidth);
-  const now = Date.now();
+  const now = useNow(10000);
   return <section className={`inbox-pane attention-pane threads-pane ${narrow ? "attention-narrow" : ""}`} ref={paneRef} aria-label="Threads">
     <div className="reviews-filter-row">
       <div className="overview-tabs" role="tablist" aria-label="Thread states">{THREADS_STATE_FILTERS.map((chip) => <button key={chip.id} role="tab" type="button" aria-selected={threadsState === chip.id} className={`overview-tab ${threadsState === chip.id ? "active" : ""}`} onClick={() => onState(chip.id)}>{chip.label}<span className="tab-count">{counts[chip.id]}</span></button>)}</div>
@@ -331,7 +343,7 @@ export function PortalActivityTab({ payload, repoNames, activityProject, onProje
   const projects = projectOptions(events);
   const groups = activityDayGroups(projectEvents, Date.now());
   const divider = payload ? activityDividerIndex(projectEvents, payload.seen_id) : -1;
-  const now = Date.now();
+  const now = useNow(10000);
   let flatIndex = -1;
   return <section className="inbox-pane attention-pane activity-pane" aria-label="Activity">
     <div className="reviews-filter-row">

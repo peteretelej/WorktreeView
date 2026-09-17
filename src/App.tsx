@@ -14,7 +14,7 @@ import { imageMimeForPath } from "./stream";
 import { filterGoneSurfaces, goneSurfaceLabel, pinnedSurfaces, surfacePinIndex, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces";
 import { ATTENTION_TABS, attentionAge, attentionPreview, attentionRows, attentionStatus, attentionTabCounts, groupedChangeLabel, isNarrowAttention, requestStatusLabel, reviewsBackLabel, rowsForAttentionTab, type AttentionCategory, type AttentionQueue, type AttentionRow, type RequestChange, } from "./requests.ts";
 import { normalizeReviewsSearch, normalizeThreadsText, threadIdentityRef, type PortalReviewRow, type PortalSearchMatches, type ReviewIdentityRef } from "./portal.ts";
-import { PortalActivityTab, PortalReviewsTab, PortalThreadDetail, PortalThreadsTab, usePaneWidth, type PortalActivityPayload, type PortalReviewsPayload, type PortalThreadPayload, type PortalThreadsPayload } from "./portal.tsx";
+import { PortalActivityTab, PortalReviewsTab, PortalThreadDetail, PortalThreadsTab, useNow, usePaneWidth, type PortalActivityPayload, type PortalReviewsPayload, type PortalThreadPayload, type PortalThreadsPayload } from "./portal.tsx";
 import { useReviewComments } from "./comments.tsx";
 import { copyText } from "./clipboard";
 import { BrandMark, CopyButton, Empty, Pager, TopBar, UpdatedStamp } from "./ui";
@@ -1282,7 +1282,7 @@ function AttentionQueueView({ queue, endpointEnabled, tab, onTab, onOpenRow }: {
   const narrow = paneWidth > 0 && isNarrowAttention(paneWidth);
   const visible = rowsForAttentionTab(rows, tab);
   const activeTab = ATTENTION_TABS.find((item) => item.id === tab) ?? ATTENTION_TABS[0];
-  const now = Date.now();
+  const now = useNow(10000);
   return <section className="inbox-pane attention-pane" ref={paneRef} aria-label="Inbox">
     {!endpointEnabled && <p className="attention-endpoint-note">The agent endpoint is off, so agents cannot reach this queue. Reviews already delivered still appear.</p>}
     <div className="overview-tabs" role="tablist" aria-label="Inbox categories">{ATTENTION_TABS.map((item) => <button key={item.id} role="tab" type="button" aria-selected={tab === item.id} className={`overview-tab ${tab === item.id ? "active" : ""}`} onClick={() => onTab(item.id)}>{item.label}<span className="tab-count">{counts[item.id]}</span></button>)}</div>
