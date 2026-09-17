@@ -10,7 +10,7 @@ import { SettingsPage, applyTheme, defaultSettings, getSettings, persistSettings
 import { DEFAULT_ZOOM, snapZoom, stepZoom, zoomShortcut } from "./zoom";
 import { imageMimeForPath } from "./stream";
 import { filterGoneSurfaces, goneSurfaceLabel, pinnedSurfaces, surfacePinIndex, surfaceRows, worktreeKey, type SurfaceRow } from "./surfaces";
-import { ATTENTION_TABS, attentionAge, attentionPreview, attentionRows, attentionStatus, attentionTabCounts, groupedChangeLabel, isNarrowAttention, requestStatusLabel, rowsForAttentionTab, type AttentionCategory, type AttentionQueue, type AttentionRow, type RequestChange, } from "./requests.ts";
+import { ATTENTION_TABS, attentionAge, attentionPreview, attentionRows, attentionStatus, attentionTabCounts, groupedChangeLabel, isNarrowAttention, requestStatusLabel, reviewsBackLabel, rowsForAttentionTab, type AttentionCategory, type AttentionQueue, type AttentionRow, type RequestChange, } from "./requests.ts";
 import { normalizeReviewsSearch, normalizeThreadsText, threadIdentityRef, type PortalReviewRow, type PortalSearchMatches, type ReviewIdentityRef } from "./portal.ts";
 import { PortalActivityTab, PortalReviewsTab, PortalThreadDetail, PortalThreadsTab, type PortalActivityPayload, type PortalReviewsPayload, type PortalThreadPayload, type PortalThreadsPayload } from "./portal.tsx";
 import { useReviewComments } from "./comments.tsx";
@@ -102,6 +102,10 @@ function App() {
   const [inventories, setInventories] = useState<Record<string, BranchInventory | null>>({}); const [menuOpen, setMenuOpen] = useState(false); const [removeTarget, setRemoveTarget] = useState<Repo | null>(null); const [removing, setRemoving] = useState(false);
   const [settings, setSettings] = useState<Settings>(defaultSettings); const [settingsSaveError, setSettingsSaveError] = useState("");
   const [arrivals, setArrivals] = useState<SubmissionArrival[]>([]);
+  // Bumped when a submission arrives for the review identity the user is
+  // reading: the open review's comment stream and submissions strip reload
+  // from it without navigating away and back.
+  const [reviewRefreshTick, setReviewRefreshTick] = useState(0);
   const [attention, setAttention] = useState<AttentionQueue | null>(null);
   const [portalReviews, setPortalReviews] = useState<PortalReviewsPayload | null>(null);
   const [portalThreads, setPortalThreads] = useState<PortalThreadsPayload | null>(null);
@@ -232,6 +236,13 @@ function App() {
       setArrivals((current) => [...current, event.payload]);
       // A submission moves request statuses, so the queue follows.
       void refreshAttention();
+      // A delivery for the review the user is reading refreshes it live:
+      // the tick drives the open review's stream and submissions strip.
+      const key = commentsRef.current.key;
+      const arrival = event.payload;
+      if (key && key.repoPath === arrival.repo_path && key.baseSha === arrival.base_sha && key.targetKey === arrival.target_key && key.targetKind === arrival.target_kind) {
+        setReviewRefreshTick((tick) => tick + 1);
+      }
     });
     return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
   }, []);
@@ -344,6 +355,13 @@ function App() {
     });
     return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
   }, []);
+  // A live arrival for the open review re-reads its comment stream through
+  // the comment layer's refresh; the submissions strip follows the same
+  // tick passed down to the review surface.
+  useEffect(() => {
+    if (reviewRefreshTick === 0) return;
+    void commentsRef.current.refresh();
+  }, [reviewRefreshTick]);
   // A completed refresh ping re-lists the open repository's surfaces, so an
   // agent's push-then-ping becomes visible without a manual refresh. The
   // ping already ran the fetch, so this is only the local re-reads; the
@@ -1091,7 +1109,7 @@ function App() {
       <PortalThreadDetail payload={portalThread} groups={portalThreads?.groups ?? []} repoNames={repoNames} onOpenThread={openPortalThread} onOpenReview={openThreadInReview} onChanged={() => setThreadsNonce((nonce) => nonce + 1)} />
       : reviewLocation ?
       goneReview && !comments.key ?
-      <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} repoName={reviewRepo?.name ?? reviewLocation.identity.repoPath} liveWorktree={reviewRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={reviewRepo?.worktrees} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}focusedCommentId={reviewLocation.focusedCommentId}commentsWide={settings.comments_pane_wide}onCommentsWide={changeCommentsWide}onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file }); void selectFile(file, reviewLocation.identity); }} branchAction={branchFetchAction} />
+      <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} repoName={reviewRepo?.name ?? reviewLocation.identity.repoPath} liveWorktree={reviewRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={reviewRepo?.worktrees} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}focusedCommentId={reviewLocation.focusedCommentId}reviewRefreshTick={reviewRefreshTick}commentsWide={settings.comments_pane_wide}onCommentsWide={changeCommentsWide}onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file }); void selectFile(file, reviewLocation.identity); }} branchAction={branchFetchAction} />
       : historyLocation ?
       <HistoryView history={history ?? { repoPath: historyLocation.repoPath, startPointLabel: historyLocation.startPointLabel, worktreePath: historyLocation.worktreePath ?? undefined, startRef: historyLocation.startRef ?? undefined, commits: [], hasMore: false, loading: true, error: "" }} historyRefs={historyRefs} index={reviewIndex} loading={reviewLoading} selectedCommit={historyLocation.selectedCommit} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { const selected = historyLocation.selectedCommit; if (selectedFile && selected) void ensureFileContent(selectedFile, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false }); }} onBack={goInbox} onBasePick={(value) => { const selected = historyLocation.selectedCommit; if (selected) void openReview(commitTargetOf(selected), historyLocation.repoPath, { base: value }, historyLocation.startRef ?? undefined); }} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}commentsWide={settings.comments_pane_wide}onCommentsWide={changeCommentsWide}onFile={(file) => { const selected = historyLocation.selectedCommit; if (selected) { nav.replace({ ...historyLocation, selectedFile: file }); void selectFile(file, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false, originRef: historyLocation.startRef ?? undefined }); } }} branchAction={branchFetchAction} />
       : <section className="inbox-pane" aria-labelledby="inbox-heading" aria-busy={loading || activeRepoHydrating}>
@@ -1193,7 +1211,7 @@ function AttentionQueueView({ queue, endpointEnabled, tab, onTab, onOpenRow }: {
         const blocking = row.unresolved_p0 + row.unresolved_p1;
         return <div key={`${row.repo_path}:${row.base_sha}:${row.target_key}:${row.request_id ?? "surface"}`} className="attention-row" role="button" tabIndex={0} onClick={openRow} onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openRow(); } }}>
           <div className="attention-project"><strong title={row.repo_path}>{repoNames.get(row.repo_path) ?? row.repo_path}</strong></div>
-          <div className="attention-change"><strong>{groupedChangeLabel(row, rows)}</strong><span className="attention-preview">{attentionPreview(row, now)}</span><span className="attention-meta">{row.target_kind === "head" ? <code title={row.target_key}>{shortToken(row.target_key)}</code> : <span className="path-text" title={row.target_key}>{row.target_key}</span>}{narrow && <span className="attention-age">{attentionAge(row.age_basis, now)}</span>}</span></div>
+          <div className="attention-change"><strong>{groupedChangeLabel(row, rows)}</strong>{row.stale && <span className="comment-badge comment-state-badge" title="The surface's head moved past the reviewed head">stale</span>}<span className="attention-preview">{attentionPreview(row, now)}</span><span className="attention-meta">{reviewsBackLabel(row) && <span title="Reviews delivered by the named reviewers">{reviewsBackLabel(row)}</span>}{row.target_kind === "head" ? <code title={row.target_key}>{shortToken(row.target_key)}</code> : <span className="path-text" title={row.target_key}>{row.target_key}</span>}{narrow && <span className="attention-age">{attentionAge(row.age_basis, now)}</span>}</span></div>
           <div className="attention-requester">{row.requester && <span className="comment-badge" title={`Requested by ${row.requester}`}>{row.requester}</span>}</div>
           <div className="attention-status">{status && <span className={`status-chip ${status.tone === "needs-human" ? "attention-danger" : "clean"}`}>{status.label}</span>}</div>
           <div className="attention-round">{row.max_rounds > 0 && <code title={`Round ${row.round} of ${row.max_rounds}`}>{row.round}/{row.max_rounds}</code>}</div>

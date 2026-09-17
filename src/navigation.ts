@@ -46,7 +46,7 @@ export type PortalFilters = {
 };
 
 export const DEFAULT_PORTAL_FILTERS: PortalFilters = {
-  category: "requested",
+  category: "waiting_on_you",
   reviewsState: "all",
   reviewsProject: "",
   reviewsSearch: "",

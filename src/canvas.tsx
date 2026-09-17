@@ -59,8 +59,9 @@ function SubmissionCard({ submission }: { submission: Submission }) {
 
 // The review's submission list: one expandable card per agent submission.
 // Finding comments render with severity badges in the comment stream; the
-// author filter already separates agent authors.
-export function ReviewsStrip({ reviewKey }: { reviewKey: ReviewKey | null }) {
+// author filter already separates agent authors. A changed refreshTick
+// (a live arrival for this identity) reloads the listing in place.
+export function ReviewsStrip({ reviewKey, refreshTick }: { reviewKey: ReviewKey | null; refreshTick: number }) {
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const key = reviewKey ? `${reviewKey.repoPath}\0${reviewKey.baseSha}\0${reviewKey.targetKey}\0${reviewKey.targetKind}` : "";
   useEffect(() => {
@@ -73,7 +74,7 @@ export function ReviewsStrip({ reviewKey }: { reviewKey: ReviewKey | null }) {
       .then((loaded) => { if (!cancelled) setSubmissions(loaded); })
       .catch(() => { if (!cancelled) setSubmissions([]); });
     return () => { cancelled = true; };
-  }, [key]);
+  }, [key, refreshTick]);
   if (!reviewKey || submissions.length === 0) return null;
   return <section className="reviews-strip" aria-label="Agent reviews">
     <div className="reviews-strip-heading"><strong>Reviews</strong><span>{submissions.length}</span></div>

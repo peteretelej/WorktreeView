@@ -183,8 +183,9 @@ themes) persist locally.
 ## Direction
 
 The portal direction has shipped as Pulse: a cross-project Inbox with
-backend-owned attention categories (including request-less Recent
-comments and per-row last-activity previews), Reviews and Threads
+backend-owned attention buckets (waiting on you, in flight, and recent;
+including request-less rows and per-row last-activity previews, stale
+badges, and named-reviewer progress), Reviews and Threads
 listings, a thread conversation surface, and an Activity feed over the
 app's append-only event log with a seen watermark and Mark all seen.
 Planned work includes an AI-assisted review layer that annotates review

@@ -449,9 +449,9 @@ describe("desktop review request lifecycle", () => {
     assert.equal(row.round, 1);
     assert.equal(row.head_sha, roundOneHead, "the refused re-request left the head untouched");
 
-    // The human's Attention view carries the same signal: the Needs human
-    // category lists exactly this request with its alarm chip.
-    await openAttentionTab("Needs human");
+    // The human's Attention view carries the same signal: the Waiting on
+    // you bucket lists exactly this request with its alarm chip.
+    await openAttentionTab("Waiting on you");
     await browser.waitUntil(async () => (await $$(".attention-row")).length === 1, {
       timeoutMsg: "the needs-human category did not list exactly one request",
     });

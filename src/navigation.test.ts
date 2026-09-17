@@ -111,16 +111,16 @@ test("consecutive duplicate pushes collapse into one entry", () => {
 });
 
 test("portal entries equal on tab and filters category", () => {
-  const requested = portalEntry("requested");
-  assert.equal(sameAppLocation(requested, portalEntry("requested")), true);
-  assert.equal(sameAppLocation(requested, portalEntry("needs_human")), false);
+  const requested = portalEntry("waiting_on_you");
+  assert.equal(sameAppLocation(requested, portalEntry("waiting_on_you")), true);
+  assert.equal(sameAppLocation(requested, portalEntry("in_flight")), false);
   assert.equal(sameAppLocation(requested, { kind: "inbox" }), false);
 });
 
 test("back and forward traverse portal category entries", () => {
   const history = createNavigationHistory();
-  const requested = portalEntry("requested");
-  const needsHuman = portalEntry("needs_human");
+  const requested = portalEntry("waiting_on_you");
+  const needsHuman = portalEntry("in_flight");
   history.push(requested);
   history.push(needsHuman);
   assert.equal(history.canForward(), false);
@@ -134,14 +134,14 @@ test("back and forward traverse portal category entries", () => {
 
 test("portal pushes collapse only when tab and category match", () => {
   const history = createNavigationHistory();
-  history.push(portalEntry("requested"));
-  history.push(portalEntry("needs_human"));
-  history.push(portalEntry("needs_human"));
+  history.push(portalEntry("waiting_on_you"));
+  history.push(portalEntry("in_flight"));
+  history.push(portalEntry("in_flight"));
   assert.equal(history.canForward(), false);
   assert.equal(history.canBack(), true);
-  history.push(portalEntry("requested"));
-  assert.deepEqual(history.back(), { kind: "portal", tab: "inbox", filters: { ...DEFAULT_PORTAL_FILTERS, category: "needs_human" } });
-  assert.deepEqual(history.forward(), { kind: "portal", tab: "inbox", filters: { ...DEFAULT_PORTAL_FILTERS, category: "requested" } });
+  history.push(portalEntry("waiting_on_you"));
+  assert.deepEqual(history.back(), { kind: "portal", tab: "inbox", filters: { ...DEFAULT_PORTAL_FILTERS, category: "in_flight" } });
+  assert.deepEqual(history.forward(), { kind: "portal", tab: "inbox", filters: { ...DEFAULT_PORTAL_FILTERS, category: "waiting_on_you" } });
 });
 
 test("reviews filter fields are all discriminating", () => {
@@ -151,7 +151,7 @@ test("reviews filter fields are all discriminating", () => {
   assert.equal(sameAppLocation(base, reviewsEntry({ reviewsProject: "/repo" })), false);
   assert.equal(sameAppLocation(base, reviewsEntry({ reviewsSearch: "feat" })), false);
   // The inbox tab's own filter fields ride along, so they discriminate too.
-  assert.equal(sameAppLocation(base, reviewsEntry({ category: "needs_human" })), false);
+  assert.equal(sameAppLocation(base, reviewsEntry({ category: "in_flight" })), false);
 });
 
 test("threads filter fields are all discriminating", () => {
@@ -219,14 +219,14 @@ test("reviews chip picks push while search edits replace in place", () => {
 
 test("tab switches between inbox and reviews push history entries", () => {
   const history = createNavigationHistory();
-  const inbox = portalEntry("requested");
+  const inbox = portalEntry("waiting_on_you");
   history.push(inbox);
-  history.push(reviewsEntry({ category: "requested" }));
+  history.push(reviewsEntry({ category: "waiting_on_you" }));
   assert.deepEqual(history.back(), inbox);
   assert.equal(history.canForward(), true);
   // Same tab and identical filters still collapse.
-  history.push(reviewsEntry({ category: "requested" }));
-  assert.deepEqual(history.current(), reviewsEntry({ category: "requested" }));
+  history.push(reviewsEntry({ category: "waiting_on_you" }));
+  assert.deepEqual(history.current(), reviewsEntry({ category: "waiting_on_you" }));
 });
 
 test("entry equality ignores identity object shape but honors discriminating fields", () => {

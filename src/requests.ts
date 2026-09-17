@@ -3,13 +3,7 @@
 // category membership, the webview only counts, filters, sorts, and
 // labels from the payload.
 
-export type AttentionCategory =
-  | "requested"
-  | "changes_requested"
-  | "needs_human"
-  | "unresolved_findings"
-  | "changed_since_review"
-  | "recent_comments";
+export type AttentionCategory = "waiting_on_you" | "in_flight" | "recent";
 
 export type AttentionRow = {
   request_id: number | null;
@@ -26,6 +20,9 @@ export type AttentionRow = {
   unresolved_p1: number;
   category: AttentionCategory;
   needs_human: boolean;
+  stale: boolean;
+  reviews_expected: number;
+  reviews_delivered: number;
   age_basis: number;
   head_sha: string | null;
   last_activity_at: number;
@@ -53,12 +50,9 @@ export type RequestChange = {
 
 // Tab order and copy; the queue's empty state reuses the per-tab copy.
 export const ATTENTION_TABS: Array<{ id: AttentionCategory; label: string; empty: string }> = [
-  { id: "requested", label: "Review requested", empty: "No open review requests" },
-  { id: "changes_requested", label: "Changes requested", empty: "Nothing is waiting on fixes" },
-  { id: "needs_human", label: "Needs human", empty: "Nothing needs a human" },
-  { id: "unresolved_findings", label: "Unresolved findings", empty: "No unresolved findings" },
-  { id: "changed_since_review", label: "Changed since review", empty: "Nothing changed after review" },
-  { id: "recent_comments", label: "Recent comments", empty: "No new comment activity" },
+  { id: "waiting_on_you", label: "Waiting on you", empty: "Nothing is waiting on you" },
+  { id: "in_flight", label: "In flight", empty: "No reviews in flight" },
+  { id: "recent", label: "Recent", empty: "No recent activity" },
 ];
 
 export function attentionRows(queue: AttentionQueue | null): AttentionRow[] {
@@ -67,12 +61,9 @@ export function attentionRows(queue: AttentionQueue | null): AttentionRow[] {
 
 export function attentionTabCounts(rows: AttentionRow[]): Record<AttentionCategory, number> {
   const counts: Record<AttentionCategory, number> = {
-    requested: 0,
-    changes_requested: 0,
-    needs_human: 0,
-    unresolved_findings: 0,
-    changed_since_review: 0,
-    recent_comments: 0,
+    waiting_on_you: 0,
+    in_flight: 0,
+    recent: 0,
   };
   for (const row of rows) counts[row.category] += 1;
   return counts;
@@ -147,6 +138,13 @@ export function attentionStatus(row: AttentionRow): { label: string; tone: "need
   if (row.needs_human) return { label: "needs human", tone: "needs-human" };
   if (row.status === "") return null;
   return { label: row.status.replace(/_/g, " "), tone: "status" };
+}
+
+// The named-reviewer progress sentence for a row's metadata line; null
+// unless the request names reviewers, so every other row renders nothing.
+export function reviewsBackLabel(row: AttentionRow): string | null {
+  if (row.reviews_expected <= 0) return null;
+  return `${row.reviews_delivered} of ${row.reviews_expected} reviews back`;
 }
 
 // The review header's request rows mirror the human IPC command's rows:

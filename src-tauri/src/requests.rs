@@ -1036,13 +1036,12 @@ fn request_row_from_row(row: &sqlx::sqlite::SqliteRow, now: i64) -> Result<Reque
             p2: unresolved("unresolved_p2")?,
             p3: unresolved("unresolved_p3")?,
         },
-        needs_human: open_request_category(
+        needs_human: needs_human_escalation(
             &row.try_get::<String, _>("status").map_err(field)?,
             row.try_get("round").map_err(field)?,
             row.try_get("max_rounds").map_err(field)?,
             unresolved("unresolved_p0")?,
-            unresolved("unresolved_p1")?,
-        ) == Some(CATEGORY_NEEDS_HUMAN),
+        ),
     })
 }
 
@@ -1110,15 +1109,14 @@ pub(crate) async fn refresh_request_note(
     Ok(now)
 }
 
-// The attention queue's categories; the strings are the tab ids the
-// webview filters rows by verbatim, and the backend is their single
-// owner: the webview never re-derives membership.
-pub(crate) const CATEGORY_REQUESTED: &str = "requested";
-pub(crate) const CATEGORY_CHANGES_REQUESTED: &str = "changes_requested";
-pub(crate) const CATEGORY_NEEDS_HUMAN: &str = "needs_human";
-pub(crate) const CATEGORY_UNRESOLVED_FINDINGS: &str = "unresolved_findings";
-pub(crate) const CATEGORY_CHANGED_SINCE_REVIEW: &str = "changed_since_review";
-pub(crate) const CATEGORY_RECENT_COMMENTS: &str = "recent_comments";
+// The attention queue's buckets; the strings are the tab ids the webview
+// filters rows by verbatim, and the backend is their single owner: the
+// webview never re-derives membership. Buckets are mutually exclusive and
+// first-match; needs-human is a badge subset of waiting_on_you, never a
+// bucket of its own.
+pub(crate) const CATEGORY_WAITING_ON_YOU: &str = "waiting_on_you";
+pub(crate) const CATEGORY_IN_FLIGHT: &str = "in_flight";
+pub(crate) const CATEGORY_RECENT: &str = "recent";
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub(crate) struct AttentionRow {
@@ -1136,6 +1134,15 @@ pub(crate) struct AttentionRow {
     pub(crate) unresolved_p1: i64,
     pub(crate) category: String,
     pub(crate) needs_human: bool,
+    // The surface's recorded head moved past the reviewed head. Never a
+    // bucket of its own: the row keeps its bucket and carries the badge.
+    pub(crate) stale: bool,
+    // Named-reviewer progress, display-only: the stored reviewer list's
+    // length, and how many of those names have a submission on the
+    // identity. Zero on both when no reviewers are named; no per-reviewer
+    // state is stored anywhere.
+    pub(crate) reviews_expected: i64,
+    pub(crate) reviews_delivered: i64,
     pub(crate) age_basis: i64,
     pub(crate) head_sha: Option<String>,
     // The row's preview-line facts: what happened last on this identity,
@@ -1159,29 +1166,54 @@ pub(crate) struct AttentionQueue {
     pub(crate) repos: Vec<AttentionRepoGroup>,
 }
 
-// The attention category of one open request from its stored fields and
-// its identity's unresolved blocking counts, first match wins: needs-human
-// (exhausted rounds, or a P0 sitting on a requested/in-review request),
-// then the lifecycle statuses, then P1 findings for an in-review request.
-// An in-review request with no trigger returns None: it was claimed and
-// nothing needs attention yet.
-fn open_request_category(
+// The needs-human escalation: an exhausted changes-requested budget, or a
+// P0 finding sitting on a requested or in-review request. Derived straight
+// from these stored fields everywhere, never from a bucket comparison.
+fn needs_human_escalation(status: &str, round: i64, max_rounds: i64, unresolved_p0: i64) -> bool {
+    (status == CHANGES_REQUESTED && round >= max_rounds)
+        || ((status == REQUESTED || status == IN_REVIEW) && unresolved_p0 > 0)
+}
+
+// The attention bucket of one open request from its stored fields, first
+// match wins: the needs-human escalation, then P1 findings awaiting triage
+// on an in-review request, then the lifecycle statuses. A requested row
+// splits on the requester token id's nullity - the id, not the resolved
+// name, since a deleted agent token's name reads as human at query time -
+// so an agent's open pickup waits on the human while the human's own
+// solicitation is in flight. Every open request lands in exactly one
+// bucket; a moved head only ever badges the row stale. The boolean is the
+// escalation flag, a subset of waiting_on_you.
+fn open_request_bucket(
     status: &str,
+    requester_token_id: Option<i64>,
     round: i64,
     max_rounds: i64,
     unresolved_p0: i64,
     unresolved_p1: i64,
-) -> Option<&'static str> {
-    if (status == CHANGES_REQUESTED && round >= max_rounds)
-        || ((status == REQUESTED || status == IN_REVIEW) && unresolved_p0 > 0)
-    {
-        return Some(CATEGORY_NEEDS_HUMAN);
+) -> (&'static str, bool) {
+    if needs_human_escalation(status, round, max_rounds, unresolved_p0) {
+        return (CATEGORY_WAITING_ON_YOU, true);
     }
     match status {
-        REQUESTED => Some(CATEGORY_REQUESTED),
-        CHANGES_REQUESTED => Some(CATEGORY_CHANGES_REQUESTED),
-        IN_REVIEW => (unresolved_p1 > 0).then_some(CATEGORY_UNRESOLVED_FINDINGS),
-        _ => None,
+        REQUESTED => {
+            if requester_token_id.is_some() {
+                (CATEGORY_WAITING_ON_YOU, false)
+            } else {
+                (CATEGORY_IN_FLIGHT, false)
+            }
+        }
+        IN_REVIEW => {
+            if unresolved_p1 > 0 {
+                (CATEGORY_WAITING_ON_YOU, false)
+            } else {
+                (CATEGORY_IN_FLIGHT, false)
+            }
+        }
+        // An in-budget changes-requested round waits on the requester's
+        // fixes; the queue's is_open gate keeps every other status here
+        // unreachable.
+        CHANGES_REQUESTED => (CATEGORY_WAITING_ON_YOU, false),
+        _ => (CATEGORY_IN_FLIGHT, false),
     }
 }
 
@@ -1196,6 +1228,11 @@ struct RequestTriage {
     target_key: String,
     target_kind: String,
     requester: String,
+    // The token id itself, not the resolved name: the bucket split for a
+    // requested row reads this id's nullity, so a deleted agent token
+    // (whose name falls back to human) still routes as an agent pickup.
+    requester_token_id: Option<i64>,
+    reviewers: Vec<String>,
     status: String,
     round: i64,
     max_rounds: i64,
@@ -1206,9 +1243,21 @@ struct RequestTriage {
     unresolved_p1: i64,
 }
 
+// The stored reviewer list is a JSON array; a malformed one fails the read
+// like any other unreadable stored field rather than queuing a wrong row.
+fn stored_reviewers(raw: String) -> Result<Vec<String>, CommandError> {
+    serde_json::from_str(&raw).map_err(|error| {
+        CommandError::new(
+            "persistence",
+            format!("The stored reviewers could not be read: {error}"),
+        )
+    })
+}
+
 // Every stored request with its identity's blocking counts, newest first.
 const ATTENTION_REQUESTS_QUERY: &str = "SELECT rq.id, rq.repo_path, rq.base_sha, rq.target_key, \
-     rq.target_kind, rq.status, rq.max_rounds, rq.round, rq.head_sha, rq.created_at, rq.updated_at, \
+     rq.target_kind, rq.status, rq.requester_token_id, rq.reviewers, rq.max_rounds, rq.round, \
+     rq.head_sha, rq.created_at, rq.updated_at, \
      t.name AS requester_name, \
      SUM(CASE WHEN c.severity = 'P0' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p0, \
      SUM(CASE WHEN c.severity = 'P1' AND c.resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_p1 \
@@ -1237,7 +1286,7 @@ const ATTENTION_FREE_FINDINGS_QUERY: &str = "SELECT rv.repo_path, rv.base_sha, r
          AND rq.target_key = rv.target_key AND rq.target_kind = rv.target_kind) \
      GROUP BY rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind";
 
-// Request-less identities' newest comment: the recent_comments pool's
+// Request-less identities' newest comment: the recent bucket's
 // candidates, any severity, discussion included. The free-findings pass
 // keeps first-match precedence over this one.
 const ATTENTION_RECENT_COMMENTS_QUERY: &str = "SELECT rv.repo_path, rv.base_sha, rv.target_key, \
@@ -1249,6 +1298,15 @@ const ATTENTION_RECENT_COMMENTS_QUERY: &str = "SELECT rv.repo_path, rv.base_sha,
        WHERE rq.repo_path = rv.repo_path AND rq.base_sha = rv.base_sha \
          AND rq.target_key = rv.target_key AND rq.target_kind = rv.target_kind) \
      GROUP BY rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind";
+
+// Distinct submission authors per review identity, one row per (identity,
+// agent): the named-reviewer rows' delivery facts. A named reviewer counts
+// as back when their name appears here; the activity query above picks one
+// winner per identity and cannot produce these counts.
+const ATTENTION_SUBMISSION_AUTHORS_QUERY: &str = "SELECT rv.repo_path, rv.base_sha, rv.target_key, \
+     rv.target_kind, s.agent_name \
+     FROM submissions s JOIN reviews rv ON rv.id = s.review_id \
+     GROUP BY rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind, s.agent_name";
 
 // Every identity's last activity, one winner per source (comment,
 // submission, request); the queue pass picks the newest of what an
@@ -1292,6 +1350,10 @@ struct IdentityActivity {
 }
 
 type ActivityMap = std::collections::HashMap<IdentityKey, IdentityActivity>;
+
+// Distinct submission authors keyed by identity: the named-reviewer rows'
+// delivered-count lookup.
+type SubmissionAuthors = std::collections::HashMap<IdentityKey, std::collections::HashSet<String>>;
 
 fn activity_rank(kind: &str) -> i8 {
     match kind {
@@ -1368,6 +1430,27 @@ fn identity_of(request: &RequestTriage) -> IdentityKey {
     )
 }
 
+// Named-reviewer progress for a row, display-only: expected is the stored
+// reviewer list's length, delivered the names with at least one submission
+// on the identity. Unnamed requests carry zero on both and the webview
+// renders nothing.
+fn named_reviews_back(request: &RequestTriage, authors: &SubmissionAuthors) -> (i64, i64) {
+    if request.reviewers.is_empty() {
+        return (0, 0);
+    }
+    let delivered = authors
+        .get(&identity_of(request))
+        .map(|names| {
+            request
+                .reviewers
+                .iter()
+                .filter(|name| names.contains(*name))
+                .count()
+        })
+        .unwrap_or(0);
+    (request.reviewers.len() as i64, delivered as i64)
+}
+
 fn is_open(status: &str) -> bool {
     matches!(status, REQUESTED | IN_REVIEW | CHANGES_REQUESTED)
 }
@@ -1436,12 +1519,15 @@ fn request_row(
     request: &RequestTriage,
     recorded: Option<&crate::retrospection::SurfaceHead>,
     category: &str,
+    needs_human: bool,
+    authors: &SubmissionAuthors,
     activity: &ActivityMap,
 ) -> AttentionRow {
     let found = activity
         .get(&identity_of(request))
         .cloned()
         .unwrap_or_default();
+    let (reviews_expected, reviews_delivered) = named_reviews_back(request, authors);
     AttentionRow {
         request_id: Some(request.id),
         repo_path: request.repo_path.clone(),
@@ -1456,7 +1542,10 @@ fn request_row(
         unresolved_p0: request.unresolved_p0,
         unresolved_p1: request.unresolved_p1,
         category: category.to_string(),
-        needs_human: category == CATEGORY_NEEDS_HUMAN,
+        needs_human,
+        stale: recorded.is_some_and(|head| head_moved(head, request)),
+        reviews_expected,
+        reviews_delivered,
         // A requested row ages from its creation; everything else ages
         // from its last move.
         age_basis: if request.status == REQUESTED {
@@ -1485,12 +1574,13 @@ fn sort_rows(rows: &mut Vec<AttentionRow>) {
 }
 
 // The cross-repo attention queue: one read-only store pass with no Git on
-// the path. Open requests produce one row each; identities whose requests
-// all settled (or that never had one) surface their late findings, a
-// recorded retrospection head differing from a request's head reads as
-// changed since review, and request-less identities whose newest comment
-// postdates the seen watermark queue as recent comments. Categories are
-// first-match in that order. Rows reflect the last retrospection pass.
+// the path. Open requests produce one row each in exactly one bucket
+// (waiting on you, or in flight); identities whose requests all settled
+// (or that never had one) surface late findings as waiting on you, a moved
+// approved baseline queues as recent, and request-less identities whose
+// newest comment postdates the seen watermark queue as recent too. Bucket
+// placement is first-match in that order; a moved head only ever badges
+// its row stale. Rows reflect the last retrospection pass.
 pub(crate) async fn list_attention_in_pool(
     pool: &SqlitePool,
 ) -> Result<AttentionQueue, CommandError> {
@@ -1505,6 +1595,8 @@ pub(crate) async fn list_attention_in_pool(
             requester: row
                 .try_get::<Option<String>, _>("requester_name")?
                 .unwrap_or_else(|| "human".to_string()),
+            requester_token_id: row.try_get("requester_token_id")?,
+            reviewers: stored_reviewers(row.try_get("reviewers")?)?,
             status: row.try_get("status")?,
             round: row.try_get("round")?,
             max_rounds: row.try_get("max_rounds")?,
@@ -1518,6 +1610,22 @@ pub(crate) async fn list_attention_in_pool(
     let heads = crate::retrospection::recorded_surface_heads_in_pool(pool).await?;
     let activity = identity_activity_in_pool(pool).await?;
     let watermark_at = activity_watermark_time(pool).await?;
+    let mut authors: SubmissionAuthors = SubmissionAuthors::new();
+    for row in sqlx::query(ATTENTION_SUBMISSION_AUTHORS_QUERY)
+        .fetch_all(pool)
+        .await?
+    {
+        let key: IdentityKey = (
+            row.try_get("repo_path")?,
+            row.try_get("base_sha")?,
+            row.try_get("target_key")?,
+            row.try_get("target_kind")?,
+        );
+        authors
+            .entry(key)
+            .or_default()
+            .insert(row.try_get("agent_name")?);
+    }
 
     let mut rows_by_repo: std::collections::BTreeMap<String, Vec<AttentionRow>> =
         std::collections::BTreeMap::new();
@@ -1529,29 +1637,29 @@ pub(crate) async fn list_attention_in_pool(
         }
         open_identities.insert(identity_of(request));
         let recorded = recorded_head(&heads, request);
-        let category = open_request_category(
+        let (category, needs_human) = open_request_bucket(
             &request.status,
+            request.requester_token_id,
             request.round,
             request.max_rounds,
             request.unresolved_p0,
             request.unresolved_p1,
-        )
-        .or_else(|| {
-            recorded
-                .is_some_and(|head| head_moved(head, request))
-                .then_some(CATEGORY_CHANGED_SINCE_REVIEW)
-        });
-        if let Some(category) = category {
-            rows_by_repo
-                .entry(request.repo_path.clone())
-                .or_default()
-                .push(request_row(request, recorded, category, &activity));
-        }
+        );
+        rows_by_repo
+            .entry(request.repo_path.clone())
+            .or_default()
+            .push(request_row(
+                request,
+                recorded,
+                category,
+                needs_human,
+                &authors,
+                &activity,
+            ));
     }
 
-    // Settled identities group on their latest request: findings come from
-    // the identity's counts, the changed baseline from the newest approved
-    // request's head.
+    // Settled identities group on their latest request: findings wait on
+    // the human, the moved approved baseline queues as recent.
     let mut by_identity: std::collections::BTreeMap<IdentityKey, Vec<&RequestTriage>> =
         std::collections::BTreeMap::new();
     for request in &requests {
@@ -1572,18 +1680,20 @@ pub(crate) async fn list_attention_in_pool(
             .and_then(|approved| recorded_head(&heads, approved))
             .filter(|head| latest_approved.is_some_and(|approved| head_moved(head, approved)))
             .map(|head| head.last_seen_at);
-        let (category, moved_at) = if blocking > 0 {
-            (CATEGORY_UNRESOLVED_FINDINGS, None)
-        } else if let Some(moved_at) = moved_at {
-            (CATEGORY_CHANGED_SINCE_REVIEW, Some(moved_at))
+        let category = if blocking > 0 {
+            CATEGORY_WAITING_ON_YOU
+        } else if moved_at.is_some() {
+            CATEGORY_RECENT
         } else {
             continue;
         };
-        let mut row = request_row(latest, recorded, category, &activity);
+        let mut row = request_row(latest, recorded, category, false, &authors, &activity);
         // A moved surface ages from when the retrospection pass recorded
-        // the new head, not from the request's last move.
+        // the new head, not from the request's last move, and the move is
+        // the bucket premise, so the row carries the stale badge.
         if let Some(moved_at) = moved_at {
             row.age_basis = moved_at;
+            row.stale = true;
         }
         rows_by_repo
             .entry(latest.repo_path.clone())
@@ -1611,6 +1721,8 @@ pub(crate) async fn list_attention_in_pool(
             target_key: target_key.clone(),
             target_kind: target_kind.clone(),
             requester: String::new(),
+            requester_token_id: None,
+            reviewers: Vec::new(),
             status: String::new(),
             round: 0,
             max_rounds: 0,
@@ -1639,8 +1751,11 @@ pub(crate) async fn list_attention_in_pool(
             max_rounds: 0,
             unresolved_p0: probe.unresolved_p0,
             unresolved_p1: probe.unresolved_p1,
-            category: CATEGORY_UNRESOLVED_FINDINGS.to_string(),
+            category: CATEGORY_WAITING_ON_YOU.to_string(),
             needs_human: false,
+            stale: false,
+            reviews_expected: 0,
+            reviews_delivered: 0,
             age_basis: row.try_get("last_finding_at")?,
             head_sha: recorded.map(|head| head.head_sha.clone()),
             last_activity_at: found.last_activity_at,
@@ -1651,7 +1766,7 @@ pub(crate) async fn list_attention_in_pool(
     }
 
     // Request-less identities whose newest comment postdates the seen
-    // watermark join the queue as recent_comments: any severity, discussion
+    // watermark join the queue as recent: any severity, discussion
     // included, drained for good once Mark all seen passes them (the queue
     // stays a queue; settled work moves on, never back in).
     for row in sqlx::query(ATTENTION_RECENT_COMMENTS_QUERY)
@@ -1678,6 +1793,8 @@ pub(crate) async fn list_attention_in_pool(
             target_key: target_key.clone(),
             target_kind: target_kind.clone(),
             requester: String::new(),
+            requester_token_id: None,
+            reviewers: Vec::new(),
             status: String::new(),
             round: 0,
             max_rounds: 0,
@@ -1702,8 +1819,11 @@ pub(crate) async fn list_attention_in_pool(
             max_rounds: 0,
             unresolved_p0: 0,
             unresolved_p1: 0,
-            category: CATEGORY_RECENT_COMMENTS.to_string(),
+            category: CATEGORY_RECENT.to_string(),
             needs_human: false,
+            stale: false,
+            reviews_expected: 0,
+            reviews_delivered: 0,
             age_basis: last_comment_at,
             head_sha: recorded.map(|head| head.head_sha.clone()),
             last_activity_at: found.last_activity_at,
@@ -2936,41 +3056,46 @@ mod tests {
     }
 
     #[test]
-    fn open_request_category_follows_the_priority_rules() {
-        let category = |status: &str, round: i64, max: i64, p0: i64, p1: i64| {
-            open_request_category(status, round, max, p0, p1)
+    fn open_request_bucket_places_every_row_type() {
+        let bucket = |status: &str, agent_asked: bool, round: i64, max: i64, p0: i64, p1: i64| {
+            open_request_bucket(status, agent_asked.then_some(1), round, max, p0, p1)
         };
-        assert_eq!(category(REQUESTED, 0, 2, 0, 0), Some(CATEGORY_REQUESTED));
-        // A P0 on a requested or in-review request needs a human.
-        assert_eq!(category(REQUESTED, 0, 2, 1, 0), Some(CATEGORY_NEEDS_HUMAN));
-        assert_eq!(category(IN_REVIEW, 1, 2, 2, 0), Some(CATEGORY_NEEDS_HUMAN));
+        // A requested row splits on the requester token id: an agent's open
+        // pickup waits on you, the human's own solicitation is in flight.
+        assert_eq!(bucket(REQUESTED, true, 0, 2, 0, 0), (CATEGORY_WAITING_ON_YOU, false));
+        assert_eq!(bucket(REQUESTED, false, 0, 2, 0, 0), (CATEGORY_IN_FLIGHT, false));
+        // A P0 on a requested or in-review request escalates to needs-human.
+        assert_eq!(bucket(REQUESTED, true, 0, 2, 1, 0), (CATEGORY_WAITING_ON_YOU, true));
+        assert_eq!(bucket(IN_REVIEW, true, 1, 2, 2, 0), (CATEGORY_WAITING_ON_YOU, true));
         // Exhausted rounds need a human even with no findings.
         assert_eq!(
-            category(CHANGES_REQUESTED, 2, 2, 0, 0),
-            Some(CATEGORY_NEEDS_HUMAN)
+            bucket(CHANGES_REQUESTED, true, 2, 2, 0, 0),
+            (CATEGORY_WAITING_ON_YOU, true)
         );
         assert_eq!(
-            category(CHANGES_REQUESTED, 3, 2, 0, 0),
-            Some(CATEGORY_NEEDS_HUMAN)
+            bucket(CHANGES_REQUESTED, true, 3, 2, 0, 0),
+            (CATEGORY_WAITING_ON_YOU, true)
         );
-        // In-budget changes_requested stays in its lifecycle category.
+        // In-budget changes_requested waits on the requester's fixes.
         assert_eq!(
-            category(CHANGES_REQUESTED, 1, 2, 0, 0),
-            Some(CATEGORY_CHANGES_REQUESTED)
+            bucket(CHANGES_REQUESTED, true, 1, 2, 0, 0),
+            (CATEGORY_WAITING_ON_YOU, false)
         );
         assert_eq!(
-            category(CHANGES_REQUESTED, 0, 2, 0, 5),
-            Some(CATEGORY_CHANGES_REQUESTED)
+            bucket(CHANGES_REQUESTED, true, 0, 2, 0, 5),
+            (CATEGORY_WAITING_ON_YOU, false)
         );
-        // An in-review request queues only when P1 findings sit on it.
-        assert_eq!(category(IN_REVIEW, 1, 2, 0, 0), None);
+        // An in-review request with unresolved P1 findings waits on triage;
+        // a clean claimed one is in flight (the old invisible row).
         assert_eq!(
-            category(IN_REVIEW, 1, 2, 0, 3),
-            Some(CATEGORY_UNRESOLVED_FINDINGS)
+            bucket(IN_REVIEW, true, 1, 2, 0, 3),
+            (CATEGORY_WAITING_ON_YOU, false)
         );
-        // Settled requests never queue through this predicate.
-        assert_eq!(category(APPROVED, 0, 2, 9, 9), None);
-        assert_eq!(category(WITHDRAWN, 0, 2, 9, 9), None);
+        assert_eq!(bucket(IN_REVIEW, true, 1, 2, 0, 0), (CATEGORY_IN_FLIGHT, false));
+        // Settled requests never queue through this predicate: the queue's
+        // is_open gate routes them to the settled passes instead.
+        assert!(!is_open(APPROVED));
+        assert!(!is_open(WITHDRAWN));
     }
 
     async fn create_on(pool: &SqlitePool, actor: &Actor, base: &str, head: &str) -> ReviewRequest {
@@ -3032,26 +3157,63 @@ mod tests {
             .unwrap_or_else(|| panic!("no queue row for {base}"))
     }
 
+    // One delivered submission under the given agent name on the module's
+    // fixed identity, so named-reviewer counts have something to count.
+    async fn seed_submission(pool: &SqlitePool, base: &str, agent_name: &str) {
+        sqlx::query(
+            "INSERT OR IGNORE INTO reviews (repo_path, base_sha, target_key, target_kind, created_at) \
+             VALUES (?, ?, ?, ?, 1)",
+        )
+        .bind(REPO)
+        .bind(base)
+        .bind(KEY)
+        .bind(KIND)
+        .execute(pool)
+        .await
+        .unwrap();
+        let review_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM reviews WHERE repo_path = ? AND base_sha = ? \
+             AND target_key = ? AND target_kind = ?",
+        )
+        .bind(REPO)
+        .bind(base)
+        .bind(KEY)
+        .bind(KIND)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO submissions (review_id, agent_name, agent_model, sections_json, created_at) \
+             VALUES (?, ?, '', '[]', 1)",
+        )
+        .bind(review_id)
+        .bind(agent_name)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn attention_queue_assembles_categories_from_the_store_only() {
         let pool = test_pool().await;
         seed_repo(&pool, REPO).await;
         seed_repo(&pool, "/other").await;
         let reviewer = agent_token(&pool, "reviewer-bot").await;
+        let second = agent_token(&pool, "second-bot").await;
 
-        // Requested with a P1: stays in the requested category (only a P0
-        // escalates), and its age basis is its creation.
+        // Requested by an agent with a P1: an open pickup waits on you (only
+        // a P0 escalates to needs-human), and its age basis is its creation.
         let coder_a = agent_token(&pool, "coder-a").await;
         create_on(&pool, &Actor::Agent(coder_a), "base-a", "head-a").await;
         seed_finding(&pool, "base-a", "P1", false).await;
 
-        // In-budget changes_requested.
+        // In-budget changes_requested: waiting on the requester's fixes.
         let coder_b = agent_token(&pool, "coder-b").await;
         create_on(&pool, &Actor::Agent(coder_b), "base-b", "head-b").await;
         observe_on(&pool, "base-b", true).await;
 
-        // Exhausted round budget: changes_requested at the cap is the
-        // needs-human predicate, flagged on the row.
+        // Exhausted round budget: the needs-human predicate, flagged on the
+        // row inside the waiting-on-you bucket.
         let coder_c = agent_token(&pool, "coder-c").await;
         let mut tight = draft("head-c");
         tight.max_rounds = Some(1);
@@ -3075,10 +3237,10 @@ mod tests {
         // Findings on an identity that never had a request.
         seed_finding(&pool, "base-e", "P1", false).await;
 
-        // An in-review request whose recorded surface head moved: changed
-        // since review, derived from the retrospection store alone. Each
-        // scenario records under its own worktree path, matching the
-        // store's per-surface identity.
+        // A claimed in-review request whose recorded surface head moved:
+        // the row stays in flight and carries the stale badge, derived from
+        // the retrospection store alone. Each scenario records under its
+        // own worktree path, matching the store's per-surface identity.
         let coder_f = agent_token(&pool, "coder-f").await;
         let moved = create_request_in_pool(
             &pool, REPO, "base-f", "/wt-f", KIND, &draft("head-f"), &Actor::Agent(coder_f),
@@ -3092,7 +3254,8 @@ mod tests {
         )
         .await;
 
-        // An approved request whose surface head moved afterwards.
+        // An approved request whose surface head moved afterwards: the
+        // moved approved baseline queues as recent, carrying the badge.
         let coder_h = agent_token(&pool, "coder-h").await;
         let approved_moved = create_request_in_pool(
             &pool, REPO, "base-h", "/wt-h", KIND, &draft("head-h"), &Actor::Agent(coder_h),
@@ -3106,6 +3269,18 @@ mod tests {
             &pool, REPO, "worktree", "/wt-h", "feature-h", "/wt-h", "moved-h",
         )
         .await;
+
+        // A requested row naming two reviewers, one of whom has delivered a
+        // submission on the identity: the display-only reviews-back count.
+        let coder_j = agent_token(&pool, "coder-j").await;
+        let mut named = draft("head-j");
+        named.reviewers = vec!["reviewer-bot".into(), "second-bot".into()];
+        create_request_in_pool(
+            &pool, REPO, "base-j", KEY, KIND, &named, &Actor::Agent(coder_j), &noop_notify(),
+        )
+        .await
+        .unwrap();
+        seed_submission(&pool, "base-j", "reviewer-bot").await;
 
         // Concurrent requests on one identity: two rows, one shared label.
         let coder_g1 = agent_token(&pool, "coder-g1").await;
@@ -3133,11 +3308,11 @@ mod tests {
         assert_eq!(demo.repo_name, "test");
         let other = queue.repos.iter().find(|group| group.repo_path == "/other").unwrap();
         assert_eq!(other.rows.len(), 1);
-        assert_eq!(other.rows[0].category, CATEGORY_REQUESTED);
+        assert_eq!(other.rows[0].category, CATEGORY_WAITING_ON_YOU);
         assert_eq!(other.rows[0].change_label, "other-wt");
 
         let requested = row_of(&queue, "base-a");
-        assert_eq!(requested.category, CATEGORY_REQUESTED);
+        assert_eq!(requested.category, CATEGORY_WAITING_ON_YOU);
         assert!(!requested.needs_human);
         assert_eq!(requested.unresolved_p1, 1);
         assert_eq!(requested.unresolved_p0, 0);
@@ -3151,20 +3326,25 @@ mod tests {
         assert_eq!(requested.round, 0);
         assert_eq!(requested.max_rounds, 2);
         assert_eq!(requested.change_label, "demo");
+        assert!(!requested.stale);
+        assert_eq!(requested.reviews_expected, 0);
+        assert_eq!(requested.reviews_delivered, 0);
 
         let changed = row_of(&queue, "base-b");
-        assert_eq!(changed.category, CATEGORY_CHANGES_REQUESTED);
+        assert_eq!(changed.category, CATEGORY_WAITING_ON_YOU);
+        assert!(!changed.needs_human);
         assert_eq!(changed.round, 0);
         assert_eq!(changed.status, CHANGES_REQUESTED);
 
         let needs_human = row_of(&queue, "base-c");
-        assert_eq!(needs_human.category, CATEGORY_NEEDS_HUMAN);
+        assert_eq!(needs_human.category, CATEGORY_WAITING_ON_YOU);
         assert!(needs_human.needs_human);
         assert_eq!(needs_human.round, 1);
         assert_eq!(needs_human.max_rounds, 1);
 
         let findings = row_of(&queue, "base-d");
-        assert_eq!(findings.category, CATEGORY_UNRESOLVED_FINDINGS);
+        assert_eq!(findings.category, CATEGORY_WAITING_ON_YOU);
+        assert!(!findings.needs_human);
         assert_eq!(findings.status, APPROVED);
         assert_eq!(findings.request_id, Some(approved.id));
         assert_eq!(findings.unresolved_p0, 1);
@@ -3172,22 +3352,29 @@ mod tests {
         assert_eq!(demo.rows[0].base_sha, "base-d");
 
         let free = row_of(&queue, "base-e");
-        assert_eq!(free.category, CATEGORY_UNRESOLVED_FINDINGS);
+        assert_eq!(free.category, CATEGORY_WAITING_ON_YOU);
         assert_eq!(free.request_id, None);
         assert_eq!(free.status, "");
         assert_eq!(free.requester, "");
         assert_eq!(free.unresolved_p1, 1);
 
-        let changed_since = row_of(&queue, "base-f");
-        assert_eq!(changed_since.category, CATEGORY_CHANGED_SINCE_REVIEW);
-        assert_eq!(changed_since.status, IN_REVIEW);
-        assert_eq!(changed_since.head_sha.as_deref(), Some("moved-head"));
-        assert_eq!(changed_since.change_label, "feature-f");
+        let moved_row = row_of(&queue, "base-f");
+        assert_eq!(moved_row.category, CATEGORY_IN_FLIGHT);
+        assert_eq!(moved_row.status, IN_REVIEW);
+        assert!(moved_row.stale, "the moved surface badges the row stale");
+        assert_eq!(moved_row.head_sha.as_deref(), Some("moved-head"));
+        assert_eq!(moved_row.change_label, "feature-f");
 
         let approved_changed = row_of(&queue, "base-h");
-        assert_eq!(approved_changed.category, CATEGORY_CHANGED_SINCE_REVIEW);
+        assert_eq!(approved_changed.category, CATEGORY_RECENT);
         assert_eq!(approved_changed.status, APPROVED);
+        assert!(approved_changed.stale);
         assert_eq!(approved_changed.head_sha.as_deref(), Some("moved-h"));
+
+        let named_row = row_of(&queue, "base-j");
+        assert_eq!(named_row.category, CATEGORY_WAITING_ON_YOU);
+        assert_eq!(named_row.reviews_expected, 2);
+        assert_eq!(named_row.reviews_delivered, 1);
 
         // Concurrent requests share the identity and the change label.
         let concurrent: Vec<&AttentionRow> = demo
@@ -3227,7 +3414,7 @@ mod tests {
         let rows = &queue.repos[0].rows;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].request_id, Some(requested.id));
-        assert_eq!(rows[0].category, CATEGORY_REQUESTED);
+        assert_eq!(rows[0].category, CATEGORY_WAITING_ON_YOU);
         assert_eq!(rows[0].unresolved_p0, 0);
     }
 
@@ -3364,7 +3551,7 @@ mod tests {
         seed_discussion(&pool, "base-c1", now - 60_000, "codex").await;
         let queue = list_attention_in_pool(&pool).await.unwrap();
         let row = row_of(&queue, "base-c1");
-        assert_eq!(row.category, CATEGORY_RECENT_COMMENTS);
+        assert_eq!(row.category, CATEGORY_RECENT);
         assert_eq!(row.request_id, None);
         assert_eq!(row.age_basis, now - 60_000);
         assert_eq!(row.last_activity_kind, "comment");
@@ -3386,7 +3573,7 @@ mod tests {
         seed_discussion(&pool, "base-c1", now + 60_000, "codex").await;
         let queue = list_attention_in_pool(&pool).await.unwrap();
         let row = row_of(&queue, "base-c1");
-        assert_eq!(row.category, CATEGORY_RECENT_COMMENTS);
+        assert_eq!(row.category, CATEGORY_RECENT);
         assert_eq!(row.last_activity_at, now + 60_000);
     }
 
@@ -3396,12 +3583,12 @@ mod tests {
         seed_repo(&pool, REPO).await;
 
         // A request-less identity with blocking findings and fresh
-        // discussion: first-match keeps it in unresolved_findings.
+        // discussion: first-match keeps it waiting on you.
         seed_finding(&pool, "base-f", "P0", false).await;
         seed_discussion(&pool, "base-f", crate::store::now_millis() + 5_000, "codex").await;
         let queue = list_attention_in_pool(&pool).await.unwrap();
         let free = row_of(&queue, "base-f");
-        assert_eq!(free.category, CATEGORY_UNRESOLVED_FINDINGS);
+        assert_eq!(free.category, CATEGORY_WAITING_ON_YOU);
         assert_eq!(free.open_thread_count, 2, "the P0 root plus the discussion root");
 
         // An open request's preview rides the request mutation itself.
@@ -3409,7 +3596,7 @@ mod tests {
         let request = create_on(&pool, &Actor::Agent(coder), "base-p", "head-p").await;
         let queue = list_attention_in_pool(&pool).await.unwrap();
         let open = row_of(&queue, "base-p");
-        assert_eq!(open.category, CATEGORY_REQUESTED);
+        assert_eq!(open.category, CATEGORY_WAITING_ON_YOU);
         assert_eq!(open.last_activity_kind, "request");
         assert_eq!(open.last_activity_actor, "coder-bot");
         assert_eq!(open.last_activity_at, get(&pool, request.id).await.updated_at);

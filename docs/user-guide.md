@@ -204,28 +204,32 @@ every project's review activity lands in one inbox, newest signal first.
 Opening Pulse lands on the Inbox tab of one shared page: a heading and a
 tab strip (Inbox, Threads, Reviews, Activity) sit above all four views,
 each tab carrying a live count of its content. The inbox itself splits
-into categories, each with its own tab and count:
+into three buckets, each with its own tab and count:
 
-- **Review requested**: a review was asked for (by you or an agent) and
-  no one has picked it up yet.
-- **Changes requested**: a reviewer sent the work back; the requester
-  owes fixes. The round column shows the current round of the budget
-  (`n/max`), not cycles remaining.
-- **Needs human**: the round budget ran out with changes still
-  requested, or a P0 finding sits unresolved on a requested or in-review
-  review. This is the inbox's one alarm color.
-- **Unresolved findings**: an in-review request carries unresolved P1
-  comments, or settled work and request-less surfaces carry unresolved
-  P0 or P1, so late findings on approved work stay visible. (A P1 on a
-  requested or changes-requested review shows under those categories
-  instead; categories are first-match.)
-- **Changed since review**: the surface's head moved after the review
-  recorded it, so the review is stale.
-- **Recent comments**: request-less surfaces (no review request was ever
-  filed) whose newest comment is newer than your last visit, at any
-  severity, discussion included. Mark all seen drains the category; the
-  queue stays a queue, so settled work moves to Reviews and Activity and
-  never re-enters the Inbox.
+- **Waiting on you**: everything that needs a human decision or pair of
+  eyes. An open review pickup asked for by an agent, a reviewer's
+  changes-requested verdict awaiting your fixes, an in-review request
+  carrying unresolved P1 findings to triage, settled work or request-less
+  surfaces with unresolved P0 or P1 findings, and anything escalated to
+  needs human: the round budget ran out with changes still requested, or
+  a P0 finding sits unresolved on a requested or in-review review (the
+  inbox's one alarm color).
+- **In flight**: reviews under way with nothing blocked, including
+  claimed in-review requests, announced reviews waiting on their
+  reviewer, and your own review solicitations no one has picked up yet.
+- **Recent**: work worth another look that is not blocked on anyone: a
+  settled review whose approved surface has moved since (the row carries
+  a **stale** badge), and request-less surfaces (no review request was
+  ever filed) whose newest comment is newer than your last visit, at any
+  severity, discussion included. Mark all seen drains the comment half;
+  the queue stays a queue, so settled work moves to Reviews and Activity
+  and never re-enters the Inbox.
+
+Buckets are first-match, so a row appears exactly once: escalated or
+blocked work always reads as waiting on you, and a moved surface only
+badges its row stale instead of moving it. Rows naming reviewers carry a
+progress sentence ("1 of 2 reviews back"), counting how many of the
+named reviewers have delivered a submission.
 
 ![The Pulse inbox with a changes-requested review](images/guide-attention.webp)
 
@@ -238,19 +242,21 @@ Clicking a row opens the underlying review at the base the review
 recorded, so its requests and conversation are on the page even after
 branches have moved on. The live worktree is reviewed when it still
 exists; a deleted worktree opens by its recorded head instead, and a
-moved or removed project degrades to its stored state. Within a category,
+moved or removed project degrades to its stored state. Within a bucket,
 rows sort by P0 count and then age, and background updates never reorder
 the rows while you read; concurrent requests on the same change carry
-the same labelled row so the duplication reads as intentional. The inbox
-is store-backed: it renders instantly from what the app already knows,
-and Git-derived details fill in as the app's passes observe them. When
-the agent endpoint is off, the inbox still renders with a note that
+the same labelled row so the duplication reads as intentional. When a
+submission lands for the review you have open, its comment stream and
+reviews strip refresh on the spot; you never navigate away and back. The
+inbox is store-backed: it renders instantly from what the app already
+knows, and Git-derived details fill in as the app's passes observe them.
+When the agent endpoint is off, the inbox still renders with a note that
 agents cannot reach it.
 
 Pulse is one of the app's routed surfaces: the slim bar above the
 content shows back and forward buttons, the current route
 (`pulse/inbox`, `pulse/reviews`, `pulse/threads`, `pulse/activity`, `pulse/thread/<id>`, `projects/<name>`, or `settings`), and a
-search trigger, so browsing between projects, inbox categories, and
+search trigger, so browsing between projects, inbox buckets, and
 settings traverses history; Alt + ArrowLeft and Alt + ArrowRight do the
 same from the keyboard, on review surfaces too.
 
@@ -274,8 +280,8 @@ Open, Settled, Stale, No request) narrow by state with live counts:
   or changes requested).
 - **Settled**: the latest request was approved or withdrawn.
 - **Stale**: the surface's head has moved past the head the review
-  recorded, the same changed-since-review signal the inbox uses, so
-  settled work that drifted since stays visible.
+  recorded, the same signal the inbox shows as a row's **stale** badge,
+  so settled work that drifted since stays visible.
 - **No request**: comments or submissions exist on the surface but no
   review request was ever filed.
 
@@ -343,8 +349,8 @@ The project select narrows the feed to one repository.
 A **New since your last visit** divider marks everything that landed
 after your last mark. Its position is captured when the feed loads and
 does not drift while you read. **Mark all seen** advances that marker to
-the newest event: the divider clears, and the inbox's Recent comments
-category drains with it. Everything stays local; the feed reads the
+the newest event: the divider clears, and the inbox's Recent bucket
+drains with it. Everything stays local; the feed reads the
 app's own event log and never talks to the network.
 
 ## Keep projects current

@@ -13,6 +13,7 @@ import {
   groupedChangeLabel,
   isNarrowAttention,
   requestStatusLabel,
+  reviewsBackLabel,
   rowsForAttentionTab,
   sortAttentionRows,
   validateRequestForm,
@@ -40,6 +41,9 @@ function row(overrides: Partial<AttentionRow> & { category: AttentionCategory })
     unresolved_p0: 0,
     unresolved_p1: 0,
     needs_human: false,
+    stale: false,
+    reviews_expected: 0,
+    reviews_delivered: 0,
     age_basis: 1000,
     head_sha: null,
     last_activity_at: 1000,
@@ -56,51 +60,43 @@ const queue: AttentionQueue = {
       repo_path: "/demo",
       repo_name: "demo",
       rows: [
-        row({ category: "requested" }),
-        row({ category: "requested", target_key: "/demo", base_sha: "base" }),
-        row({ category: "changes_requested" }),
-        row({ category: "needs_human" }),
-        row({ category: "unresolved_findings", repo_path: "/other" }),
+        row({ category: "waiting_on_you" }),
+        row({ category: "waiting_on_you", target_key: "/demo", base_sha: "base" }),
+        row({ category: "in_flight", status: "in_review", requester: "" }),
       ],
     },
-    { repo_path: "/other", repo_name: "other", rows: [row({ category: "changed_since_review" })] },
+    { repo_path: "/other", repo_name: "other", rows: [row({ category: "recent", repo_path: "/other", status: "approved" }), row({ category: "waiting_on_you", repo_path: "/other", status: "" })] },
   ],
 };
 
-test("tab counts aggregate rows per category across repos", () => {
+test("tab counts aggregate rows per bucket across repos", () => {
   const rows = attentionRows(queue);
-  assert.equal(rows.length, 6);
+  assert.equal(rows.length, 5);
   assert.deepEqual(attentionTabCounts(rows), {
-    requested: 2,
-    changes_requested: 1,
-    needs_human: 1,
-    unresolved_findings: 1,
-    changed_since_review: 1,
-    recent_comments: 0,
+    waiting_on_you: 3,
+    in_flight: 1,
+    recent: 1,
   });
   assert.deepEqual(attentionTabCounts(attentionRows(null)), {
-    requested: 0,
-    changes_requested: 0,
-    needs_human: 0,
-    unresolved_findings: 0,
-    changed_since_review: 0,
-    recent_comments: 0,
+    waiting_on_you: 0,
+    in_flight: 0,
+    recent: 0,
   });
 });
 
-test("the active tab filters rows by category", () => {
+test("the active tab filters rows by bucket", () => {
   const rows = attentionRows(queue);
-  assert.equal(rowsForAttentionTab(rows, "requested").length, 2);
-  assert.equal(rowsForAttentionTab(rows, "needs_human").length, 1);
-  assert.equal(rowsForAttentionTab(rows, "unresolved_findings")[0].repo_path, "/other");
+  assert.equal(rowsForAttentionTab(rows, "waiting_on_you").length, 3);
+  assert.equal(rowsForAttentionTab(rows, "in_flight").length, 1);
+  assert.equal(rowsForAttentionTab(rows, "recent")[0].repo_path, "/other");
   assert.ok(ATTENTION_TABS.every((tab) => rowsForAttentionTab(rows, tab.id).every((matched) => matched.category === tab.id)));
 });
 
 test("ordering is stable across refreshes and re-sorts when severity changes", () => {
   const base = [
-    row({ category: "requested", unresolved_p0: 1, age_basis: 2000, request_id: 3 }),
-    row({ category: "requested", unresolved_p0: 0, age_basis: 1000, request_id: 1 }),
-    row({ category: "requested", unresolved_p0: 0, age_basis: 5000, request_id: 2 }),
+    row({ category: "waiting_on_you", unresolved_p0: 1, age_basis: 2000, request_id: 3 }),
+    row({ category: "waiting_on_you", unresolved_p0: 0, age_basis: 1000, request_id: 1 }),
+    row({ category: "waiting_on_you", unresolved_p0: 0, age_basis: 5000, request_id: 2 }),
   ];
   const shuffled = [base[2], base[1], base[0]];
   const first = sortAttentionRows(shuffled);
@@ -114,17 +110,17 @@ test("ordering is stable across refreshes and re-sorts when severity changes", (
   assert.deepEqual(escalated.map((row) => row.request_id), [1, 3, 2]);
   // Equal keys fall back to the request id, never input order.
   const tied = sortAttentionRows([
-    row({ category: "requested", request_id: 8, age_basis: 1000 }),
-    row({ category: "requested", request_id: 7, age_basis: 1000 }),
+    row({ category: "waiting_on_you", request_id: 8, age_basis: 1000 }),
+    row({ category: "waiting_on_you", request_id: 7, age_basis: 1000 }),
   ]);
   assert.deepEqual(tied.map((row) => row.request_id), [7, 8]);
 });
 
 test("concurrent requests on one identity share a labelled change", () => {
   const concurrent = [
-    row({ category: "requested", change_label: "feature" }),
-    row({ category: "requested", change_label: "feature" }),
-    row({ category: "changes_requested", change_label: "other", base_sha: "base-2", target_key: "/two" }),
+    row({ category: "waiting_on_you", change_label: "feature" }),
+    row({ category: "waiting_on_you", change_label: "feature" }),
+    row({ category: "in_flight", change_label: "other", base_sha: "base-2", target_key: "/two" }),
   ];
   assert.equal(groupedChangeLabel(concurrent[0], concurrent), "feature (2 requests)");
   assert.equal(groupedChangeLabel(concurrent[1], concurrent), "feature (2 requests)");
@@ -148,36 +144,43 @@ test("ages render compactly and never go negative", () => {
 });
 
 test("status chips read needs-human first and skip request-less rows", () => {
-  assert.deepEqual(attentionStatus(row({ category: "needs_human", needs_human: true, status: "changes_requested" })), { label: "needs human", tone: "needs-human" });
-  assert.deepEqual(attentionStatus(row({ category: "requested", status: "requested" })), { label: "requested", tone: "status" });
-  assert.deepEqual(attentionStatus(row({ category: "changes_requested", status: "changes_requested" })), { label: "changes requested", tone: "status" });
-  assert.equal(attentionStatus(row({ category: "unresolved_findings", status: "" })), null);
+  assert.deepEqual(attentionStatus(row({ category: "waiting_on_you", needs_human: true, status: "changes_requested" })), { label: "needs human", tone: "needs-human" });
+  assert.deepEqual(attentionStatus(row({ category: "waiting_on_you", status: "requested" })), { label: "requested", tone: "status" });
+  assert.deepEqual(attentionStatus(row({ category: "waiting_on_you", status: "changes_requested" })), { label: "changes requested", tone: "status" });
+  assert.equal(attentionStatus(row({ category: "recent", status: "" })), null);
+});
+
+test("row metadata renders the stale badge and named-reviewer progress", () => {
+  assert.equal(reviewsBackLabel(row({ category: "waiting_on_you" })), null, "unnamed reviewers render nothing");
+  assert.equal(reviewsBackLabel(row({ category: "waiting_on_you", reviews_expected: 2, reviews_delivered: 0 })), "0 of 2 reviews back");
+  assert.equal(reviewsBackLabel(row({ category: "waiting_on_you", reviews_expected: 2, reviews_delivered: 1 })), "1 of 2 reviews back");
+  assert.equal(reviewsBackLabel(row({ category: "waiting_on_you", reviews_expected: 1, reviews_delivered: 1 })), "1 of 1 reviews back");
 });
 
 test("preview lines narrate the backend's last-activity facts", () => {
   const now = 10_000_000;
   assert.equal(
-    attentionPreview(row({ category: "recent_comments", last_activity_kind: "comment", last_activity_actor: "codex", last_activity_at: now - 12 * 60_000, open_thread_count: 3 }), now),
+    attentionPreview(row({ category: "recent", last_activity_kind: "comment", last_activity_actor: "codex", last_activity_at: now - 12 * 60_000, open_thread_count: 3 }), now),
     "codex commented 12m ago · 3 threads open",
   );
   assert.equal(
-    attentionPreview(row({ category: "requested", last_activity_kind: "submission", last_activity_actor: "reviewer-bot", last_activity_at: now - 2 * 60_000, open_thread_count: 0 }), now),
+    attentionPreview(row({ category: "waiting_on_you", last_activity_kind: "submission", last_activity_actor: "reviewer-bot", last_activity_at: now - 2 * 60_000, open_thread_count: 0 }), now),
     "reviewer-bot delivered a review 2m ago",
   );
   assert.equal(
-    attentionPreview(row({ category: "changes_requested", last_activity_kind: "request", last_activity_actor: "human", last_activity_at: now, open_thread_count: 1 }), now),
+    attentionPreview(row({ category: "waiting_on_you", last_activity_kind: "request", last_activity_actor: "human", last_activity_at: now, open_thread_count: 1 }), now),
     "human updated the request just now · 1 thread open",
   );
   // A row with no recorded actor still formats as its activity kind.
   assert.equal(
-    attentionPreview(row({ category: "recent_comments", last_activity_kind: "comment", last_activity_actor: "", last_activity_at: now - 90 * 60_000, open_thread_count: 0 }), now),
+    attentionPreview(row({ category: "recent", last_activity_kind: "comment", last_activity_actor: "", last_activity_at: now - 90 * 60_000, open_thread_count: 0 }), now),
     "commented 1h ago",
   );
 });
 
-test("the recent comments tab is part of the rendered chip set", () => {
-  assert.ok(ATTENTION_TABS.some((tab) => tab.id === "recent_comments"));
-  assert.equal(ATTENTION_TABS.length, 6);
+test("the inbox renders exactly the three buckets", () => {
+  assert.deepEqual(ATTENTION_TABS.map((tab) => tab.id), ["waiting_on_you", "in_flight", "recent"]);
+  assert.deepEqual(ATTENTION_TABS.map((tab) => tab.label), ["Waiting on you", "In flight", "Recent"]);
 });
 
 test("verdicts speak only from in review", () => {
