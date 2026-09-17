@@ -221,12 +221,14 @@ function event(overrides: Partial<PortalActivityEvent> = {}): PortalActivityEven
 
 test("event kinds label and fold into five icon families", () => {
   assert.equal(activityKindLabel("request_created"), "review requested");
+  assert.equal(activityKindLabel("review_announced"), "review started");
   assert.equal(activityKindLabel("comment_replied"), "reply");
   assert.equal(activityKindLabel("surface_head_moved"), "head moved");
   assert.equal(activityKindLabel("repo_added"), "project added");
   // Unknown kinds fall back to the raw kind, never disappear.
   assert.equal(activityKindLabel("something_new"), "something new");
   assert.equal(activityKindFamily("request_verdict"), "request");
+  assert.equal(activityKindFamily("review_announced"), "request");
   assert.equal(activityKindFamily("comment_resolved"), "comment");
   assert.equal(activityKindFamily("submission_delivered"), "submission");
   assert.equal(activityKindFamily("surface_head_moved"), "surface");

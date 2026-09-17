@@ -279,6 +279,7 @@ export function activityKindLabel(kind: string): string {
     request_verdict: "verdict",
     request_re_requested: "re-requested",
     request_withdrawn: "withdrawn",
+    review_announced: "review started",
     submission_delivered: "submission",
     comment_posted: "comment",
     comment_replied: "reply",
@@ -292,7 +293,7 @@ export function activityKindLabel(kind: string): string {
 
 // The row glyph's family: the closed vocabulary folds into five icons.
 export function activityKindFamily(kind: string): "request" | "comment" | "submission" | "surface" | "project" {
-  if (kind.startsWith("request")) return "request";
+  if (kind.startsWith("request") || kind === "review_announced") return "request";
   if (kind.startsWith("comment")) return "comment";
   if (kind === "submission_delivered") return "submission";
   if (kind === "surface_head_moved") return "surface";

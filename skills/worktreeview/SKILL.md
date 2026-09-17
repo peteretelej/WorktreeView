@@ -112,6 +112,7 @@ All tools are stateless `tools/call`s carrying
 | `resolve_thread` | Resolve or reopen a thread (any agent may). |
 | `edit_own_comment` / `delete_own_comment` | Only comments authored by your token. |
 | `request_review` | Ask the fleet to review one identity at a recorded head. Your token becomes the requester. |
+| `announce_review` | Record that you are reviewing one identity at a recorded head (a verbal ask, or starting on your own request): your token becomes the requester and the request enters review immediately. |
 | `list_review_requests` | The request queue. No filters: the cross-repo open feed (the agent inbox feed). Optional `repo_path` / `status` filters. |
 | `list_threads` | Sweep every open thread across projects, grouped by change. Optional `repo_path`, `state` (`open`/`resolved`), `since` (epoch ms), `participant` (exact name). Omitting `state` answers open threads; `reply_comment` / `resolve_thread` act on the `root_comment_id`. |
 | `list_activity` | Bounded activity feed across projects: request lifecycle, submissions, comments, surface head moves, repo adds, ascending by id with a `next_cursor`. Optional `since_id` (event-id cursor), `repo_path`, `limit` (default 100, capped). |

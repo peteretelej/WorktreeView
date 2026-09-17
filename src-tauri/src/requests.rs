@@ -230,8 +230,14 @@ async fn require_request(pool: &SqlitePool, id: i64) -> Result<ReviewRequest, Co
 }
 
 // One fire per successful mutation, centrally here: callers never
-// announce from their own sites.
-fn fire_change(notify: &RequestChangeSink, request: &ReviewRequest) {
+// announce from their own sites. The event names the log kind that
+// narrates the mutation, or None when the mutation updates in place
+// without narrating, so the webview can key copy on what happened.
+fn fire_change(
+    notify: &RequestChangeSink,
+    request: &ReviewRequest,
+    event: Option<&'static str>,
+) {
     log::info!("review request {} -> {} (round {})", request.id, request.status, request.round);
     notify(RequestChange {
         id: request.id,
@@ -240,6 +246,7 @@ fn fire_change(notify: &RequestChangeSink, request: &ReviewRequest) {
         target_key: request.target_key.clone(),
         target_kind: request.target_kind.clone(),
         status: request.status.clone(),
+        event: event.map(|event| event.to_string()),
     });
 }
 
@@ -386,7 +393,7 @@ pub(crate) async fn create_request_in_pool(
         .execute(pool)
         .await?;
         let updated = require_request(pool, existing.id).await?;
-        fire_change(notify, &updated);
+        fire_change(notify, &updated, None);
         return Ok(updated);
     }
     if same_head
@@ -441,7 +448,7 @@ pub(crate) async fn create_request_in_pool(
         .execute(pool)
         .await?;
         let updated = require_request(pool, existing.id).await?;
-        fire_change(notify, &updated);
+        fire_change(notify, &updated, None);
         return Ok(updated);
     }
 
@@ -478,7 +485,169 @@ pub(crate) async fn create_request_in_pool(
         format!("review requested by {actor_name}"),
     )
     .await?;
-    fire_change(notify, &created);
+    fire_change(notify, &created, Some(events::REQUEST_CREATED));
+    Ok(created)
+}
+
+// The announce entry: the caller records "I am reviewing this identity at
+// this head" and the row enters the lifecycle already in review, with the
+// caller's token as the requester of record. It shares create's ladder
+// with the entry state moved: a same-head open request updates in place
+// and moves to in review without narrating, a same-head changes_requested
+// row refuses with create's message, a same-head approved row returns
+// satisfied untouched, and otherwise the caller's refreshable row
+// refreshes into in review (an announce is also a self-claim) or a fresh
+// row inserts directly in review. No lenses, reviewers, or budget: the
+// announce is not an ask.
+pub(crate) async fn announce_review_in_pool(
+    pool: &SqlitePool,
+    repo_path: &str,
+    base_sha: &str,
+    target_key: &str,
+    target_kind: &str,
+    head_sha: &str,
+    note: Option<&str>,
+    actor: &Actor,
+    notify: &RequestChangeSink,
+) -> Result<ReviewRequest, CommandError> {
+    validate_identity(target_key, target_kind)?;
+    if let Some(note) = note {
+        validate_request_note(note)?;
+    }
+    if head_sha.trim().is_empty() {
+        return Err(invalid_request(
+            "A review request needs a non-empty head.",
+        ));
+    }
+    let requester_token_id = requester_key(actor);
+
+    let same_head: Vec<ReviewRequest> = sqlx::query(REQUEST_SAME_HEAD)
+        .bind(repo_path)
+        .bind(base_sha)
+        .bind(target_key)
+        .bind(target_kind)
+        .bind(requester_token_id)
+        .bind(head_sha)
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .map(request_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if let Some(existing) = same_head
+        .iter()
+        .find(|request| request.status == REQUESTED || request.status == IN_REVIEW)
+    {
+        // The announce restates the ask; an absent note keeps the stored
+        // one. The dedup update narrates nothing, like create's.
+        sqlx::query(
+            "UPDATE review_requests SET note = COALESCE(?, note), status = ?, \
+             updated_at = ? WHERE id = ?",
+        )
+        .bind(note)
+        .bind(IN_REVIEW)
+        .bind(now_millis())
+        .bind(existing.id)
+        .execute(pool)
+        .await?;
+        let updated = require_request(pool, existing.id).await?;
+        fire_change(notify, &updated, None);
+        return Ok(updated);
+    }
+    if same_head
+        .iter()
+        .any(|request| request.status == CHANGES_REQUESTED)
+    {
+        return Err(invalid_request(
+            "This head was already sent for review and received changes; \
+             re-request the review with a new head instead.",
+        ));
+    }
+    if let Some(existing) = same_head
+        .iter()
+        .find(|request| request.status == APPROVED)
+    {
+        // The review already happened; the row is returned untouched.
+        return Ok(existing.clone());
+    }
+
+    // A withdrawn same-head row or no same-head match: the caller's own
+    // never-claimed requested row refreshes into in review.
+    let refreshable = if same_head.is_empty() {
+        sqlx::query(REQUEST_REFRESHABLE)
+            .bind(repo_path)
+            .bind(base_sha)
+            .bind(target_key)
+            .bind(target_kind)
+            .bind(requester_token_id)
+            .fetch_optional(pool)
+            .await?
+            .map(|row| request_from_row(&row))
+            .transpose()?
+    } else {
+        None
+    };
+    if let Some(existing) = refreshable {
+        // Same omission rule as create's refresh: an absent note keeps the
+        // stored one; the head always moves.
+        sqlx::query(
+            "UPDATE review_requests SET note = COALESCE(?, note), head_sha = ?, \
+             status = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(note)
+        .bind(head_sha)
+        .bind(IN_REVIEW)
+        .bind(now_millis())
+        .bind(existing.id)
+        .execute(pool)
+        .await?;
+        let updated = require_request(pool, existing.id).await?;
+        let (actor_kind, actor_name) = event_actor(pool, actor).await?;
+        emit_request_event(
+            pool,
+            events::REVIEW_ANNOUNCED,
+            &updated,
+            actor_kind,
+            &actor_name,
+            format!("announced by {actor_name}"),
+        )
+        .await?;
+        fire_change(notify, &updated, Some(events::REVIEW_ANNOUNCED));
+        return Ok(updated);
+    }
+
+    let now = now_millis();
+    let result = sqlx::query(
+        "INSERT INTO review_requests (repo_path, base_sha, target_key, target_kind, \
+                requester_token_id, status, note, lenses, reviewers, max_rounds, round, \
+                head_sha, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', ?, 0, ?, ?, ?)",
+    )
+    .bind(repo_path)
+    .bind(base_sha)
+    .bind(target_key)
+    .bind(target_kind)
+    .bind(requester_token_id)
+    .bind(IN_REVIEW)
+    .bind(note.unwrap_or(""))
+    .bind(DEFAULT_MAX_ROUNDS)
+    .bind(Some(head_sha))
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    let created = require_request(pool, result.last_insert_rowid()).await?;
+    let (actor_kind, actor_name) = event_actor(pool, actor).await?;
+    emit_request_event(
+        pool,
+        events::REVIEW_ANNOUNCED,
+        &created,
+        actor_kind,
+        &actor_name,
+        format!("announced by {actor_name}"),
+    )
+    .await?;
+    fire_change(notify, &created, Some(events::REVIEW_ANNOUNCED));
     Ok(created)
 }
 
@@ -533,7 +702,7 @@ pub(crate) async fn claim_request_in_pool(
         format!("claimed by {actor_name}"),
     )
     .await?;
-    fire_change(notify, &claimed);
+    fire_change(notify, &claimed, Some(events::REQUEST_CLAIMED));
     Ok(claimed)
 }
 
@@ -575,7 +744,7 @@ pub(crate) async fn set_request_verdict_in_pool(
         format!("{verdict} by {actor_name}"),
     )
     .await?;
-    fire_change(notify, &updated);
+    fire_change(notify, &updated, Some(events::REQUEST_VERDICT));
     Ok(updated)
 }
 
@@ -614,7 +783,7 @@ pub(crate) async fn withdraw_request_in_pool(
         format!("withdrawn by {actor_name}"),
     )
     .await?;
-    fire_change(notify, &withdrawn);
+    fire_change(notify, &withdrawn, Some(events::REQUEST_WITHDRAWN));
     Ok(withdrawn)
 }
 
@@ -695,7 +864,7 @@ pub(crate) async fn re_request_in_pool(
         format!("re-requested by {actor_name}"),
     )
     .await?;
-    fire_change(notify, &updated);
+    fire_change(notify, &updated, Some(events::REQUEST_RE_REQUESTED));
     Ok(updated)
 }
 
@@ -706,7 +875,10 @@ pub(crate) async fn re_request_in_pool(
 // blocking sets changes_requested, clean approves a request now in review.
 // Submissions on changes_requested, approved, or withdrawn requests change
 // no status, so those requests are not in the open set at all. The
-// submitter's own requests are skipped: a verdict needs a second party.
+// submitter's own request is skipped only while it is still requested: a
+// verdict needs a second party, but an in-review request settles on any
+// other delivery, including its requester's (an announce is a self-claim,
+// and a claim transfers the working review to the claimer).
 pub(crate) async fn observe_submission_in_pool(
     pool: &SqlitePool,
     repo_path: &str,
@@ -730,7 +902,7 @@ pub(crate) async fn observe_submission_in_pool(
     let status = if blocking { CHANGES_REQUESTED } else { APPROVED };
     for mut request in open {
         if let Some(submitter) = submitter_token_id {
-            if request.requester_token_id == Some(submitter) {
+            if request.status == REQUESTED && request.requester_token_id == Some(submitter) {
                 continue;
             }
         }
@@ -740,7 +912,9 @@ pub(crate) async fn observe_submission_in_pool(
             continue;
         }
         request.status = status.to_string();
-        fire_change(notify, &request);
+        // The delivery's own narration rides the ingest's
+        // submission_delivered event; the settle pushes without one.
+        fire_change(notify, &request, None);
     }
     Ok(())
 }
@@ -1654,6 +1828,17 @@ mod tests {
             .unwrap()
     }
 
+    async fn announce(
+        pool: &SqlitePool,
+        head: &str,
+        note: Option<&str>,
+        actor: &Actor,
+    ) -> ReviewRequest {
+        announce_review_in_pool(pool, REPO, BASE, KEY, KIND, head, note, actor, &noop_notify())
+            .await
+            .unwrap()
+    }
+
     async fn observe(pool: &SqlitePool, blocking: bool) {
         observe_submission_in_pool(pool, REPO, BASE, KEY, KIND, blocking, None, &noop_notify())
             .await
@@ -2347,6 +2532,194 @@ mod tests {
             .unwrap();
         assert_eq!(get(&pool, request.id).await.status, APPROVED);
         assert_eq!(fires.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn announce_enters_in_review_with_the_caller_as_requester() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+
+        let request = announce(&pool, "head-1", Some("Starting my review."), &Actor::Agent(coder))
+            .await;
+        assert_eq!(request.status, IN_REVIEW);
+        assert_eq!(request.round, 0);
+        assert_eq!(request.max_rounds, DEFAULT_MAX_ROUNDS);
+        assert!(request.lenses.is_empty());
+        assert!(request.reviewers.is_empty());
+        assert_eq!(request.note, "Starting my review.");
+        assert_eq!(request.head_sha.as_deref(), Some("head-1"));
+        assert_eq!(request.requester_token_id, Some(coder));
+        assert_eq!(get(&pool, request.id).await, request);
+
+        // An absent note inserts empty on a fresh row.
+        let silent = announce(&pool, "head-2", None, &Actor::Agent(coder)).await;
+        assert_ne!(silent.id, request.id);
+        assert_eq!(silent.note, "");
+        assert_eq!(silent.status, IN_REVIEW);
+    }
+
+    #[tokio::test]
+    async fn announce_dedup_ladder_follows_create() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+
+        // Same head on the coder's requested row: updates in place and
+        // moves to in review, restating the note.
+        let request = create(&pool, &Actor::Agent(coder), "head-1").await;
+        let announced = announce(&pool, "head-1", Some("On it."), &Actor::Agent(coder)).await;
+        assert_eq!(announced.id, request.id);
+        assert_eq!(announced.status, IN_REVIEW);
+        assert_eq!(announced.note, "On it.");
+
+        // A re-announce on the now in-review row updates in place again;
+        // an absent note keeps the stored one.
+        let again = announce(&pool, "head-1", None, &Actor::Agent(coder)).await;
+        assert_eq!(again.id, request.id);
+        assert_eq!(again.status, IN_REVIEW);
+        assert_eq!(again.note, "On it.");
+
+        // Same head after changes_requested: refused with create's message.
+        verdict(&pool, request.id, false, &Actor::Human).await;
+        let error = announce_review_in_pool(
+            &pool, REPO, BASE, KEY, KIND, "head-1", None, &Actor::Agent(coder), &noop_notify(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_request");
+
+        // Same head on approved: returns satisfied, untouched.
+        re_request(&pool, request.id, "head-2", &Actor::Agent(coder)).await;
+        let approved = verdict(&pool, request.id, true, &Actor::Human).await;
+        assert_eq!(approved.status, APPROVED);
+        let satisfied = announce(&pool, "head-2", Some("Again?"), &Actor::Agent(coder)).await;
+        assert_eq!(satisfied.id, approved.id);
+        assert_eq!(satisfied, approved, "the satisfied row returns untouched");
+    }
+
+    #[tokio::test]
+    async fn announce_refreshes_the_callers_never_claimed_request_in_place() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+
+        let request = create(&pool, &Actor::Agent(coder), "head-1").await;
+        assert_eq!(request.status, REQUESTED);
+        let announced = announce(&pool, "head-2", Some("Rebased; starting now."), &Actor::Agent(coder))
+            .await;
+        assert_eq!(announced.id, request.id, "an announce is also a self-claim");
+        assert_eq!(announced.status, IN_REVIEW);
+        assert_eq!(announced.head_sha.as_deref(), Some("head-2"));
+        assert_eq!(announced.note, "Rebased; starting now.");
+        assert_eq!(announced.round, 0);
+    }
+
+    #[tokio::test]
+    async fn announced_requests_settle_on_a_second_party_delivery() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+        let reviewer = agent_token(&pool, "reviewer-bot").await;
+
+        let request = announce(&pool, "head-1", None, &Actor::Agent(coder)).await;
+        observe_submission_in_pool(&pool, REPO, BASE, KEY, KIND, false, Some(reviewer), &noop_notify())
+            .await
+            .unwrap();
+        assert_eq!(get(&pool, request.id).await.status, APPROVED);
+    }
+
+    #[tokio::test]
+    async fn the_narrowed_skip_keeps_requested_refusals_and_settles_shifted_edges() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+        let reviewer = agent_token(&pool, "reviewer-bot").await;
+
+        // Preserved: a requester's own delivery cannot self-approve while
+        // the row is still requested.
+        let requested = create_on(&pool, &Actor::Agent(coder), "base-1", "head-1").await;
+        observe_submission_in_pool(&pool, REPO, "base-1", KEY, KIND, false, Some(coder), &noop_notify())
+            .await
+            .unwrap();
+        assert_eq!(get(&pool, requested.id).await.status, REQUESTED);
+
+        // Shifted edge: the requester self-claims, then delivers; the row
+        // settles where the old skip held it open.
+        let self_claimed = create_on(&pool, &Actor::Agent(coder), "base-2", "head-2").await;
+        claim(&pool, self_claimed.id, &Actor::Agent(coder)).await;
+        observe_submission_in_pool(&pool, REPO, "base-2", KEY, KIND, false, Some(coder), &noop_notify())
+            .await
+            .unwrap();
+        assert_eq!(get(&pool, self_claimed.id).await.status, APPROVED);
+
+        // Shifted edge: the requester delivers after another agent
+        // claimed; the claimer's working review settles.
+        let claimed = create_on(&pool, &Actor::Agent(coder), "base-3", "head-3").await;
+        claim(&pool, claimed.id, &Actor::Agent(reviewer)).await;
+        observe_submission_in_pool(&pool, REPO, "base-3", KEY, KIND, true, Some(coder), &noop_notify())
+            .await
+            .unwrap();
+        assert_eq!(get(&pool, claimed.id).await.status, CHANGES_REQUESTED);
+    }
+
+    #[tokio::test]
+    async fn announce_narrates_the_actor_and_pushes_the_event_kind() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let coder = agent_token(&pool, "coder-bot").await;
+        let (notify, fires) = recording_notify();
+
+        // The fresh announce narrates once, naming the actor, and the push
+        // carries the narrating kind.
+        let request = announce_review_in_pool(
+            &pool, REPO, BASE, KEY, KIND, "head-1", None, &Actor::Agent(coder), &notify,
+        )
+        .await
+        .unwrap();
+        let rows = listed_events(&pool).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, events::REVIEW_ANNOUNCED);
+        assert_eq!(rows[0].actor_kind, "agent");
+        assert_eq!(rows[0].actor_name, "coder-bot");
+        assert!(rows[0].summary.contains("coder-bot"));
+        assert_eq!(rows[0].request_id, Some(request.id));
+        assert_eq!(fires.lock().unwrap().len(), 1);
+        assert_eq!(
+            fires.lock().unwrap()[0].event.as_deref(),
+            Some(events::REVIEW_ANNOUNCED)
+        );
+
+        // The same-head dedup announce updates in place, narrates nothing,
+        // and its push carries no event kind.
+        announce_review_in_pool(
+            &pool, REPO, BASE, KEY, KIND, "head-1", Some("On it."), &Actor::Agent(coder), &notify,
+        )
+        .await
+        .unwrap();
+        assert_eq!(listed_events(&pool).await.len(), 1);
+        assert_eq!(fires.lock().unwrap().len(), 2);
+        assert_eq!(fires.lock().unwrap()[1].event, None);
+
+        // The caller's never-claimed row on a new head refreshes into in
+        // review and narrates the caller's first announce for that head.
+        create(&pool, &Actor::Agent(coder), "head-old").await;
+        assert_eq!(listed_events(&pool).await.len(), 2);
+        announce_review_in_pool(
+            &pool, REPO, BASE, KEY, KIND, "head-new", None, &Actor::Agent(coder), &notify,
+        )
+        .await
+        .unwrap();
+        let rows = listed_events(&pool).await;
+        assert_eq!(
+            rows.iter().map(|row| row.kind.as_str()).collect::<Vec<_>>(),
+            [events::REVIEW_ANNOUNCED, events::REQUEST_CREATED, events::REVIEW_ANNOUNCED]
+        );
+        assert_eq!(fires.lock().unwrap().len(), 3);
+        assert_eq!(
+            fires.lock().unwrap()[2].event.as_deref(),
+            Some(events::REVIEW_ANNOUNCED)
+        );
     }
 
     #[tokio::test]

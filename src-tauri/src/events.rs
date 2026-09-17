@@ -9,6 +9,7 @@ pub(crate) const REQUEST_CLAIMED: &str = "request_claimed";
 pub(crate) const REQUEST_VERDICT: &str = "request_verdict";
 pub(crate) const REQUEST_RE_REQUESTED: &str = "request_re_requested";
 pub(crate) const REQUEST_WITHDRAWN: &str = "request_withdrawn";
+pub(crate) const REVIEW_ANNOUNCED: &str = "review_announced";
 pub(crate) const SUBMISSION_DELIVERED: &str = "submission_delivered";
 pub(crate) const COMMENT_POSTED: &str = "comment_posted";
 pub(crate) const COMMENT_REPLIED: &str = "comment_replied";
@@ -202,6 +203,7 @@ mod tests {
             REQUEST_VERDICT,
             REQUEST_RE_REQUESTED,
             REQUEST_WITHDRAWN,
+            REVIEW_ANNOUNCED,
             SUBMISSION_DELIVERED,
             COMMENT_POSTED,
             COMMENT_REPLIED,
@@ -212,7 +214,7 @@ mod tests {
         ] {
             record_event(&pool, event("/demo", kind, "s")).await.unwrap();
         }
-        assert_eq!(count(&pool).await, 13);
+        assert_eq!(count(&pool).await, 14);
 
         let rows = list_events_in_pool(
             &pool,
@@ -220,7 +222,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(rows.len(), 13);
+        assert_eq!(rows.len(), 14);
         let first = &rows[0];
         assert_eq!(first.id, 1);
         assert_eq!(first.repo_path, "/demo");

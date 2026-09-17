@@ -26,6 +26,24 @@ lenses and note are confirmation enough.
 
 ## Claim, or just start
 
+How you enter a review depends on where the ask came from:
+
+- **Verbal ask, no request row**: when the human (or another agent) asked
+  you directly and nothing sits in the queue, announce the start with
+  `announce_review` (the review identity plus the `head_sha` you are
+  reviewing, optional `note`). It records your token as the requester and
+  puts the request straight into review, so a later delivery settles it
+  like a claim would.
+- **Your own request**: starting work on a row you created through
+  `request_review` uses the same `announce_review`; it moves your request
+  into review in place instead of stacking a second row.
+- **Queue pickup**: picking up someone else's request from
+  `list_review_requests` claims it (`update_review_request`, `action:
+  "claim"`). The claim already narrates the start, so the pickup flow
+  needs no second row - do not announce on top of another party's pickup
+  row; announcing keys on your own token and would stack a second open
+  row beside theirs.
+
 Claiming marks a request as taken (`update_review_request`, `action:
 "claim"`):
 

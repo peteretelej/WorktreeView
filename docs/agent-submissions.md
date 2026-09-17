@@ -5,8 +5,9 @@ faces: the stateless MCP face at `/mcp` (discovery, reads, comment
 collaboration, review requests, refresh ping) and the raw JSON-RPC face
 at `/` for delivering review submissions. This page is the client
 contract for both: the submission schema, the delivery transport
-(authentication, discovery file, the `post_review` and `refresh_repo`
-methods, arrival cue), and the MCP endpoint with its tool surface.
+(authentication, discovery file, the `post_review`, `refresh_repo`, and
+`announce_review` methods, arrival cue), and the MCP endpoint with its
+tool surface.
 
 ## Submission schema
 
@@ -222,6 +223,55 @@ Git error message; an unknown `repo_path` returns `-32002`. The call is
 attributable like any other request: it requires a valid token and its
 use is recorded on the token row.
 
+### Calling announce_review
+
+The endpoint accepts a third method, `announce_review`: it records that
+the calling agent is reviewing one review identity at a recorded head.
+The request enters the lifecycle directly `in_review` with the calling
+token as the requester, so a later `post_review` delivery settles it like
+a claim would. Use it when a verbal ask (or your own open request) starts
+your review; to pick up someone else's queue request, claim it through
+the MCP face's `update_review_request` instead - announcing keys on your
+own token and would stack a second open row beside another party's
+pickup.
+
+POST to the same URL with the same authorization header and strict
+params: unknown fields are rejected.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "announce_review",
+  "params": {
+    "repo_path": "/repos/demo",
+    "base_sha": "3f2a...",
+    "target_key": "/repos/demo",
+    "target_kind": "worktree",
+    "head_sha": "9c1b...",
+    "note": "optional context for the review"
+  }
+}
+```
+
+`target_kind` is `"worktree"` (`target_key` is then the worktree path) or
+`"head"` (`target_key` is then the resolved target SHA). `note` is
+optional and capped at 2000 characters. Dedup follows the request rules
+keyed on the calling token: the same head on your open request updates it
+in place and moves it to `in_review`, the same head on a
+`changes_requested` request is refused (`-32602`; record a new head and
+re-request instead), and the same head on an `approved` request returns
+that row unchanged. Your never-claimed request refreshes into `in_review`
+under the announced head, so an announce is also a self-claim. A
+successful announce answers the stored request row:
+
+```json
+{
+  "jsonrpc": "2.0", "id": 3,
+  "result": { "request": { "id": 4, "status": "in_review", "head_sha": "9c1b..." } }
+}
+```
+
 ### Errors
 
 Error responses carry `{ "code", "message" }`:
@@ -230,7 +280,7 @@ Error responses carry `{ "code", "message" }`:
 | --- | --- |
 | `-32700` | the body is not valid JSON |
 | `-32600` | the request is not JSON-RPC 2.0 |
-| `-32601` | method other than `post_review` or `refresh_repo` |
+| `-32601` | method other than `post_review`, `refresh_repo`, or `announce_review` |
 | `-32602` | invalid params or submission-shape violation (store message passes through) |
 | `-32603` | internal error, such as a storage or fetch failure |
 | `-32001` | missing, wrong, or deleted bearer token |
@@ -369,6 +419,7 @@ the transport layer (HTTP 401, `-32001`).
 | `delete_own_comment` | `comment_id` | `{ "deleted": true }`; a root delete also removes its replies | unknown comment; not your comment |
 | `add_repo` | `path` | the stored repo row; the open app's sidebar follows the announce | invalid path; not a Git repository |
 | `request_review` | `repo_path`, `base_sha`, `target_key`, `target_kind`, `head_sha`; optional `note`, `lenses`, `reviewers`, `max_rounds` (an absent note is a general review ask) | the stored request row with a `requester` display | unknown repo; over-2000-character note; unknown or duplicate lens; unknown or duplicate reviewer; `max_rounds` outside 1-3; empty `head_sha`; same-head create against a `changes_requested` request |
+| `announce_review` | `repo_path`, `base_sha`, `target_key`, `target_kind`, `head_sha`; optional `note` (no lenses, reviewers, or round budget: the announce is not an ask) | the stored request row with a `requester` display, entered `in_review` with your token as requester | unknown repo; over-2000-character note; empty `head_sha`; same-head announce against a `changes_requested` request |
 | `list_review_requests` | optional `repo_path`, `status` | array of request rows plus derived `age_ms`, `comment_count`, `unresolved_finding_counts` (per severity), and `requester` | unknown `status` value |
 | `update_review_request` | `id`, `action` (`claim`/`approve`/`request_changes`/`withdraw`/`re_request`); optional `note` and `head_sha`, both only with `re_request` (`head_sha` is required there) | the updated request row | unknown request id; actor-rule violations (claim gating, requester-only withdraw and re-request); round budget exhausted; `re_request` with the same `head_sha`; invalid refreshed `note` |
 | `list_threads` | optional `repo_path`, `state` (`open`/`resolved`), `since` (epoch ms on last activity), `participant` (exact name) | array of thread groups, one per change (`repo_path`, `target_key`, `target_kind`, `change_label`, `open_count`), each with its thread rows: `root_comment_id`, `excerpt`, `severity`, `anchor`, `participants`, `reply_count`, `resolved_at`, `last_activity_at`, `head_moved` | unknown `state` value; unknown repo |
@@ -392,10 +443,12 @@ keys on the change, so threads survive base changes.
 
 ### Review requests
 
-Agents coordinate review pickups through three tools over the request
-lifecycle: `request_review` asks for a review, `list_review_requests`
-reads the queue, and `update_review_request` advances one request (claim,
-verdict, withdraw, re-request). Every result row carries the review
+Agents coordinate review pickups through four tools over the request
+lifecycle: `request_review` asks for a review, `announce_review` records
+that you are reviewing an identity at a head (the request enters
+`in_review` under your token), `list_review_requests` reads the queue,
+and `update_review_request` advances one request (claim, verdict,
+withdraw, re-request). Every result row carries the review
 identity, the stored fields (`status`, `note`, `lenses`, `reviewers`,
 `max_rounds`, `round`, `head_sha`, timestamps), and a `requester` display
 (the token name, or `human` for human-keyed rows). All tools follow the
@@ -413,7 +466,12 @@ The actor rules the tools enforce (the same engine the human app drives):
   refused (record a new head and `re_request` instead); the same head on
   an `approved` request returns that row unchanged. A new head on your
   never-claimed request refreshes it in place instead of stacking a
-  duplicate pickup.
+  duplicate pickup. `announce_review` follows the same ladder keyed on
+  your token, with the entry state moved: the same head on your open
+  request updates it in place and moves it to `in_review` without
+  narrating, a never-claimed request refreshes into `in_review` under the
+  announced head (an announce is also a self-claim), and a fresh announce
+  inserts a row already `in_review` whose delivery settles like a claim's.
 - Claiming is the only named-list gate: when `reviewers` names tokens,
   only those tokens can claim; when it is empty, any agent can claim the
   open pickup. Humans never claim; their verdict is the signal.
@@ -451,7 +509,8 @@ Keep one cursor per client: pass the last event id you have seen as
 bounded by `limit`, with `next_cursor` to carry forward (your own cursor
 when nothing is new, so an empty poll never moves it backward). Kinds
 cover the request lifecycle (`request_created`, `request_claimed`,
-`request_verdict`, `request_re_requested`, `request_withdrawn`),
+`review_announced`, `request_verdict`, `request_re_requested`,
+`request_withdrawn`),
 deliveries (`submission_delivered`), comments (`comment_posted`,
 `comment_replied`, `comment_resolved`, `comment_reopened`), and store
 narration (`surface_head_moved`, `repo_added`), each attributed with

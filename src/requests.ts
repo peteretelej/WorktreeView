@@ -38,7 +38,9 @@ export type AttentionRepoGroup = { repo_path: string; repo_name: string; rows: A
 export type AttentionQueue = { repos: AttentionRepoGroup[] };
 
 // Mirrors the payload of the Rust `review-request-changed` event, the
-// queue's live-update signal for every request mutation.
+// queue's live-update signal for every request mutation. `event` names
+// the log kind narrating the mutation; null when it updated in place
+// without narrating.
 export type RequestChange = {
   request_id: number;
   repo_path: string;
@@ -46,6 +48,7 @@ export type RequestChange = {
   target_key: string;
   target_kind: "worktree" | "head";
   status: string;
+  event: string | null;
 };
 
 // Tab order and copy; the queue's empty state reuses the per-tab copy.

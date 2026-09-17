@@ -1,5 +1,6 @@
 use crate::agents::{authenticate_token_in_pool, provision_default_token_in_pool, AgentIdentity};
 use crate::commands::refresh_repo;
+use crate::requests::{announce_review_in_pool, Actor as RequestActor};
 use crate::reviews::{ingest_submission_in_pool, Actor, SubmissionPayload};
 use axum::body::to_bytes;
 use axum::extract::{Request, State};
@@ -84,6 +85,8 @@ pub(crate) type CommentSink = Arc<dyn Fn(CommentChange) + Send + Sync>;
 // Webview notification pushed after a successful review-request mutation.
 // The request engine fires it centrally, so every surface (the MCP tools
 // and the human IPC commands) inherits emission without per-site wiring.
+// The event names the log kind that narrates the mutation; it is None
+// when the mutation updated in place without narrating.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct RequestChange {
     // The webview payload names the row's key `request_id`.
@@ -94,6 +97,7 @@ pub(crate) struct RequestChange {
     pub(crate) target_key: String,
     pub(crate) target_kind: String,
     pub(crate) status: String,
+    pub(crate) event: Option<String>,
 }
 
 // Announces a review-request change (the `review-request-changed` event);
@@ -216,6 +220,17 @@ struct RefreshRepoParams {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnnounceReviewParams {
+    repo_path: String,
+    base_sha: String,
+    target_key: String,
+    target_kind: String,
+    head_sha: String,
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct RpcRequest {
     jsonrpc: String,
     id: Value,
@@ -325,6 +340,77 @@ async fn handle_post_review(
     }
 }
 
+// The raw face's announce method: one strict params schema (identity
+// fields and payload together), the shared unknown-repo gate, and the
+// engine entry the MCP tool calls; refusals pass through like
+// post_review's.
+async fn handle_announce_review(
+    state: TransportState,
+    id: Value,
+    params: Value,
+    identity: AgentIdentity,
+) -> Response {
+    let params: AnnounceReviewParams = match serde_json::from_value(params) {
+        Ok(params) => params,
+        Err(error) => {
+            return rpc_error(
+                &id,
+                StatusCode::OK,
+                INVALID_PARAMS,
+                format!("Invalid announce_review params: {error}"),
+            );
+        }
+    };
+    if params.target_kind != "worktree" && params.target_kind != "head" {
+        return rpc_error(
+            &id,
+            StatusCode::OK,
+            INVALID_PARAMS,
+            r#"target_kind must be "worktree" or "head"."#,
+        );
+    }
+    let known: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM repos WHERE path = ?")
+        .bind(&params.repo_path)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0);
+    if known == 0 {
+        return rpc_error(
+            &id,
+            StatusCode::OK,
+            UNKNOWN_REVIEW_TARGET,
+            "No repository with that path is open in WorktreeView.",
+        );
+    }
+    match announce_review_in_pool(
+        &state.pool,
+        &params.repo_path,
+        &params.base_sha,
+        &params.target_key,
+        &params.target_kind,
+        &params.head_sha,
+        params.note.as_deref(),
+        &RequestActor::Agent(identity.token_id),
+        &state.request_changes,
+    )
+    .await
+    {
+        Ok(request) => (
+            StatusCode::OK,
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "request": request }
+            })),
+        )
+            .into_response(),
+        Err(error) if error.code == "invalid_request" => {
+            rpc_error(&id, StatusCode::OK, INVALID_PARAMS, error.message)
+        }
+        Err(error) => rpc_error(&id, StatusCode::OK, INTERNAL_ERROR, error.message),
+    }
+}
+
 async fn handle_refresh_repo(state: TransportState, id: Value, params: Value) -> Response {
     let params: RefreshRepoParams = match serde_json::from_value(params) {
         Ok(params) => params,
@@ -406,12 +492,13 @@ pub(crate) async fn handle(State(state): State<TransportState>, request: Request
     }
     match method.as_str() {
         "post_review" => handle_post_review(state, id, params, identity).await,
+        "announce_review" => handle_announce_review(state, id, params, identity).await,
         "refresh_repo" => handle_refresh_repo(state, id, params).await,
         _ => rpc_error(
             &id,
             StatusCode::OK,
             METHOD_NOT_FOUND,
-            "Unknown method; the endpoint accepts post_review and refresh_repo.",
+            "Unknown method; the endpoint accepts post_review and refresh_repo, plus announce_review.",
         ),
     }
 }
@@ -877,7 +964,9 @@ mod tests {
     }
 
     // The emitted payload is the webview's contract: the row's key is
-    // `request_id`, not the struct's internal `id` field name.
+    // `request_id`, not the struct's internal `id` field name, and the
+    // narrating event kind rides along (null when the mutation updated in
+    // place without narrating).
     #[test]
     fn request_change_serializes_with_the_webview_payload_keys() {
         let change = RequestChange {
@@ -887,6 +976,7 @@ mod tests {
             target_key: "/demo".into(),
             target_kind: "worktree".into(),
             status: "requested".into(),
+            event: Some("request_created".into()),
         };
         assert_eq!(
             serde_json::to_value(&change).unwrap(),
@@ -897,8 +987,11 @@ mod tests {
                 "target_key": "/demo",
                 "target_kind": "worktree",
                 "status": "requested",
+                "event": "request_created",
             })
         );
+        let silent = RequestChange { event: None, ..change };
+        assert_eq!(serde_json::to_value(&silent).unwrap()["event"], Value::Null);
     }
 
     fn recording_refreshes() -> (RefreshSink, Arc<Mutex<Vec<String>>>) {
@@ -1177,6 +1270,114 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(payload["error"]["code"], INVALID_PARAMS);
+    }
+
+    fn announce_params(repo_path: &str) -> Value {
+        json!({
+            "repo_path": repo_path,
+            "base_sha": "base",
+            "target_key": "/demo",
+            "target_kind": "worktree",
+            "head_sha": "head-1",
+        })
+    }
+
+    // The raw face's announce method: the stored request row comes back
+    // with the announce's direct in_review entry, the engine's dedup
+    // ladder holds behind the method, and refusals map like post_review's.
+    #[tokio::test]
+    async fn announce_review_stores_enters_and_dedups_through_the_real_pool() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let (state, secret) = test_state(pool.clone(), Arc::new(|_| {})).await;
+        let (status, payload) = post(
+            state.clone(),
+            Some(&secret),
+            &rpc_body(json!(20), "announce_review", announce_params("/demo")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let request = payload["result"]["request"].clone();
+        assert_eq!(request["status"], "in_review");
+        assert_eq!(request["head_sha"], "head-1");
+        assert_eq!(request["round"], 0);
+        assert_eq!(request["requester_token_id"], 1, "the caller owns the row");
+        let id = request["id"].as_i64().unwrap();
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_requests WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 1);
+
+        // A second announce on the same head dedups in place: same row,
+        // no second pickup.
+        let (status, payload) = post(
+            state.clone(),
+            Some(&secret),
+            &rpc_body(json!(21), "announce_review", announce_params("/demo")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["result"]["request"]["id"], json!(id));
+        assert_eq!(payload["result"]["request"]["status"], "in_review");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_requests")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        // Shape violations never execute.
+        let mut unknown_field = announce_params("/demo");
+        unknown_field["surprise"] = json!(true);
+        let (_, payload) = post(
+            state.clone(),
+            Some(&secret),
+            &rpc_body(json!(22), "announce_review", unknown_field),
+        )
+        .await;
+        assert_eq!(payload["error"]["code"], INVALID_PARAMS);
+        let mut bad_kind = announce_params("/demo");
+        bad_kind["target_kind"] = json!("branch");
+        let (_, payload) = post(
+            state.clone(),
+            Some(&secret),
+            &rpc_body(json!(23), "announce_review", bad_kind),
+        )
+        .await;
+        assert_eq!(payload["error"]["code"], INVALID_PARAMS);
+
+        // The engine's refusal passes through as INVALID_PARAMS.
+        sqlx::query("UPDATE review_requests SET status = 'changes_requested' WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_, payload) = post(
+            state,
+            Some(&secret),
+            &rpc_body(json!(24), "announce_review", announce_params("/demo")),
+        )
+        .await;
+        assert_eq!(payload["error"]["code"], INVALID_PARAMS);
+        assert!(payload["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("re-request the review with a new head"));
+    }
+
+    #[tokio::test]
+    async fn announce_review_unknown_repo_is_unknown_review_target() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let (state, secret) = test_state(pool, Arc::new(|_| {})).await;
+        let (_, payload) = post(
+            state,
+            Some(&secret),
+            &rpc_body(json!(25), "announce_review", announce_params("/missing")),
+        )
+        .await;
+        assert_eq!(payload["error"]["code"], UNKNOWN_REVIEW_TARGET);
     }
 
     fn free_port() -> u16 {
