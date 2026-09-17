@@ -3,9 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { ChevronsLeft, Clock, FileCheck, FolderGit2, MessageSquare, ChevronDown, ChevronRight, CircleDot, Copy, CornerUpLeft, GitBranch, GitCommitHorizontal, HardDrive, Inbox, MessagesSquare, MoreVertical, Pin, PinOff, RefreshCw, Search, Settings as SettingsIcon, Trash2, X } from "lucide-react";
 import { createNavigationHistory, DEFAULT_PORTAL_FILTERS, sameReviewTarget, type AppLocation, type BranchInventory, type BranchSummary, type ChangedFile, type CommitInfo, type GoneSurface, type RecordedKey, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type ReviewsStateFilter, type SurfaceListing, type ThreadsStateFilter, type ThreadsVoiceFilter, type Worktree } from "./navigation";
 import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
+import { arrivalChangeLabel, arrivalProjectLabel, arrivalSentenceBody, olderArrivalsSuffix } from "./arrivals";
 import { SettingsPage, applyTheme, defaultSettings, getSettings, persistSettings, type ChangedFilesView, type Settings } from "./settings";
 import { DEFAULT_ZOOM, snapZoom, stepZoom, zoomShortcut } from "./zoom";
 import { imageMimeForPath } from "./stream";
@@ -31,6 +33,9 @@ type WorktreeStatus = { path: string; changes: number | null };
 type OverviewTab = "worktrees" | "branches" | "remote" | "archived";
 // Mirrors the payload of the Rust `submission-received` event.
 type SubmissionArrival = { repo_path: string; base_sha: string; target_key: string; target_kind: "worktree" | "head"; submission_id: number; agent_name: string };
+// One arrival-cue entry: a delivered submission or an announce moment;
+// both carry the review identity the cue's open action lands on.
+type ArrivalEntry = { moment: "delivery" | "announce"; repo_path: string; base_sha: string; target_key: string; target_kind: "worktree" | "head"; actor: string };
 // Mirrors the payload of the Rust `comment-changed` event.
 type CommentChange = { repo_path: string; base_sha: string; target_key: string; target_kind: "worktree" | "head"; comment_id: number; action: "created" | "replied" | "resolved" | "unresolved" | "edited" | "deleted"; agent_name: string };
 // Mirrors the payload of the Rust `project-refreshed` event.
@@ -101,7 +106,10 @@ function App() {
   const [history, setHistory] = useState<HistoryState | null>(null); const [historyRefs, setHistoryRefs] = useState<RefInventory>({ heads: [], remotes: [], tags: [], default_base: null }); const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, WorktreeStatus[] | null>>({}); const [statusNonce, setStatusNonce] = useState(0);
   const [inventories, setInventories] = useState<Record<string, BranchInventory | null>>({}); const [menuOpen, setMenuOpen] = useState(false); const [removeTarget, setRemoveTarget] = useState<Repo | null>(null); const [removing, setRemoving] = useState(false);
   const [settings, setSettings] = useState<Settings>(defaultSettings); const [settingsSaveError, setSettingsSaveError] = useState("");
-  const [arrivals, setArrivals] = useState<SubmissionArrival[]>([]);
+  // The arrival cue holds deliveries and announces until opened or
+  // dismissed, so it also records what happened while the window was
+  // covered.
+  const [arrivals, setArrivals] = useState<ArrivalEntry[]>([]);
   // Bumped when a submission arrives for the review identity the user is
   // reading: the open review's comment stream and submissions strip reload
   // from it without navigating away and back.
@@ -154,7 +162,7 @@ function App() {
   const comments = useReviewComments(commentIdentity, reviewIndex, commentFile, reversed);
   // The event listeners read the live comment layer and open repo path
   // through refs, so they subscribe once and never hold stale closures.
-  const commentsRef = useRef(comments); const activeRepoPathRef = useRef(activeRepoPath); const reposRef = useRef(repos);
+  const commentsRef = useRef(comments); const activeRepoPathRef = useRef(activeRepoPath); const reposRef = useRef(repos); const settingsRef = useRef(settings);
 
   useEffect(() => { let mounted = true; async function load() { try { const loaded = await invoke<Repo[]>("list_repos"); if (!mounted) return; setRepos(loaded); setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? ""); setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1]))); let nextSettings = defaultSettings; try { nextSettings = await getSettings(); } catch (error) { if (mounted) setOperationError(errorMessage(error)); } if (!mounted) return; nextSettings.zoom = snapZoom(nextSettings.zoom); applyTheme(nextSettings.theme); setSettings(nextSettings); setLoading(false); for (let start = 0; start < loaded.length; start += 4) await Promise.all(loaded.slice(start, start + 4).map(async (repo) => { try { const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path }); if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item)); let listing: SurfaceListing = { gone: [], pinned: [] }; try { listing = await invoke<SurfaceListing>("list_surfaces", { path: repo.path }); } catch { listing = { gone: [], pinned: [] }; } if (mounted) setSurfaces((current) => ({ ...current, [repo.path]: listing })); } catch (error) { if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); } finally { if (mounted) setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } })); } catch (error) { if (mounted) { setLoadError(errorMessage(error)); setLoading(false); } } } void load(); return () => { mounted = false; }; }, []);
   useEffect(() => { if (!activeRepo) { setSelectedWorktreePath(""); return; } setSelectedWorktreePath((current) => activeRepo.worktrees.some((worktree) => worktree.path === current) ? current : activeRepo.worktrees[0]?.path ?? ""); }, [activeRepo]);
@@ -233,13 +241,13 @@ function App() {
     let disposed = false;
     const subscription = listen<SubmissionArrival>("submission-received", (event) => {
       if (disposed) return;
-      setArrivals((current) => [...current, event.payload]);
+      const arrival = event.payload;
+      void arrive({ moment: "delivery", repo_path: arrival.repo_path, base_sha: arrival.base_sha, target_key: arrival.target_key, target_kind: arrival.target_kind, actor: arrival.agent_name });
       // A submission moves request statuses, so the queue follows.
       void refreshAttention();
       // A delivery for the review the user is reading refreshes it live:
       // the tick drives the open review's stream and submissions strip.
       const key = commentsRef.current.key;
-      const arrival = event.payload;
       if (key && key.repoPath === arrival.repo_path && key.baseSha === arrival.base_sha && key.targetKey === arrival.target_key && key.targetKind === arrival.target_kind) {
         setReviewRefreshTick((tick) => tick + 1);
       }
@@ -249,11 +257,22 @@ function App() {
   // Every request mutation (agent tool or human command) fires the same
   // event, so the queue and its tab count track without polling. A failed
   // refresh keeps the last payload; the store-backed queue is stale, not
-  // gone.
+  // gone. The announce moment is the one narrated mutation that also
+  // surfaces as an arrival: claims, verdicts, and dedup refreshes carry
+  // other event kinds or null and produce no notification.
   useEffect(() => {
     let disposed = false;
-    const subscription = listen<RequestChange>("review-request-changed", () => {
-      if (!disposed) void refreshAttention();
+    const subscription = listen<RequestChange>("review-request-changed", (event) => {
+      if (disposed) return;
+      void refreshAttention().then((queue) => {
+        const change = event.payload;
+        if (disposed || change.event !== "review_announced") return;
+        // The announcing agent is the queue row's requester: announce
+        // writes the caller's token as the requester on both of its
+        // notified paths (fresh row and the caller's own refreshable row).
+        const actor = attentionRows(queue).find((row) => row.request_id === change.request_id)?.requester ?? "An agent";
+        void arrive({ moment: "announce", repo_path: change.repo_path, base_sha: change.base_sha, target_key: change.target_key, target_kind: change.target_kind, actor });
+      });
     });
     return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
   }, []);
@@ -333,7 +352,7 @@ function App() {
     }, 250);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [query]);
-  useEffect(() => { commentsRef.current = comments; activeRepoPathRef.current = activeRepoPath; reposRef.current = repos; paneToggleRef.current = () => {
+  useEffect(() => { commentsRef.current = comments; activeRepoPathRef.current = activeRepoPath; reposRef.current = repos; settingsRef.current = settings; paneToggleRef.current = () => {
     // Ctrl+B means the surface's pane: the files list in a review, the
     // project navigator on the overview; the settings overlay has none.
     const kind = nav.current().kind;
@@ -768,8 +787,17 @@ function App() {
   function openSettings() { nav.push({ kind: "settings" }); }
   // The attention queue reads one store-backed payload per refresh: no Git
   // runs on this path, and failures leave the previous payload in place.
-  async function refreshAttention() {
-    try { setAttention(await invoke<AttentionQueue>("list_attention")); } catch { /* keep the last payload */ }
+  // The payload also returns to callers that need the fresh rows (the
+  // announce arrival reads the actor from them).
+  async function refreshAttention(): Promise<AttentionQueue | null> {
+    try {
+      const queue = await invoke<AttentionQueue>("list_attention");
+      setAttention(queue);
+      return queue;
+    } catch {
+      // keep the last payload
+      return null;
+    }
   }
   // Mark all seen advances the stored watermark to the current event
   // cursor: the Activity divider clears and the Recent comments category
@@ -827,18 +855,39 @@ function App() {
   function openAttentionRow(row: AttentionRow) {
     openReviewIdentity(row);
   }
+  // One landing for every notification-worthy moment (deliveries and
+  // announces), and the single place the focus rule and the master toggle
+  // are evaluated: the cue always records the entry so it also records
+  // what happened while the window was covered, and an unfocused window
+  // additionally gets an OS toast. A denied permission or failed send
+  // never loses the arrival; the cue already holds it.
+  async function arrive(entry: ArrivalEntry) {
+    if (!settingsRef.current.notifications_enabled) return;
+    setArrivals((current) => [...current, entry]);
+    if (document.hasFocus()) return;
+    try {
+      let granted = await isPermissionGranted();
+      if (!granted) granted = (await requestPermission()) === "granted";
+      if (!granted) return;
+      const project = arrivalProjectLabel(reposRef.current, entry.repo_path);
+      const change = arrivalChangeLabel(entry.target_kind, entry.target_key);
+      sendNotification({ title: entry.actor, body: `${entry.actor} ${arrivalSentenceBody(entry.moment, change, project)}` });
+    } catch {
+      // The cue holds the arrival; a failed toast send is non-fatal.
+    }
+  }
   // Activating an arrival opens the review the submission targeted: the
   // worktree row when it is loaded, otherwise the commit review re-derived
   // from the recorded identity (the base override pins the recorded base).
-  function openArrival(arrival: SubmissionArrival) {
-    const repo = repos.find((item) => item.path === arrival.repo_path);
+  function openArrival(entry: ArrivalEntry) {
+    const repo = repos.find((item) => item.path === entry.repo_path);
     if (!repo) return;
     setActiveRepoPath(repo.path);
-    if (arrival.target_kind === "head") {
-      void openReview({ kind: "commit", sha: arrival.target_key, parents: [], defaultBaseAncestor: false }, arrival.repo_path, { base: arrival.base_sha });
+    if (entry.target_kind === "head") {
+      void openReview({ kind: "commit", sha: entry.target_key, parents: [], defaultBaseAncestor: false }, entry.repo_path, { base: entry.base_sha });
       return;
     }
-    const worktree = repo.worktrees.find((item) => item.path === arrival.target_key);
+    const worktree = repo.worktrees.find((item) => item.path === entry.target_key);
     if (worktree) {
       setSelectedWorktreePath(worktree.path);
       void openReview({ kind: "worktree", worktree }, repo.path);
@@ -957,6 +1006,9 @@ function App() {
   return <>{pinned.map(surfaceRow)}{currentWorktree && !pinnedWorktrees.has(worktreeKey(currentWorktree.path)) && surfaceRow({ kind: "worktree", identityKey: currentWorktree.path, label: shortToken(currentWorktree.branch), startRef: null, worktreePath: currentWorktree.path, pinnedAt: null, gone: false })}</>;
 };
   const statusMessage = loadError || (loading ? "Loading repositories..." : hydrating ? "Loading worktrees..." : ""); const paletteRows: PaletteRow[] = [...matchingResults.map((result): PaletteRow => ({ section: "repos", result })), ...(portalSearch?.comments.map((match): PaletteRow => ({ section: "comments", match })) ?? []), ...(portalSearch?.requests.map((match): PaletteRow => ({ section: "requests", match })) ?? []), ...(portalSearch?.commits.map((match): PaletteRow => ({ section: "commits", match })) ?? [])]; const palettePageCount = Math.max(1, Math.ceil(paletteRows.length / SEARCH_PAGE_SIZE)); const visiblePalettePage = Math.min(searchPage, palettePageCount - 1); const visiblePaletteRows = paletteRows.slice(visiblePalettePage * SEARCH_PAGE_SIZE, (visiblePalettePage + 1) * SEARCH_PAGE_SIZE);
+  // The cue's sentence names the newest entry's moment; older entries only
+  // count into the stacking suffix.
+  const latestArrival = arrivals[arrivals.length - 1];
   const statusByPath: Record<string, number | null> = {};
   for (const status of worktreeStatuses[activeRepoPath] ?? []) statusByPath[status.path] = status.changes;
   const activeInventory = inventories[activeRepoPath] ?? null;
@@ -1165,7 +1217,7 @@ function App() {
           const pinned = branchPinIndex.get(`worktree:${worktreeKey(worktree.path)}`) !== undefined;
           const openDefaultReview = () => { setSelectedWorktreePath(worktree.path); void openReview({ kind: "worktree", worktree }); };
           return <div key={worktree.path} className="project-row-wrap"><div className={`worktree-row ${selected ? "selected" : ""}`} role="button" tabIndex={0} title={worktree.path} aria-pressed={selected} onClick={openDefaultReview} onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openDefaultReview(); } }}><div className="worktree-cell"><div className="branch-title"><GitBranch size={14} /><strong>{shortToken(worktree.branch)}</strong>{worktree.branch === activeInventory?.default_branch && <span className="main-badge">main</span>}{detached && <span className="detached-badge">detached</span>}{stale && <span className="stale-badge">stale</span>}</div><div className="worktree-path"><span className="path-text">{worktree.path}</span><CopyButton ghost value={worktree.path} label="Copy worktree path" /></div></div><div className="status-cell">{mergedChip(summary?.merged ?? false, worktree.branch)}{changes !== undefined && changes !== null && (changes ? <button className="status-chip dirty" type="button" title="Review working changes: the uncommitted diff against HEAD" onClick={(event) => { event.stopPropagation(); setSelectedWorktreePath(worktree.path); void openReview({ kind: "worktree", worktree }, activeRepoPath, { base: workingChangesBase(worktree), scope: "all", reversed: false }); }}>{changesLabel(changes)}</button> : <span className="status-chip clean">Clean</span>)}{syncChip(syncBase, ahead, behind, (base) => { setSelectedWorktreePath(worktree.path); void openReview({ kind: "worktree", worktree }, activeRepoPath, { base, scope: "committed", reversed: false }); })}</div><div className="last-commit-cell">{summary ? <><span className="row-commit-subject">{summary.subject}</span><span className="row-commit-age">{summary.author} · {relativeTime(summary.commit_date)}</span></> : <span className="row-commit-age">{detached && <span className="commit-hash"><span title={worktree.head}>HEAD {shortToken(worktree.head)}</span><CopyButton ghost value={worktree.head} label={`Copy commit hash ${shortToken(worktree.head)}`} /></span>}</span>}</div></div><button className="pin-button surface-pin" type="button" aria-label={`${pinned ? "Unpin" : "Pin"} worktree ${shortToken(worktree.branch)}`} title={`${pinned ? "Unpin" : "Pin"} worktree`} onClick={(event) => { event.stopPropagation(); void toggleSurfacePin(activeRepoPath, "worktree", worktree.path, !pinned); }}>{pinned ? <PinOff size={12} /> : <Pin size={12} />}</button></div>;
-        })}</div>{filteredWorktrees.length === 0 && <div className="filter-empty">{overviewNeedle ? `No worktrees match "${overviewQuery}"` : "No worktrees"}</div>}</>}{overviewTab !== "worktrees" && <><div className="table-header" aria-hidden="true">{overviewTab === "archived" ? <><span>Archived surface</span><span>Detail</span><span>Last seen</span></> : <><span>Branch</span><span>Sync</span><span>Last commit</span></>}</div><div className="worktree-list">{overviewTab === "archived" ? <>{overviewSlice(filteredGone).map((surface) => archivedRow(surface))}{filteredGone.length === 0 && <div className="filter-empty">{overviewNeedle ? `No archived surfaces match "${overviewQuery}"` : "No archived surfaces"}</div>}</> : <>{overviewSlice(overviewTab === "branches" ? filteredBranches : filteredRemoteBranches).map((branch) => inventoryBranchRow(branch))}{(overviewTab === "branches" ? filteredBranches : filteredRemoteBranches).length === 0 && <div className="filter-empty">{overviewNeedle ? `No branches match "${overviewQuery}"` : inventoryUnavailable ? "Branch inventory unavailable" : activeInventory ? "No branches" : "Loading branch inventory..."}</div>}</>}</div></>}{overviewPageCount > 1 && <Pager label={activeTab.pager} page={visibleOverviewPage} pages={overviewPageCount} total={overviewTotal} size={activeTab.pageSize} onPage={setOverviewPage} />}</>}</section>}</main>{settingsLocation && <SettingsPage settings={settings} saveError={settingsSaveError} onBack={() => nav.back()} onChange={(next) => void updateSettings(next)} />}</section>{arrivals.length > 0 && <div className="arrival-cue" role="status" aria-label="Review arrivals"><button className="arrival-open" type="button" onClick={openOldestArrival}><Inbox size={13} /><span><strong>{arrivals[arrivals.length - 1].agent_name}</strong> delivered a review{arrivals.length > 1 ? ` (+${arrivals.length - 1} new)` : ""}</span></button><button className="arrival-dismiss" type="button" aria-label="Dismiss review arrivals" title="Dismiss" onClick={dismissArrivals}><X size={12} /></button></div>}{paletteOpen && <dialog className="palette-backdrop" ref={paletteRef} aria-label="Find repositories, worktrees, and conversations" onClose={handlePaletteClosed} onKeyDown={handlePaletteKeyDown} onMouseDown={(event) => { if (event.target === event.currentTarget) closePalette(); }}><div className="palette" onMouseDown={(event) => event.stopPropagation()}><div className="palette-input-row"><Search size={17} /><input autoFocus value={query} onChange={(event) => { setQuery(event.currentTarget.value); setSearchPage(0); }} placeholder="Find repositories, worktrees, and conversations" /><button type="button" aria-label="Close search" onClick={closePalette}><X size={16} /></button></div><div className="palette-results">{visiblePaletteRows.map((row, index) => {
+        })}</div>{filteredWorktrees.length === 0 && <div className="filter-empty">{overviewNeedle ? `No worktrees match "${overviewQuery}"` : "No worktrees"}</div>}</>}{overviewTab !== "worktrees" && <><div className="table-header" aria-hidden="true">{overviewTab === "archived" ? <><span>Archived surface</span><span>Detail</span><span>Last seen</span></> : <><span>Branch</span><span>Sync</span><span>Last commit</span></>}</div><div className="worktree-list">{overviewTab === "archived" ? <>{overviewSlice(filteredGone).map((surface) => archivedRow(surface))}{filteredGone.length === 0 && <div className="filter-empty">{overviewNeedle ? `No archived surfaces match "${overviewQuery}"` : "No archived surfaces"}</div>}</> : <>{overviewSlice(overviewTab === "branches" ? filteredBranches : filteredRemoteBranches).map((branch) => inventoryBranchRow(branch))}{(overviewTab === "branches" ? filteredBranches : filteredRemoteBranches).length === 0 && <div className="filter-empty">{overviewNeedle ? `No branches match "${overviewQuery}"` : inventoryUnavailable ? "Branch inventory unavailable" : activeInventory ? "No branches" : "Loading branch inventory..."}</div>}</>}</div></>}{overviewPageCount > 1 && <Pager label={activeTab.pager} page={visibleOverviewPage} pages={overviewPageCount} total={overviewTotal} size={activeTab.pageSize} onPage={setOverviewPage} />}</>}</section>}</main>{settingsLocation && <SettingsPage settings={settings} saveError={settingsSaveError} onBack={() => nav.back()} onChange={(next) => void updateSettings(next)} />}</section>{latestArrival && <div className="arrival-cue" role="status" aria-label="Review arrivals"><button className="arrival-open" type="button" onClick={openOldestArrival}><Inbox size={13} /><span><strong>{latestArrival.actor}</strong> {arrivalSentenceBody(latestArrival.moment, arrivalChangeLabel(latestArrival.target_kind, latestArrival.target_key), arrivalProjectLabel(repos, latestArrival.repo_path))}{olderArrivalsSuffix(arrivals.length - 1)}</span></button><button className="arrival-dismiss" type="button" aria-label="Dismiss review arrivals" title="Dismiss" onClick={dismissArrivals}><X size={12} /></button></div>}{paletteOpen && <dialog className="palette-backdrop" ref={paletteRef} aria-label="Find repositories, worktrees, and conversations" onClose={handlePaletteClosed} onKeyDown={handlePaletteKeyDown} onMouseDown={(event) => { if (event.target === event.currentTarget) closePalette(); }}><div className="palette" onMouseDown={(event) => event.stopPropagation()}><div className="palette-input-row"><Search size={17} /><input autoFocus value={query} onChange={(event) => { setQuery(event.currentTarget.value); setSearchPage(0); }} placeholder="Find repositories, worktrees, and conversations" /><button type="button" aria-label="Close search" onClick={closePalette}><X size={16} /></button></div><div className="palette-results">{visiblePaletteRows.map((row, index) => {
           const header = index === 0 || visiblePaletteRows[index - 1].section !== row.section;
           const sectionLabel = header && <div className="nav-section-label">{PALETTE_SECTION_LABELS[row.section]}</div>;
           if (row.section === "repos") { const result = row.result; return <Fragment key={`repos:${result.repo.path}:${result.worktree?.path ?? "repo"}`}>{sectionLabel}<button type="button" title={result.worktree?.path ?? result.repo.path} onClick={() => { activateRepo(result.repo); if (!result.worktree) { closePalette(); } else { setSelectedWorktreePath(result.worktree.path); void openReview({ kind: "worktree", worktree: result.worktree }, result.repo.path); closePalette(); } }}>{result.worktree ? <GitBranch size={16} /> : <FolderGit2 size={16} />}<span><strong>{result.worktree ? shortToken(result.worktree.branch) : result.repo.name}</strong>{result.worktree && <small>{result.repo.name}</small>}</span><kbd>Enter</kbd></button></Fragment>; }

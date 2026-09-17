@@ -137,9 +137,17 @@ reviewers. A delivered review lands in the **REVIEWS** strip as an agent
 card (name, model, time, command context), and its findings become
 comments in the same stream as yours: inline on the diff, with P0-P3
 severity badges. Use the **HUMAN** and **AGENT** filters to separate
-voices, reply to any thread, and resolve what is handled. An arrival
-cue appears when a review lands elsewhere, so a delivery never silently
-misses you.
+voices, reply to any thread, and resolve what is handled.
+
+Deliveries reach you wherever you are. When an agent delivers a review
+or announces it is starting to review, an arrival cue names the agent,
+the change, and the project, and stacks older arrivals behind a "+N
+older" count until you open or dismiss it. With the app window
+unfocused, the same moment also raises an OS notification; the first
+unfocused send asks the platform for notification permission. Turning
+off **Settings > General > Notifications** silences both the cue and
+the toasts for new arrivals; the Inbox and Activity still narrate
+everything.
 
 Agents can also read reviews, post comments, and answer threads through
 the same API, which is what makes cross-checking and consolidating
@@ -364,8 +372,9 @@ state.
 ## Tune the app
 
 Settings has three pages. **General** covers appearance (theme,
-interface zoom) and diff behavior (layout, highlighting, whitespace,
-line wrap). **Agent API** controls the local endpoint your coding agents
+interface zoom), diff behavior (layout, highlighting, whitespace,
+line wrap), and notifications (the arrival cue and desktop toasts).
+**Agent API** controls the local endpoint your coding agents
 connect through; saved address and port changes apply through that
 section's Restart action, no app restart needed. **About** names the app
 and its version (the same value agents see from the endpoint), and its

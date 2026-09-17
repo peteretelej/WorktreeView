@@ -113,6 +113,9 @@ pub struct Settings {
     pub changed_files_view: ChangedFilesView,
     pub zoom: f64,
     pub mcp_enabled: bool,
+    // Master gate for arrival notifications: the webview's arrival handler
+    // suppresses both the cue and OS toasts while it is off.
+    pub notifications_enabled: bool,
     pub mcp_listen_address: String,
     pub mcp_port: u16,
     // The user's Activity seen cursor (an events.id). Deliberately absent
@@ -146,6 +149,7 @@ impl Default for Settings {
             changed_files_view: ChangedFilesView::Tree,
             zoom: 1.0,
             mcp_enabled: true,
+            notifications_enabled: true,
             mcp_listen_address: "127.0.0.1".into(),
             mcp_port: 9888,
             activity_seen_id: 0,
@@ -418,6 +422,11 @@ pub(crate) async fn get_settings_in_pool(pool: &SqlitePool) -> Result<Settings, 
                     settings.mcp_enabled = flag;
                 }
             }
+            "notifications_enabled" => {
+                if let Some(flag) = settings_bool_from_value(&value) {
+                    settings.notifications_enabled = flag;
+                }
+            }
             "mcp_listen_address" => {
                 if !value.trim().is_empty() {
                     settings.mcp_listen_address = value;
@@ -480,6 +489,10 @@ pub(crate) async fn set_settings_in_pool(
         (
             "mcp_enabled",
             settings_bool_value(settings.mcp_enabled).to_string(),
+        ),
+        (
+            "notifications_enabled",
+            settings_bool_value(settings.notifications_enabled).to_string(),
         ),
         ("mcp_listen_address", settings.mcp_listen_address.clone()),
         ("mcp_port", settings.mcp_port.to_string()),
@@ -628,6 +641,7 @@ mod tests {
             changed_files_view: ChangedFilesView::List,
             zoom: 1.25,
             mcp_enabled: false,
+            notifications_enabled: false,
             mcp_listen_address: "0.0.0.0".into(),
             mcp_port: 9899,
             ..Settings::default()
@@ -695,7 +709,7 @@ mod tests {
     async fn corrupt_settings_rows_fall_back_to_defaults() {
         let pool = test_pool().await;
         sqlx::query(
-            "INSERT INTO settings (key, value) VALUES ('theme', 'neon'), ('diff_layout', 'fancy'), ('whitespace_visible', 'maybe'), ('line_wrap', 'sometimes'), ('changed_files_view', 'columns'), ('zoom', 'huge'), ('mcp_enabled', 'perhaps'), ('mcp_listen_address', ''), ('mcp_port', 'not-a-port')",
+            "INSERT INTO settings (key, value) VALUES ('theme', 'neon'), ('diff_layout', 'fancy'), ('whitespace_visible', 'maybe'), ('line_wrap', 'sometimes'), ('changed_files_view', 'columns'), ('zoom', 'huge'), ('mcp_enabled', 'perhaps'), ('notifications_enabled', 'perhaps'), ('mcp_listen_address', ''), ('mcp_port', 'not-a-port')",
         )
         .execute(&pool)
         .await

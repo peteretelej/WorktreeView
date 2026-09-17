@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "dialog:allow-open",
+    "notification:default",
     "core:webview:allow-set-webview-zoom"
   ]
 }

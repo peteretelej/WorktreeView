@@ -188,5 +188,8 @@ including request-less rows and per-row last-activity previews, stale
 badges, and named-reviewer progress), Reviews and Threads
 listings, a thread conversation surface, and an Activity feed over the
 app's append-only event log with a seen watermark and Mark all seen.
-Planned work includes an AI-assisted review layer that annotates review
-views, and packaging for distribution ([release.md](release.md)).
+Arrivals reach the human wherever they are: the webview's single
+arrival handler splits on window focus between an in-app cue and an OS
+toast, gated by one persisted Settings toggle. Planned work includes an
+AI-assisted review layer that annotates review views, and packaging for
+distribution ([release.md](release.md)).

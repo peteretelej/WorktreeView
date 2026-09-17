@@ -257,6 +257,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             initialize(app).map_err(|error| {
                 // Setup errors surface only as a stderr panic, which a
