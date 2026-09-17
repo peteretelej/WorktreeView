@@ -79,7 +79,7 @@ export function PortalReviewsTab({ payload, repoNames, reviewsState, reviewsProj
     </div>
     {payload?.error ? <ReviewsEmpty title="Reviews could not be loaded" detail={payload.error} /> : payload === null || (payload.loading && rows.length === 0) ? <ReviewsEmpty title="Loading reviews..." detail="Reading stored review activity." /> : rows.length === 0 ? <ReviewsEmpty title="No review activity yet" detail="Reviews appear here once a request, comment, or submission is recorded." /> : <>
       <div className={`table-header attention-head ${narrow ? "attention-narrow" : ""}`} aria-hidden="true"><span>Project</span><span>Change</span><span>Requester</span><span>Status</span><span>Round</span><span>Findings</span>{!narrow && <span>Last event</span>}{!narrow && <span className="attention-age">Age</span>}</div>
-      <div className={`worktree-list attention-list ${narrow ? "attention-narrow" : ""}`}>{visible.map((row) => {
+      <div className={`attention-list ${narrow ? "attention-narrow" : ""}`}>{visible.map((row) => {
         const chip = reviewsStatusChip(row);
         const openRow = () => onOpenRow(row);
         const p0 = row.unresolved_finding_counts.P0;
@@ -166,7 +166,7 @@ export function PortalThreadsTab({ payload, repoNames, threadsState, threadsVoic
             <span>{group.open_count} open</span>
           </span>
         </div>
-        <div className="worktree-list attention-list">{group.threads.map((thread) => {
+        <div className="attention-list">{group.threads.map((thread) => {
           const openThread = () => onOpenThread(thread);
           const resolved = thread.resolved_at !== null;
           return <div key={thread.root_comment_id} className={`attention-row thread-row ${resolved ? "thread-resolved" : ""}`} role="button" tabIndex={0} onClick={openThread} onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openThread(); } }}>
@@ -328,7 +328,7 @@ export function PortalActivityTab({ payload, repoNames, activityProject, onProje
     {payload?.error ? <ReviewsEmpty title="Activity could not be loaded" detail={payload.error} /> : payload === null ? <ReviewsEmpty title="Loading activity..." detail="Reading the stored event log." /> : events.length === 0 ? <ReviewsEmpty title="No activity yet" detail="Review requests, comments, and submissions land here as they happen." /> : <>
       {groups.map((group) => <div key={`${group.label}:${group.events[0].id}`} className="activity-day">
         <div className="activity-day-label">{group.label}</div>
-        <div className="worktree-list attention-list activity-list">{group.events.map((event) => {
+        <div className="attention-list activity-list">{group.events.map((event) => {
           flatIndex += 1;
           const family = activityKindFamily(event.kind);
           const Icon = ACTIVITY_ICONS[family];

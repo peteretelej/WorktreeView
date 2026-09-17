@@ -1497,6 +1497,9 @@ h2 {
   text-transform: uppercase;
 }
 
+/* Empty-list floor for the Overview inventory lists only; the portal and
+   inbox lists reuse .attention-list without it so short lists hug their
+   rows instead of stretching to this height. */
 .worktree-list {
   min-height: 180px;
 }

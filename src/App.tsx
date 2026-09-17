@@ -1296,7 +1296,7 @@ function AttentionQueueView({ queue, endpointEnabled, tab, onTab, onOpenRow }: {
     <div className="overview-tabs" role="tablist" aria-label="Inbox categories">{ATTENTION_TABS.map((item) => <button key={item.id} role="tab" type="button" aria-selected={tab === item.id} className={`overview-tab ${tab === item.id ? "active" : ""}`} onClick={() => onTab(item.id)}>{item.label}<span className="tab-count">{counts[item.id]}</span></button>)}</div>
     {rows.length === 0 ? <Empty icon={<Inbox size={24} />} title="Nothing needs attention" detail="Review requests and findings land here as agents work." /> : <>
       <div className={`table-header attention-head ${narrow ? "attention-narrow" : ""}`} aria-hidden="true"><span>Project</span><span>Change</span><span>Requester</span><span>Status</span><span>Round</span><span>Findings</span>{!narrow && <span className="attention-age">Age</span>}</div>
-      <div className={`worktree-list attention-list ${narrow ? "attention-narrow" : ""}`}>{visible.map((row) => {
+      <div className={`attention-list ${narrow ? "attention-narrow" : ""}`}>{visible.map((row) => {
         const status = attentionStatus(row);
         const openRow = () => onOpenRow(row);
         const blocking = row.unresolved_p0 + row.unresolved_p1;
