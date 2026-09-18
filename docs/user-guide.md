@@ -239,7 +239,7 @@ badges its row stale instead of moving it. Rows naming reviewers carry a
 progress sentence ("1 of 2 reviews back"), counting how many of the
 named reviewers have delivered a submission.
 
-![The Pulse inbox with a changes-requested review](images/guide-attention.webp)
+![The Pulse inbox with an escalated review waiting on the human](images/guide-pulse-inbox.webp)
 
 Each inbox row carries a preview line summarizing the identity's latest
 activity: who acted last, what they did, how long ago, and how many
@@ -297,6 +297,8 @@ Open, Settled, Stale, No request) narrow by state with live counts:
 repository, and the search box filters by label, head or base sha,
 requester, and note text as you type.
 
+![The Pulse Reviews tab listing every review identity and its state](images/guide-pulse-reviews.webp)
+
 Clicking a row opens the review the same way the inbox does, at its
 recorded head and base. The row carries the stored refs, so the review
 still opens when the project has moved on disk or been removed from the
@@ -322,6 +324,8 @@ Resolved, All) and by voice (All, Human, Agents, reading any
 participant), the project select narrows to one repository, and the
 search box matches thread and reply text as you type.
 
+![The Pulse Threads tab grouped by change, with participants and severities](images/guide-pulse-threads.webp)
+
 Clicking a thread row opens the review it lives on, scrolled to that
 thread and highlighting it; a line-anchored thread also opens its file
 in the diff and lands on the anchored row. The row carries the stored
@@ -344,6 +348,8 @@ the diff on an anchored line, so precise anchor drift keeps being a
 review-surface question. **Copy link** shares the thread's in-app path
 (`pulse/thread/<id>`) as text; it is an in-app route label, not a URL.
 
+![A thread opened in its review, anchored in the diff with the conversation expanded](images/guide-pulse-thread.webp)
+
 ## Read the Activity tab
 
 The **Activity** tab in Pulse answers "what happened" across every
@@ -360,6 +366,8 @@ does not drift while you read. **Mark all seen** advances that marker to
 the newest event: the divider clears, and the inbox's Recent bucket
 drains with it. Everything stays local; the feed reads the
 app's own event log and never talks to the network.
+
+![The Pulse Activity tab with the new-since divider](images/guide-pulse-activity.webp)
 
 ## Keep projects current
 
