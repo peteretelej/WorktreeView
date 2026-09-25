@@ -10,9 +10,13 @@ home directory.
 
 ## Install shape
 
-- The `worktreeview-server` binary, built from the same crate as the
-  desktop app (`cargo build --release --manifest-path
-  src-tauri/Cargo.toml --bins` produces it beside the desktop binary).
+- The `worktreeview-server` binary: download the release tarball
+  (`worktreeview-server-<version>-<target>.tar.gz`, with a `.sha256`
+  beside it for `sha256sum -c`) from the release page, or build from
+  the same crate as the desktop app (`cargo build --release
+  --manifest-path src-tauri/Cargo.toml --bins` produces it beside the
+  desktop binary). Targets: `linux-amd64`, `macos-arm64`, `macos-x64`,
+  `windows-x64`.
 - A server home directory, holding the store and the endpoint config
   file. The default is `~/.worktreeview-server/` (`~` is the user
   profile); relocate it with `--home <dir>` or

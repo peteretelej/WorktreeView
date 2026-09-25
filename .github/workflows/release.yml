@@ -16,14 +16,23 @@ jobs:
         include:
           - platform: macos-latest
             args: --target aarch64-apple-darwin
+            bindir: aarch64-apple-darwin
+            target: macos-arm64
           - platform: macos-latest
             args: --target x86_64-apple-darwin
+            bindir: x86_64-apple-darwin
+            target: macos-x64
           - platform: ubuntu-24.04
             args: ''
+            bindir: ''
+            target: linux-amd64
           - platform: windows-latest
             args: ''
+            bindir: ''
+            target: windows-x64
     runs-on: ${{ matrix.platform }}
-    timeout-minutes: 60
+    # covers the added server build on the slowest leg
+    timeout-minutes: 75
     permissions:
       contents: write
     steps:
@@ -81,13 +90,42 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: WorktreeView v__VERSION__
-          releaseBody: Installers for Windows, macOS, and Linux. Builds are unsigned, so Windows SmartScreen and macOS Gatekeeper warn on first launch; see CONTRIBUTING.md in case you'd prefer to build from source.
+          releaseBody: Installers for Windows, macOS, and Linux, plus headless server tarballs (worktreeview-server-<version>-<target>.tar.gz with a .sha256 beside it; see docs/server.md). Builds are unsigned, so Windows SmartScreen and macOS Gatekeeper warn on first launch; see CONTRIBUTING.md in case you'd prefer to build from source.
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true
           uploadUpdaterJson: false
           uploadUpdaterSignatures: false
           args: ${{ matrix.args }}
+
+      - name: Build server binary
+        # a plain cargo build keeps the bundling run feature-free, so the
+        # server bin rides the release without entering desktop bundles
+        timeout-minutes: 20
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --bin worktreeview-server ${{ matrix.args }}
+
+      - name: Upload server tarball
+        shell: bash
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="worktreeview-server-${version}-${{ matrix.target }}"
+          bin="worktreeview-server"
+          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
+            bin="worktreeview-server.exe"
+          fi
+          tdir="src-tauri/target/release"
+          if [ -n "${{ matrix.bindir }}" ]; then
+            tdir="src-tauri/target/${{ matrix.bindir }}/release"
+          fi
+          staging="$(mktemp -d)"
+          cp "$tdir/$bin" "$staging/"
+          tar -czf "$name.tar.gz" -C "$staging" "$bin"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          gh release upload "${GITHUB_REF_NAME}" "$name.tar.gz" "$name.tar.gz.sha256" --clobber
 
   bump-version:
     needs: release
