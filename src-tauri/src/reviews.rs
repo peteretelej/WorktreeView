@@ -360,15 +360,18 @@ fn comment_not_found() -> CommandError {
 
 // An agent may edit or delete only comments it authored through its own
 // token; human comments and legacy unowned comments are never
-// agent-mutable. Any human actor may edit or delete any human-authored
-// comment (the team's all-members-equal decision; agent-owned comments
-// are never human-editable because this gate only opens for agents on
-// their own rows). The error code is distinct from shape errors so clients
-// can tell "not your comment" from a malformed request.
+// agent-mutable. Humans may edit or delete any human-authored comment
+// (the team's all-members-equal decision) and never an agent-owned one.
+// The error code is distinct from shape errors so clients can tell
+// "not your comment" from a malformed request.
 fn ensure_agent_may_mutate(actor: &Actor, author_token_id: Option<i64>) -> Result<(), CommandError> {
     match actor {
-        Actor::Human(_) => Ok(()),
+        Actor::Human(_) if author_token_id.is_none() => Ok(()),
         Actor::Agent(identity) if author_token_id == Some(identity.token_id) => Ok(()),
+        Actor::Human(_) => Err(CommandError::new(
+            "not_comment_owner",
+            "Agent-owned comments can only be edited or deleted by the agent token that authored them.",
+        )),
         Actor::Agent(_) => Err(CommandError::new(
             "not_comment_owner",
             "Only the agent token that authored a comment can edit or delete it.",
@@ -2159,10 +2162,40 @@ mod tests {
         let reopened = set_comment_resolved_in_pool(&pool, root.id, false, &other).await.unwrap();
         assert!(reopened.resolved_at.is_none());
 
-        // The human IPC path is unchanged: edit and delete without checks.
+        // The human path stays open on human-authored rows: edit and delete.
         let edited = edit_comment_in_pool(&pool, root.id, "human edit", &human()).await.unwrap();
         assert_eq!(edited.body, "human edit");
         delete_comment_in_pool(&pool, root.id, &human()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn humans_edit_and_delete_only_human_authored_comments() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let author = agent_actor(&pool, "agent-a").await;
+        let agent_comment = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("agent note"), &author, None)
+            .await
+            .unwrap();
+        let human_comment = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("human note"), &human(), None)
+            .await
+            .unwrap();
+
+        let edited = edit_comment_in_pool(&pool, human_comment.id, "human note, edited", &human())
+            .await
+            .unwrap();
+        assert_eq!(edited.body, "human note, edited");
+        let denied = edit_comment_in_pool(&pool, agent_comment.id, "hijack", &human()).await;
+        assert_eq!(denied.unwrap_err().code, "not_comment_owner");
+
+        delete_comment_in_pool(&pool, human_comment.id, &human()).await.unwrap();
+        assert_eq!(
+            delete_comment_in_pool(&pool, agent_comment.id, &human()).await.unwrap_err().code,
+            "not_comment_owner"
+        );
+        let remaining = list_comments_in_pool(&pool, "/demo", "base", "/demo", "worktree")
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1, "only the human-authored comment was deleted");
     }
 
     #[tokio::test]

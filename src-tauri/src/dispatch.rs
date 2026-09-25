@@ -740,6 +740,7 @@ struct NoArgs {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::{create_agent_token_in_pool, AgentIdentity};
     use crate::identity::{create_first_admin_in_pool, verify_user_token_in_pool};
     use crate::testutil::{seed_repo, test_pool};
     use crate::transport::{
@@ -871,6 +872,54 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(payload["author_name"], "ops");
         assert_eq!(payload["body"], "edited by dana");
+    }
+
+    // The ownership gate through the command face: a member still edits and
+    // deletes human-authored comments, while agent-authored ones answer
+    // not_comment_owner to every human bearer.
+    #[tokio::test]
+    async fn comment_routes_refuse_human_mutation_of_agent_comments() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let state = test_state(pool.clone()).await;
+        let (admin, member) = admin_and_member(&pool).await;
+
+        let created = create_agent_token_in_pool(&pool, "reviewer-bot").await.unwrap();
+        let author = Actor::Agent(AgentIdentity { token_id: created.token.id, name: "reviewer-bot".into() });
+        let draft: CommentDraft =
+            serde_json::from_value(serde_json::json!({ "body": "agent finding", "lines": [] })).unwrap();
+        let agent_comment = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft, &author, None)
+            .await
+            .unwrap();
+
+        let args = serde_json::json!({
+            "repoPath": "/demo",
+            "baseSha": "base",
+            "targetKey": "/demo",
+            "targetKind": "worktree",
+            "draft": { "body": "a human note", "lines": [] },
+        });
+        let response = serve(&state, &admin, "create_comment", args.to_string().as_bytes()).await;
+        let (status, human_comment) = body(response).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The human-authored row stays open to another member.
+        let edit = serde_json::json!({ "commentId": human_comment["id"], "body": "edited by dana" });
+        let response = serve(&state, &member, "edit_comment", edit.to_string().as_bytes()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The agent-authored row refuses a human bearer on both mutations.
+        let edit = serde_json::json!({ "commentId": agent_comment.id(), "body": "hijack" });
+        let response = serve(&state, &member, "edit_comment", edit.to_string().as_bytes()).await;
+        let (status, payload) = body(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(payload["code"], "not_comment_owner");
+
+        let delete = serde_json::json!({ "commentId": agent_comment.id() });
+        let response = serve(&state, &member, "delete_comment", delete.to_string().as_bytes()).await;
+        let (status, payload) = body(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(payload["code"], "not_comment_owner");
     }
 
     // Admin enforcement: the agent-token and management routes refuse a
