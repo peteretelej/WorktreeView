@@ -1416,7 +1416,7 @@ mod tests {
         claim_request_in_pool(&pool, approved.id, &Actor::Agent(reviewer), &noop_notify())
             .await
             .unwrap();
-        set_request_verdict_in_pool(&pool, approved.id, true, &Actor::Human, &noop_notify())
+        set_request_verdict_in_pool(&pool, approved.id, true, &Actor::Human("human".into()), &noop_notify())
             .await
             .unwrap();
         set_updated_at(&pool, approved.id, 1000).await;
@@ -1508,7 +1508,7 @@ mod tests {
         claim_request_in_pool(&pool, approved_moved.id, &Actor::Agent(reviewer), &noop_notify())
             .await
             .unwrap();
-        set_request_verdict_in_pool(&pool, approved_moved.id, true, &Actor::Human, &noop_notify())
+        set_request_verdict_in_pool(&pool, approved_moved.id, true, &Actor::Human("human".into()), &noop_notify())
             .await
             .unwrap();
         crate::retrospection::record_surface_open(
@@ -1521,7 +1521,7 @@ mod tests {
         claim_request_in_pool(&pool, approved.id, &Actor::Agent(reviewer), &noop_notify())
             .await
             .unwrap();
-        set_request_verdict_in_pool(&pool, approved.id, true, &Actor::Human, &noop_notify())
+        set_request_verdict_in_pool(&pool, approved.id, true, &Actor::Human("human".into()), &noop_notify())
             .await
             .unwrap();
         crate::retrospection::record_surface_open(

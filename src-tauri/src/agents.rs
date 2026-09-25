@@ -32,11 +32,22 @@ pub struct AgentToken {
 }
 
 // The secret exists only in this value: shown once at creation, never stored
-// or logged; the store keeps only its SHA-256 hex hash.
-#[derive(Debug, Serialize)]
+// or logged; the store keeps only its SHA-256 hex hash. Debug redacts the
+// secret wherever the creating face (Settings IPC or the admin API) logs;
+// serialization keeps it so the creating client can show it once.
+#[derive(Serialize)]
 pub struct CreatedAgentToken {
     pub token: AgentToken,
     pub secret: String,
+}
+
+impl std::fmt::Debug for CreatedAgentToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreatedAgentToken")
+            .field("token", &self.token)
+            .field("secret", &"[redacted]")
+            .finish()
+    }
 }
 
 pub(crate) fn generate_token() -> Result<String, String> {

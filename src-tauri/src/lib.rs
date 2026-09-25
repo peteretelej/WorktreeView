@@ -1,6 +1,7 @@
 mod agents;
 mod cache;
 mod commands;
+mod dispatch;
 mod events;
 mod git;
 mod home;

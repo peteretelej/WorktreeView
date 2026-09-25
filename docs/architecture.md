@@ -7,17 +7,23 @@ normalized domain data through narrow, typed Tauri commands.
 
 ## Backend (`src-tauri/src`)
 
-- `commands.rs`: thin typed IPC adapters. The full command surface:
-  `open_repo`, `open_remote_repo`, `list_repos`, `list_worktrees`, `list_worktree_status`,
-  `remove_repo`, `get_branch_inventory`, `fetch_project`,
-  `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
+- `commands.rs`: thin typed IPC adapters. The full command surface is 46
+  commands: `open_repo`, `open_remote_repo`, `list_repos`, `list_worktrees`,
+  `list_worktree_status`, `remove_repo`, `get_branch_inventory`,
+  `fetch_project`, `fetch_review_objects`, `set_repo_pinned`,
+  `set_surface_pinned`, `list_refs`, `list_commits`, `describe_commit`,
+  `list_review_changes`, `list_surfaces`, `list_attention`,
+  `list_portal_reviews`, `list_portal_threads`, `get_portal_thread`,
+  `search_portal`, `list_portal_activity`, `mark_activity_seen`,
+  `list_requests`, `create_review_request`, `update_review_request`,
+  `read_review_patch`, `read_review_file`, `read_review_file_bytes`,
+  `open_review_file`, `open_log_dir`, `get_settings`, `set_settings`,
   `list_agent_tokens`, `create_agent_token`, `delete_agent_token`,
-  `get_mcp_status`, `restart_mcp`,
-  `list_refs`, `list_commits`, `describe_commit`, `list_review_changes`,
-  `list_surfaces`, `read_review_patch`, `read_review_file`, `open_review_file`,
-  `create_comment`,
-  `list_comments`, `list_submissions`, `reply_comment`, `set_comment_resolved`,
-  `edit_comment`, `match_comment_anchors`.
+  `get_mcp_status`, `restart_mcp`, `create_comment`, `list_comments`,
+  `list_submissions`, `reply_comment`, `set_comment_resolved`,
+  `edit_comment`, `delete_comment`, `match_comment_anchors`. The shared
+  implementations behind these adapters run without the app and are what
+  the command API dispatches to.
 - `agents.rs`: the token store: per-agent tokens as table rows with only
   their SHA-256 hex hash persisted. Secrets carry a `wv` prefix followed
   by 32 random bytes hex, generated once at creation and never stored or
@@ -34,9 +40,16 @@ normalized domain data through narrow, typed Tauri commands.
   bootstraps that admin and their initial token in one transaction and
   refuses once any user exists, which is the no-open-registration gate;
   the `worktreeview-server create-admin <name>` subcommand drives it and
-  prints the token exactly once. User deletion cascades their tokens,
-  and admin-count helpers here back the enforcement that lands with
-  human auth.
+  prints the token exactly once. The admin API rides this module:
+  `create_user_in_pool` registers a member with a first token (printed
+  once), `delete_user_in_pool` cascades tokens and refuses to remove the
+  last admin, `list_user_tokens_in_pool` / `create_user_token_in_pool` /
+  `delete_user_token_in_pool` cover the rotation and revocation lifecycle,
+  and `verify_user_token_in_pool` is the human half of the transport's
+  bearer resolution. User deletion cascades their tokens while authored
+  history stays behind as attribution; created-token values redact their
+  secret through `Debug` while serialization carries it to the creating
+  client for the one display.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
   (16 MiB per stream), a deadline (30 seconds for local probes, 300 for the
   fetch the refresh action runs), and kill-on-drop cancellation.
@@ -95,17 +108,34 @@ normalized domain data through narrow, typed Tauri commands.
   frontend only maps display sides to logical sides and places the
   results. Anchor-shape validation lives here and is authoritative for
   the package. Every mutating comment operation takes an explicit actor
-  (`Human` for the IPC commands, `Agent(identity)` at the endpoint), and
-  ownership is enforced exactly here in one site: an agent edits or
-  deletes only comments carrying its own `author_token_id`, while human
-  and legacy unowned comments are never agent-mutable; replies and
-  resolve toggles are open to any actor. It also owns the submission
+  carrying a display name (`Human(name)` for the human IPC commands and
+  the command API's authenticated user, `Agent(identity)` at the
+  endpoint), and ownership is enforced exactly here in one site: any human
+  may edit or delete any human-authored comment (the team's
+  all-members-equal decision), an agent edits or deletes only comments
+  carrying its own `author_token_id`, and agent-owned comments are never
+  human-mutable; replies and resolve toggles are open to any actor. It
+  also owns the submission
   ingest: one `ingest_submission_in_pool` validates schema, vocabulary,
   and size caps against the [client contract](agent-submissions.md),
   reuses the anchor validator, stores sections as sent, and materializes
   findings as agent comments with severity, submission reference, and the
   calling token's ownership in one transaction. `list_submissions`
   returns stored sections as typed entries, never raw JSON.
+- `dispatch.rs`: the human command API: one dispatch table serving the
+  typed command surface over uniform `POST /api/<command>` routes for
+  authenticated human actors. Coverage is classified once from the IPC
+  surface (33 straight routes any member may call, 3 admin-only
+  agent-token routes, 6 admin-only user/user-token management routes over
+  `identity.rs`, and 10 commands excluded with recorded reasons, from
+  client-local preferences to desktop-only OS and SSH actions;
+  `open_remote_repo` is a desktop affordance and the server reviews
+  repositories on their own disks); the module doc is the classification
+  of record. Route bodies are JSON objects in the
+  webview's camelCase argument convention, results serialize exactly as
+  IPC returns them, and command errors keep the IPC `{code, message}`
+  shape at HTTP 400; transport-level refusals are 401 `unauthorized`, 403
+  `forbidden`, and 400 `invalid_arguments` in the same shape.
 - `events.rs`: owns the activity-log SQL: `record_event` takes the
   caller's executor (connection or transaction) so an event commits with
   the mutation it narrates, and `list_events_in_pool` serves both order
@@ -138,14 +168,21 @@ normalized domain data through narrow, typed Tauri commands.
   handle the `get_mcp_status` command reads and the Settings Agent API
   section shows, never a startup failure, and it writes no config
   file or default token for a dead endpoint. Bearer authentication is
-  evaluated only here, once per request, against the `agent_tokens`
-  table; the resolved identity flows into every handler. Requests and
+  evaluated only here, once per request: the presented secret is hashed
+  and matched against `agent_tokens` first, then `user_tokens`, so every
+  request resolves to exactly one actor kind and the resolved identity
+  flows into every handler. The faces split by actor kind after that one
+  evaluation: the JSON-RPC and MCP faces require agent tokens (a human
+  token there gets the unchanged 401/-32001 refusal), the command API's
+  `POST /api/<command>` routes require human tokens (an agent token is
+  refused), and SSE accepts both kinds. Requests and
   responses use axum's HTTP semantics over a raw tokio connection loop
   whose request heads are parsed with httparse (hyper's own parser);
   hyper's h1 connection layer is bypassed because it does not deliver
   responses on the current Windows host (upstream-report candidate). It
   owns transport concerns only: bearer auth, JSON-RPC 2.0 framing with
-  the documented error-code matrix, and a coarse 3 MiB pre-parse body
+  the documented error-code matrix, the command API's route gate
+  (dispatching in `dispatch.rs`), and a coarse 3 MiB pre-parse body
   guard. Connections are served concurrently, one task each on the
   listener's runtime, so an open event stream never gates other
   connections; heads are capped at 64 KiB and 64 headers, and a stalled
@@ -237,7 +274,8 @@ for the utilities run with `npm run test:unit`.
 
 SQLite stores repositories, pin order, settings, retrospected surface
 identities, review sessions with their comments and agent submissions,
-review requests, plus a commit history cache: `list_commits` resolves the start
+review requests, the server's named human accounts and their bearer
+tokens, plus a commit history cache: `list_commits` resolves the start
 ref with one fresh `git rev-parse`, then serves log pages and default-base
 ancestry marks from the cache when the resolved SHAs match what was fetched
 before. Pages key on `(repo_path, start_sha, against_sha, skip, limit)` with
@@ -269,11 +307,12 @@ migration divergence handling is described at the end of this section.
 The `events` table is the append-only activity log: every review-relevant
 mutation (request lifecycle, submission delivery, comment posts and
 resolutions, surface head moves, repository registrations) writes one row
-at the shared store-layer mutation function, so human IPC and agent
-endpoint paths narrate identically and emission never sits in a handler
-layer. Rows carry the review identity when one exists (nullable
+at the shared store-layer mutation function, so human IPC, command API,
+and agent endpoint paths narrate identically and emission never sits in a
+handler layer. Rows carry the review identity when one exists (nullable
 `base_sha`/`target_key`/`target_kind`, `request_id`, `comment_id`), the
-actor (`actor_kind`/`actor_name`), a short human-readable `summary`, and
+actor (`actor_kind`/`actor_name`; human actions carry the acting
+account's display name), a short human-readable `summary`, and
 a closed `kind` vocabulary enforced by CHECK. `repo_path` carries no
 foreign key by design: removing a repository cascades its reviews and
 requests but the event narration survives in the activity feed. Events

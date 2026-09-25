@@ -1,5 +1,6 @@
 use crate::agents::{authenticate_token_in_pool, provision_default_token_in_pool, AgentIdentity};
 use crate::commands::refresh_repo;
+use crate::identity::{self, verify_user_token_in_pool};
 use crate::requests::{announce_review_in_pool, Actor as RequestActor};
 use crate::reviews::{ingest_submission_in_pool, Actor, SubmissionPayload};
 use axum::body::to_bytes;
@@ -286,11 +287,28 @@ fn bearer_secret(request: &Request) -> Option<String> {
 }
 
 // Bearer authentication is evaluated only here, once per request: the
-// presented secret is hashed and matched against the agent_tokens table.
-// Revoked, unknown, and missing secrets all answer identically so callers
-// cannot probe which tokens exist.
-async fn authenticate(state: &TransportState, secret: Option<String>) -> Option<AgentIdentity> {
-    authenticate_token_in_pool(&state.pool, secret.as_deref()?).await
+// presented secret is hashed and matched against the agent_tokens table
+// first, then the user_tokens rows. The two secret spaces are disjoint
+// (independent 256-bit draws), so a secret resolves to exactly one actor
+// kind. Revoked, unknown, and missing secrets all answer identically so
+// callers cannot probe which tokens exist.
+async fn authenticate(state: &TransportState, secret: Option<String>) -> Option<AuthenticatedActor> {
+    let secret = secret?;
+    if let Some(identity) = authenticate_token_in_pool(&state.pool, &secret).await {
+        return Some(AuthenticatedActor::Agent(identity));
+    }
+    verify_user_token_in_pool(&state.pool, &secret)
+        .await
+        .map(AuthenticatedActor::Human)
+}
+
+// The caller a request's bearer resolved to. Each face accepts one kind:
+// the agent JSON-RPC/MCP face runs on agent tokens only, the command API
+// accepts human tokens, and SSE accepts both kinds.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AuthenticatedActor {
+    Agent(AgentIdentity),
+    Human(identity::User),
 }
 
 // The one refusal shape for a failed bearer evaluation, shared by the
@@ -302,6 +320,91 @@ fn unauthorized_response() -> Response {
         UNAUTHORIZED,
         "Missing, wrong, or deleted bearer token. Discovery clients: re-read the config file for the current boot.",
     )
+}
+
+pub(crate) async fn handle(State(state): State<TransportState>, request: Request) -> Response {
+    // The presented secret is extracted before any await: connection tasks
+    // are spawned and the request body's trait object is not Sync, so no
+    // borrow of a request may cross an await.
+    let secret = bearer_secret(&request);
+    let path = request.uri().path().to_string();
+    let actor = match authenticate(&state, secret).await {
+        Some(actor) => actor,
+        None => {
+            // The presented secret is never logged, only the miss. Each
+            // face refuses in its own shape; the resolution stays shared.
+            log::warn!("endpoint rejected an unauthorized request to {}", path);
+            if path.starts_with("/api/") {
+                return crate::dispatch::unauthorized(
+                    "Missing, wrong, or deleted bearer token.",
+                );
+            }
+            return unauthorized_response();
+        }
+    };
+    let bytes = match to_bytes(request.into_body(), TRANSPORT_BODY_GUARD_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return rpc_error(
+                &Value::Null,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                REQUEST_TOO_LARGE,
+                format!("The request body exceeds the {TRANSPORT_BODY_GUARD_BYTES} byte guard."),
+            );
+        }
+    };
+    // One listener, three faces: the MCP and raw faces require an agent
+    // actor, the command API requires a human actor, and each face's
+    // refusal keeps its own shape (the agent face's JSON-RPC error matrix
+    // is unchanged).
+    if let Some(command) = path.strip_prefix("/api/") {
+        return match actor {
+            AuthenticatedActor::Human(user) => {
+                crate::dispatch::serve(&state, &user, command, &bytes).await
+            }
+            AuthenticatedActor::Agent(_) => {
+                log::warn!("command endpoint rejected an agent token calling {}", path);
+                crate::dispatch::unauthorized(
+                    "An agent token cannot call the command API; authenticate with a human token.",
+                )
+            }
+        };
+    }
+    let identity = match actor {
+        AuthenticatedActor::Agent(identity) => identity,
+        AuthenticatedActor::Human(_) => {
+            log::warn!("agent endpoint rejected a human token calling {}", path);
+            return unauthorized_response();
+        }
+    };
+    if path == "/mcp" {
+        return crate::mcp::serve(&state, identity, &bytes).await;
+    }
+    let RpcRequest { jsonrpc, id, method, params } = match serde_json::from_slice(&bytes) {
+        Ok(request) => request,
+        Err(_) => {
+            return rpc_error(
+                &Value::Null,
+                StatusCode::OK,
+                PARSE_ERROR,
+                "The request body is not valid JSON.",
+            );
+        }
+    };
+    if jsonrpc != "2.0" {
+        return rpc_error(&id, StatusCode::OK, INVALID_REQUEST, "The request is not JSON-RPC 2.0.");
+    }
+    match method.as_str() {
+        "post_review" => handle_post_review(state, id, params, identity).await,
+        "announce_review" => handle_announce_review(state, id, params, identity).await,
+        "refresh_repo" => handle_refresh_repo(state, id, params).await,
+        _ => rpc_error(
+            &id,
+            StatusCode::OK,
+            METHOD_NOT_FOUND,
+            "Unknown method; the endpoint accepts post_review and refresh_repo, plus announce_review.",
+        ),
+    }
 }
 
 async fn handle_post_review(
@@ -482,59 +585,6 @@ async fn handle_refresh_repo(state: TransportState, id: Value, params: Value) ->
         )
             .into_response(),
         Err(error) => rpc_error(&id, StatusCode::OK, INTERNAL_ERROR, error.message),
-    }
-}
-
-pub(crate) async fn handle(State(state): State<TransportState>, request: Request) -> Response {
-    let identity = match authenticate(&state, bearer_secret(&request)).await {
-        Some(identity) => identity,
-        None => {
-            // The presented secret is never logged, only the miss.
-            log::warn!("agent endpoint rejected an unauthorized request to {}", request.uri().path());
-            return unauthorized_response();
-        }
-    };
-    let path = request.uri().path().to_string();
-    let bytes = match to_bytes(request.into_body(), TRANSPORT_BODY_GUARD_BYTES).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return rpc_error(
-                &Value::Null,
-                StatusCode::PAYLOAD_TOO_LARGE,
-                REQUEST_TOO_LARGE,
-                format!("The request body exceeds the {TRANSPORT_BODY_GUARD_BYTES} byte guard."),
-            );
-        }
-    };
-    // One listener, two faces: the MCP face routes by path after the same
-    // single auth evaluation; the raw face keeps its "/" contract unchanged.
-    if path == "/mcp" {
-        return crate::mcp::serve(&state, identity, &bytes).await;
-    }
-    let RpcRequest { jsonrpc, id, method, params } = match serde_json::from_slice(&bytes) {
-        Ok(request) => request,
-        Err(_) => {
-            return rpc_error(
-                &Value::Null,
-                StatusCode::OK,
-                PARSE_ERROR,
-                "The request body is not valid JSON.",
-            );
-        }
-    };
-    if jsonrpc != "2.0" {
-        return rpc_error(&id, StatusCode::OK, INVALID_REQUEST, "The request is not JSON-RPC 2.0.");
-    }
-    match method.as_str() {
-        "post_review" => handle_post_review(state, id, params, identity).await,
-        "announce_review" => handle_announce_review(state, id, params, identity).await,
-        "refresh_repo" => handle_refresh_repo(state, id, params).await,
-        _ => rpc_error(
-            &id,
-            StatusCode::OK,
-            METHOD_NOT_FOUND,
-            "Unknown method; the endpoint accepts post_review and refresh_repo, plus announce_review.",
-        ),
     }
 }
 
@@ -728,19 +778,25 @@ async fn serve_connection(mut stream: tokio::net::TcpStream, state: TransportSta
     }
     let handled = async {
         if head.method != "POST" {
-            let response = if path == "/" || path == "/mcp" {
+            let response = if path == "/" || path == "/mcp" || path.starts_with("/api/") {
                 plain_error_response(
                     StatusCode::METHOD_NOT_ALLOWED,
-                    "POST / and POST /mcp are the only endpoints",
+                    "POST /, POST /mcp, and POST /api/<command> are the endpoints",
                 )
             } else {
-                plain_error_response(StatusCode::NOT_FOUND, "POST / and POST /mcp are the only endpoints")
+                plain_error_response(
+                    StatusCode::NOT_FOUND,
+                    "POST /, POST /mcp, and POST /api/<command> are the endpoints",
+                )
             };
             write_response(&mut stream, response).await.map_err(|_| "write failed")?;
             return Ok(());
         }
-        if path != "/" && path != "/mcp" {
-            let response = plain_error_response(StatusCode::NOT_FOUND, "POST / and POST /mcp are the only endpoints");
+        if path != "/" && path != "/mcp" && !path.starts_with("/api/") {
+            let response = plain_error_response(
+                StatusCode::NOT_FOUND,
+                "POST /, POST /mcp, and POST /api/<command> are the endpoints",
+            );
             write_response(&mut stream, response).await.map_err(|_| "write failed")?;
             return Ok(());
         }
@@ -778,12 +834,13 @@ async fn serve_connection(mut stream: tokio::net::TcpStream, state: TransportSta
 }
 
 // Builds just enough request for the bearer evaluation: only the forwarded
-// authorization header matters.
+// authorization header matters. The shared resolution accepts both actor
+// kinds, so human tokens stream events exactly as agent tokens do.
 async fn sse_identity(
     state: &TransportState,
     buffer: &[u8],
     head_len: usize,
-) -> Option<AgentIdentity> {
+) -> Option<AuthenticatedActor> {
     let mut builder = Request::builder().method("GET").uri("/events");
     for header in buffer_headers(buffer, head_len).ok()? {
         builder = builder.header(header.0, header.1);
@@ -1197,6 +1254,43 @@ mod tests {
         json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string()
     }
 
+    // POSTs to a command-API route through the same handler the socket
+    // serves; auth lives in handle(), so no listener is needed here.
+    async fn post_api(
+        state: TransportState,
+        token: Option<&str>,
+        path: &str,
+        body: &str,
+    ) -> (StatusCode, Value) {
+        let (status, raw) = post_api_raw(state, token, path, body).await;
+        (status, serde_json::from_slice(raw.as_bytes()).unwrap())
+    }
+
+    async fn post_api_raw(
+        state: TransportState,
+        token: Option<&str>,
+        path: &str,
+        body: &str,
+    ) -> (StatusCode, String) {
+        let mut builder = Request::builder().method("POST").uri(path);
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+        let request = builder.body(Body::from(body.to_string())).unwrap();
+        let response = handle(State(state), request).await;
+        let status = response.status();
+        let payload = to_bytes(response.into_body(), RESPONSE_BODY_LIMIT).await.unwrap();
+        (status, String::from_utf8_lossy(&payload).into_owned())
+    }
+
+    // One admin and one plain member, with live bearer secrets.
+    async fn admin_and_member(pool: &SqlitePool) -> (String, String) {
+        let admin = crate::identity::create_first_admin_in_pool(pool, "ops").await.unwrap();
+        let member = crate::identity::create_user_in_pool(pool, "dana").await.unwrap();
+        (admin.secret, member.secret)
+    }
+
     fn review_params(repo_path: &str) -> Value {
         json!({
             "repo_path": repo_path,
@@ -1297,6 +1391,79 @@ mod tests {
         let (status, payload) = post(state, Some(&secret), "{not json").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(payload["error"]["code"], PARSE_ERROR);
+    }
+
+    // The auth matrix across the faces: a human token is refused on the
+    // agent face with the unchanged 401/-32001 shape, an agent token is
+    // refused on the command API with the command face's own 401 shape,
+    // and a human token runs a command route.
+    #[tokio::test]
+    async fn each_face_accepts_only_its_actor_kind() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let (state, agent_secret) = test_state(pool.clone(), Arc::new(|_| {})).await;
+        let (admin_secret, member_secret) = admin_and_member(&pool).await;
+
+        // Human tokens (admin or not) on the agent face: refused.
+        let body = rpc_body(json!(1), "post_review", review_params("/demo"));
+        let (status, payload) = post(state.clone(), Some(&admin_secret), &body).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(payload["error"]["code"], UNAUTHORIZED);
+        let (status, _) = post(state.clone(), Some(&member_secret), &body).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Agent tokens on the command API: refused with the command face's
+        // shape, not the agent face's.
+        let (status, payload) =
+            post_api(state.clone(), Some(&agent_secret), "/api/list_repos", "{}").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(payload["code"], "unauthorized");
+
+        // Missing tokens on the command API: the same refusal.
+        let (status, payload) = post_api(state.clone(), None, "/api/list_repos", "{}").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(payload["code"], "unauthorized");
+
+        // A human token runs the command route and gets the shared
+        // implementation's result.
+        let (status, payload) =
+            post_api(state.clone(), Some(&admin_secret), "/api/list_repos", "{}").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload[0]["path"], "/demo");
+
+        // Admin-only routes refuse a plain member and serve an admin.
+        let (status, payload) =
+            post_api(state.clone(), Some(&member_secret), "/api/list_users", "{}").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(payload["code"], "forbidden");
+        let (status, _) =
+            post_api(state.clone(), Some(&member_secret), "/api/create_user", r#"{"name":"kim"}"#)
+                .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, payload) =
+            post_api(state, Some(&admin_secret), "/api/create_user", r#"{"name":"kim"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["user"]["name"], "kim");
+        assert!(!payload["secret"].as_str().unwrap().is_empty());
+    }
+
+    // Unknown command routes answer 404 without touching any command.
+    #[tokio::test]
+    async fn unknown_command_route_is_not_found() {
+        let pool = test_pool().await;
+        let admin = crate::identity::create_first_admin_in_pool(&pool, "ops").await.unwrap();
+        let state = TransportState {
+            pool,
+            arrivals: Arc::new(|_| {}),
+            refreshes: noop_refreshes(),
+            comment_changes: noop_comment_changes(),
+            request_changes: noop_request_changes(),
+            status: dummy_status(),
+            events: None,
+        };
+        let (status, _) =
+            post_api_raw(state, Some(&admin.secret), "/api/no_such_command", "{}").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1954,6 +2121,57 @@ mod tests {
         );
         handle.stop();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // SSE rides the shared bearer resolution, so a human token opens the
+    // same stream: the admin's secret is accepted while a member's non-admin
+    // status would change nothing about the stream.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sse_stream_accepts_a_human_token() {
+        let pool = test_pool().await;
+        let admin_secret = crate::identity::create_first_admin_in_pool(&pool, "ops")
+            .await
+            .unwrap()
+            .secret;
+        let dir = crate::testutil::test_path("transport-sse-human");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, _receiver) = tokio::sync::broadcast::channel::<PushEvent>(16);
+        let handle = start_with_events(
+            pool,
+            test_deps(&dir, Arc::new(|_| {}), noop_refreshes(), noop_comment_changes()),
+            test_config(0),
+            McpStatusHandle::for_config(&test_config(0)),
+            Some(events),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let port = handle_local_port(&dir);
+
+        let (head_landed, head_received) = std::sync::mpsc::channel();
+        let opened = read_events_stream(
+            port,
+            Some(&admin_secret),
+            "content-type: text/event-stream",
+            head_landed,
+        )
+        .join()
+        .unwrap();
+        assert!(opened.contains("HTTP/1.1 200 OK"), "unexpected response: {opened}");
+        assert!(
+            opened.contains("content-type: text/event-stream"),
+            "unexpected stream head: {opened}"
+        );
+        let _ = head_received.recv_timeout(std::time::Duration::from_secs(1));
+        handle.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The bound port for a start with port 0: the config file records it.
+    fn handle_local_port(dir: &std::path::Path) -> u16 {
+        let discovery: EndpointDiscovery =
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(dir)).unwrap()).unwrap();
+        discovery.port
     }
 
     // A restart stops the idle listener without any inbound connection,

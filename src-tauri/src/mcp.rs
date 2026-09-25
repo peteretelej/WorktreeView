@@ -2457,10 +2457,10 @@ mod tests {
 
         // The human path: the shared implementations as the IPC commands
         // call them, with no event of any kind.
-        crate::reviews::reply_comment_in_pool(&pool, root_id, "human reply", None, &Actor::Human, None)
+        crate::reviews::reply_comment_in_pool(&pool, root_id, "human reply", None, &Actor::Human("human".into()), None)
             .await
             .unwrap();
-        crate::reviews::set_comment_resolved_in_pool(&pool, root_id, true, &Actor::Human)
+        crate::reviews::set_comment_resolved_in_pool(&pool, root_id, true, &Actor::Human("human".into()))
             .await
             .unwrap();
 

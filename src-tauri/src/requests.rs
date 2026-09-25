@@ -29,13 +29,14 @@ const MIN_MAX_ROUNDS: i64 = 1;
 const MAX_MAX_ROUNDS: i64 = 3;
 
 // Who a request operation acts as: the MCP face always arrives as the
-// authenticated token id, the human IPC commands always pass Human. Human
-// parity lives here: a human performs any reviewer transition, never
-// gated by a request's named reviewers list.
+// authenticated token id, the human faces (IPC and the command API) pass
+// Human with the acting human's display name. Human parity lives here: a
+// human performs any reviewer transition, never gated by a request's
+// named reviewers list.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Actor {
     Agent(i64),
-    Human,
+    Human(String),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -282,19 +283,19 @@ async fn set_status_guarded(
 
 fn requester_key(actor: &Actor) -> Option<i64> {
     match actor {
-        Actor::Human => None,
+        Actor::Human(_) => None,
         Actor::Agent(token_id) => Some(*token_id),
     }
 }
 
 // Event attribution: the engine knows only the acting token id, so the
-// name resolves at emission; human transitions are human.
+// name resolves at emission; human transitions carry their display name.
 async fn event_actor(
     pool: &SqlitePool,
     actor: &Actor,
 ) -> Result<(&'static str, String), sqlx::Error> {
     match actor {
-        Actor::Human => Ok((events::ACTOR_HUMAN, "human".to_string())),
+        Actor::Human(name) => Ok((events::ACTOR_HUMAN, name.clone())),
         Actor::Agent(token_id) => {
             let name: Option<String> =
                 sqlx::query_scalar("SELECT name FROM agent_tokens WHERE id = ?")
@@ -666,7 +667,7 @@ pub(crate) async fn claim_request_in_pool(
     }
     let token_id = match actor {
         Actor::Agent(token_id) => *token_id,
-        Actor::Human => {
+        Actor::Human(_) => {
             return Err(invalid_transition(
                 "Only an agent token can claim a requested review; humans give verdicts.",
             ));
@@ -763,7 +764,7 @@ pub(crate) async fn withdraw_request_in_pool(
         ));
     }
     let allowed = match actor {
-        Actor::Human => true,
+        Actor::Human(_) => true,
         Actor::Agent(token_id) => request.requester_token_id == Some(*token_id),
     };
     if !allowed {
@@ -813,7 +814,7 @@ pub(crate) async fn re_request_in_pool(
         ));
     }
     let allowed = match actor {
-        Actor::Human => true,
+        Actor::Human(_) => true,
         Actor::Agent(token_id) => request.requester_token_id == Some(*token_id),
     };
     if !allowed {
@@ -1310,8 +1311,8 @@ const ATTENTION_SUBMISSION_AUTHORS_QUERY: &str = "SELECT rv.repo_path, rv.base_s
 
 // Every identity's last activity, one winner per source (comment,
 // submission, request); the queue pass picks the newest of what an
-// identity has. Human comments store the author name the review surface
-// shows ("you"), so preview lines narrate it the same way.
+// identity has. Human comments carry their display name, so preview lines
+// narrate it the same way.
 const ATTENTION_ACTIVITY_QUERY: &str = "SELECT repo_path, base_sha, target_key, target_kind, \
      kind, actor, created_at FROM ( \
      SELECT rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind, \
@@ -2029,7 +2030,7 @@ mod tests {
         // Requester re-request after changes, then another verdict round.
         let request = create(&pool, &Actor::Agent(coder), "head-2").await;
         claim(&pool, request.id, &Actor::Agent(reviewer)).await;
-        let changed = verdict(&pool, request.id, false, &Actor::Human).await;
+        let changed = verdict(&pool, request.id, false, &Actor::Human("human".into())).await;
         assert_eq!(changed.status, CHANGES_REQUESTED);
         let again = re_request(&pool, request.id, "head-3", &Actor::Agent(coder)).await;
         assert_eq!(again.status, IN_REVIEW);
@@ -2041,12 +2042,12 @@ mod tests {
         assert_eq!(withdrawn.status, WITHDRAWN);
 
         // Human-keyed creation and human withdraw of any open request.
-        let human_request = create(&pool, &Actor::Human, "head-4").await;
+        let human_request = create(&pool, &Actor::Human("human".into()), "head-4").await;
         assert_eq!(human_request.requester_token_id, None);
-        let human_withdrawn = withdraw(&pool, human_request.id, &Actor::Human).await;
+        let human_withdrawn = withdraw(&pool, human_request.id, &Actor::Human("human".into())).await;
         assert_eq!(human_withdrawn.status, WITHDRAWN);
         let agent_request = create(&pool, &Actor::Agent(coder), "head-5").await;
-        let human_takes_over = withdraw(&pool, agent_request.id, &Actor::Human).await;
+        let human_takes_over = withdraw(&pool, agent_request.id, &Actor::Human("human".into())).await;
         assert_eq!(human_takes_over.status, WITHDRAWN);
     }
 
@@ -2061,16 +2062,16 @@ mod tests {
         let agent_request = create(&pool, &Actor::Agent(coder), "head-1").await;
         observe(&pool, true).await;
         assert_eq!(get(&pool, agent_request.id).await.status, CHANGES_REQUESTED);
-        let reset = re_request(&pool, agent_request.id, "head-2", &Actor::Human).await;
+        let reset = re_request(&pool, agent_request.id, "head-2", &Actor::Human("human".into())).await;
         assert_eq!(reset.status, IN_REVIEW);
         assert_eq!(reset.round, 1);
         assert_eq!(reset.head_sha.as_deref(), Some("head-2"));
 
         // The same human parity on a human-keyed row.
-        let human_request = create(&pool, &Actor::Human, "head-3").await;
+        let human_request = create(&pool, &Actor::Human("human".into()), "head-3").await;
         observe(&pool, true).await;
         assert_eq!(get(&pool, human_request.id).await.status, CHANGES_REQUESTED);
-        let own_reset = re_request(&pool, human_request.id, "head-4", &Actor::Human).await;
+        let own_reset = re_request(&pool, human_request.id, "head-4", &Actor::Human("human".into())).await;
         assert_eq!(own_reset.status, IN_REVIEW);
         assert_eq!(own_reset.round, 1);
         assert_eq!(own_reset.head_sha.as_deref(), Some("head-4"));
@@ -2096,7 +2097,7 @@ mod tests {
             "invalid_transition"
         );
         assert_eq!(
-            set_request_verdict_in_pool(&pool, request.id, false, &Actor::Human, &noop_notify())
+            set_request_verdict_in_pool(&pool, request.id, false, &Actor::Human("human".into()), &noop_notify())
                 .await
                 .unwrap_err()
                 .code,
@@ -2110,7 +2111,7 @@ mod tests {
         let mut named = draft("head-2");
         named.reviewers = vec![token_name(&pool, reviewer).await];
         let gated = create_request_in_pool(
-            &pool, REPO, BASE, KEY, KIND, &named, &Actor::Human, &noop_notify(),
+            &pool, REPO, BASE, KEY, KIND, &named, &Actor::Human("human".into()), &noop_notify(),
         )
         .await
         .unwrap();
@@ -2122,7 +2123,7 @@ mod tests {
             "invalid_transition"
         );
         assert_eq!(
-            claim_request_in_pool(&pool, gated.id, &Actor::Human, &noop_notify())
+            claim_request_in_pool(&pool, gated.id, &Actor::Human("human".into()), &noop_notify())
                 .await
                 .unwrap_err()
                 .code,
@@ -2142,7 +2143,7 @@ mod tests {
         )
         .await;
         assert_eq!(refused.unwrap_err().code, "invalid_transition");
-        verdict(&pool, gated.id, false, &Actor::Human).await;
+        verdict(&pool, gated.id, false, &Actor::Human("human".into())).await;
         let refused = re_request_in_pool(
             &pool,
             gated.id,
@@ -2156,7 +2157,7 @@ mod tests {
 
         // Non-requester withdrawal is refused, including on human-keyed
         // rows whose requester is nobody.
-        let human_request = create(&pool, &Actor::Human, "head-10").await;
+        let human_request = create(&pool, &Actor::Human("human".into()), "head-10").await;
         assert_eq!(
             withdraw_request_in_pool(
                 &pool, human_request.id, &Actor::Agent(coder), &noop_notify(),
@@ -2168,17 +2169,17 @@ mod tests {
         );
 
         // Verdicts on and transitions out of withdrawn are refused.
-        let withdrawn = withdraw(&pool, human_request.id, &Actor::Human).await;
+        let withdrawn = withdraw(&pool, human_request.id, &Actor::Human("human".into())).await;
         assert_eq!(withdrawn.status, WITHDRAWN);
         for attempt in [
             claim_request_in_pool(&pool, withdrawn.id, &Actor::Agent(reviewer), &noop_notify())
                 .await,
-            set_request_verdict_in_pool(&pool, withdrawn.id, true, &Actor::Human, &noop_notify())
+            set_request_verdict_in_pool(&pool, withdrawn.id, true, &Actor::Human("human".into()), &noop_notify())
                 .await,
-            set_request_verdict_in_pool(&pool, withdrawn.id, false, &Actor::Human, &noop_notify())
+            set_request_verdict_in_pool(&pool, withdrawn.id, false, &Actor::Human("human".into()), &noop_notify())
                 .await,
-            withdraw_request_in_pool(&pool, withdrawn.id, &Actor::Human, &noop_notify()).await,
-            re_request_in_pool(&pool, withdrawn.id, "head-11", None, &Actor::Human, &noop_notify()).await,
+            withdraw_request_in_pool(&pool, withdrawn.id, &Actor::Human("human".into()), &noop_notify()).await,
+            re_request_in_pool(&pool, withdrawn.id, "head-11", None, &Actor::Human("human".into()), &noop_notify()).await,
         ] {
             assert_eq!(attempt.unwrap_err().code, "invalid_transition");
         }
@@ -2194,9 +2195,9 @@ mod tests {
                 .code,
             "invalid_transition"
         );
-        let approved = verdict(&pool, request.id, true, &Actor::Human).await;
+        let approved = verdict(&pool, request.id, true, &Actor::Human("human".into())).await;
         assert_eq!(
-            withdraw_request_in_pool(&pool, approved.id, &Actor::Human, &noop_notify())
+            withdraw_request_in_pool(&pool, approved.id, &Actor::Human("human".into()), &noop_notify())
                 .await
                 .unwrap_err()
                 .code,
@@ -2218,7 +2219,7 @@ mod tests {
         let again = re_request(&pool, request.id, "head-2", &Actor::Agent(coder)).await;
         assert_eq!(again.status, IN_REVIEW);
         assert_eq!(again.round, 1);
-        let approved = verdict(&pool, request.id, true, &Actor::Human).await;
+        let approved = verdict(&pool, request.id, true, &Actor::Human("human".into())).await;
         assert_eq!(approved.status, APPROVED);
         // A blocking submission after approved leaves the badge.
         observe(&pool, true).await;
@@ -2286,7 +2287,7 @@ mod tests {
 
         // Same head on changes_requested: refused (it is a re-request and
         // the head must differ).
-        verdict(&pool, request.id, false, &Actor::Human).await;
+        verdict(&pool, request.id, false, &Actor::Human("human".into())).await;
         let error = create_request_in_pool(
             &pool, REPO, BASE, KEY, KIND, &draft("head-1"), &Actor::Agent(coder), &noop_notify(),
         )
@@ -2306,7 +2307,7 @@ mod tests {
         claim(&pool, third.id, &Actor::Agent(reviewer)).await;
 
         // Same head on approved: the row returns unchanged.
-        let approved = verdict(&pool, third.id, true, &Actor::Human).await;
+        let approved = verdict(&pool, third.id, true, &Actor::Human("human".into())).await;
         let satisfied = create(&pool, &Actor::Agent(coder), "head-3").await;
         assert_eq!(satisfied.id, approved.id);
         assert_eq!(satisfied, approved);
@@ -2356,10 +2357,10 @@ mod tests {
         assert_eq!(twin.requester_token_id, Some(second));
 
         // Human requests dedup only with human-keyed rows.
-        let human = create(&pool, &Actor::Human, "head-1").await;
+        let human = create(&pool, &Actor::Human("human".into()), "head-1").await;
         assert_ne!(human.id, original.id);
         assert_eq!(human.requester_token_id, None);
-        let human_again = create(&pool, &Actor::Human, "head-1").await;
+        let human_again = create(&pool, &Actor::Human("human".into()), "head-1").await;
         assert_eq!(human_again.id, human.id);
     }
 
@@ -2701,7 +2702,7 @@ mod tests {
         assert_eq!(again.note, "On it.");
 
         // Same head after changes_requested: refused with create's message.
-        verdict(&pool, request.id, false, &Actor::Human).await;
+        verdict(&pool, request.id, false, &Actor::Human("human".into())).await;
         let error = announce_review_in_pool(
             &pool, REPO, BASE, KEY, KIND, "head-1", None, &Actor::Agent(coder), &noop_notify(),
         )
@@ -2711,7 +2712,7 @@ mod tests {
 
         // Same head on approved: returns satisfied, untouched.
         re_request(&pool, request.id, "head-2", &Actor::Agent(coder)).await;
-        let approved = verdict(&pool, request.id, true, &Actor::Human).await;
+        let approved = verdict(&pool, request.id, true, &Actor::Human("human".into())).await;
         assert_eq!(approved.status, APPROVED);
         let satisfied = announce(&pool, "head-2", Some("Again?"), &Actor::Agent(coder)).await;
         assert_eq!(satisfied.id, approved.id);
@@ -2857,7 +2858,7 @@ mod tests {
         assert_eq!(get(&pool, request.id).await.requester_token_id, None);
 
         // The orphaned row dedups as human-keyed from then on.
-        let human_match = create(&pool, &Actor::Human, "head-1").await;
+        let human_match = create(&pool, &Actor::Human("human".into()), "head-1").await;
         assert_eq!(human_match.id, request.id);
         let other = agent_token(&pool, "coder-b").await;
         let agent_row = create(&pool, &Actor::Agent(other), "head-1").await;
@@ -2888,16 +2889,16 @@ mod tests {
         // (only withdrawal leaves the list).
         let claimed = create(&pool, &Actor::Agent(coder), "head-1").await;
         claim(&pool, claimed.id, &Actor::Agent(coder)).await;
-        let human = create(&pool, &Actor::Human, "head-1").await;
+        let human = create(&pool, &Actor::Human("human".into()), "head-1").await;
         assert_ne!(human.id, claimed.id, "dedup is per requester");
-        withdraw(&pool, human.id, &Actor::Human).await;
+        withdraw(&pool, human.id, &Actor::Human("human".into())).await;
         let latest = create(&pool, &Actor::Agent(coder), "head-2").await;
         // A distinct requester: a same-requester create would refresh the
         // never-claimed head-2 row in place instead of stacking a row.
         let other = agent_token(&pool, "other-bot").await;
         let settled = create(&pool, &Actor::Agent(other), "head-4").await;
         claim(&pool, settled.id, &Actor::Agent(coder)).await;
-        verdict(&pool, settled.id, true, &Actor::Human).await;
+        verdict(&pool, settled.id, true, &Actor::Human("human".into())).await;
 
         let rows = list_requests_in_pool(&pool, REPO, BASE, KEY, KIND).await.unwrap();
         assert_eq!(
@@ -2957,7 +2958,7 @@ mod tests {
     async fn the_update_note_shares_the_create_bound_and_refreshes_only_that_column() {
         let pool = test_pool().await;
         seed_repo(&pool, REPO).await;
-        let request = create(&pool, &Actor::Human, "head-1").await;
+        let request = create(&pool, &Actor::Human("human".into()), "head-1").await;
 
         assert!(validate_request_note("   ").is_ok());
         assert!(validate_request_note(&"a".repeat(MAX_NOTE_CHARS + 1)).is_err());
@@ -3012,7 +3013,7 @@ mod tests {
         assert_eq!(fires.lock().unwrap().len(), 3);
         assert_eq!(fires.lock().unwrap()[2].status, IN_REVIEW);
 
-        set_request_verdict_in_pool(&pool, request.id, false, &Actor::Human, &notify)
+        set_request_verdict_in_pool(&pool, request.id, false, &Actor::Human("human".into()), &notify)
             .await
             .unwrap();
         assert_eq!(fires.lock().unwrap().len(), 4);
@@ -3024,7 +3025,7 @@ mod tests {
         assert_eq!(fires.lock().unwrap().len(), 5);
         assert_eq!(fires.lock().unwrap()[4].status, IN_REVIEW);
 
-        set_request_verdict_in_pool(&pool, request.id, true, &Actor::Human, &notify)
+        set_request_verdict_in_pool(&pool, request.id, true, &Actor::Human("human".into()), &notify)
             .await
             .unwrap();
         assert_eq!(fires.lock().unwrap().len(), 6);
@@ -3231,7 +3232,7 @@ mod tests {
         let coder_d = agent_token(&pool, "coder-d").await;
         let approved = create_on(&pool, &Actor::Agent(coder_d), "base-d", "head-d").await;
         claim(&pool, approved.id, &Actor::Agent(reviewer)).await;
-        verdict(&pool, approved.id, true, &Actor::Human).await;
+        verdict(&pool, approved.id, true, &Actor::Human("human".into())).await;
         seed_finding(&pool, "base-d", "P0", false).await;
 
         // Findings on an identity that never had a request.
@@ -3264,7 +3265,7 @@ mod tests {
         .await
         .unwrap();
         claim(&pool, approved_moved.id, &Actor::Agent(reviewer)).await;
-        verdict(&pool, approved_moved.id, true, &Actor::Human).await;
+        verdict(&pool, approved_moved.id, true, &Actor::Human("human".into())).await;
         crate::retrospection::record_surface_open(
             &pool, REPO, "worktree", "/wt-h", "feature-h", "/wt-h", "moved-h",
         )
@@ -3403,7 +3404,7 @@ mod tests {
         // head has nothing to report.
         let approved = create_on(&pool, &Actor::Agent(coder), "base-s", "head-s").await;
         claim(&pool, approved.id, &Actor::Agent(reviewer)).await;
-        verdict(&pool, approved.id, true, &Actor::Human).await;
+        verdict(&pool, approved.id, true, &Actor::Human("human".into())).await;
         crate::retrospection::record_surface_open(
             &pool, REPO, "worktree", KEY, "same", KEY, "head-s",
         )
@@ -3444,14 +3445,14 @@ mod tests {
         // a refused transition never narrates.
         let request = create(&pool, &Actor::Agent(coder), "head-1").await;
         create(&pool, &Actor::Agent(coder), "head-1").await;
-        assert!(claim_request_in_pool(&pool, request.id, &Actor::Human, &noop_notify())
+        assert!(claim_request_in_pool(&pool, request.id, &Actor::Human("human".into()), &noop_notify())
             .await
             .is_err());
         claim(&pool, request.id, &Actor::Agent(reviewer)).await;
-        verdict(&pool, request.id, false, &Actor::Human).await;
+        verdict(&pool, request.id, false, &Actor::Human("human".into())).await;
         re_request(&pool, request.id, "head-2", &Actor::Agent(coder)).await;
         withdraw(&pool, request.id, &Actor::Agent(coder)).await;
-        let human_request = create(&pool, &Actor::Human, "head-3").await;
+        let human_request = create(&pool, &Actor::Human("human".into()), "head-3").await;
 
         let rows = listed_events(&pool).await;
         let narrated: Vec<(&str, &str, &str)> = rows

@@ -6,13 +6,14 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::BTreeMap;
 
-// Who a mutating comment operation acts as: the human IPC always passes
-// Human, the transport passes the authenticated agent identity. Ownership
-// is enforced exactly here, never in the IPC adapters or transport
-// handlers, so both faces share one policy site.
+// Who a mutating comment operation acts as: the human faces (IPC and the
+// command API) pass the acting human's display name, the transport passes
+// the authenticated agent identity. Ownership is enforced exactly here,
+// never in the IPC adapters or transport handlers, so all faces share one
+// policy site.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Actor {
-    Human,
+    Human(String),
     Agent(AgentIdentity),
 }
 
@@ -359,11 +360,14 @@ fn comment_not_found() -> CommandError {
 
 // An agent may edit or delete only comments it authored through its own
 // token; human comments and legacy unowned comments are never
-// agent-mutable. The error code is distinct from shape errors so clients
+// agent-mutable. Any human actor may edit or delete any human-authored
+// comment (the team's all-members-equal decision; agent-owned comments
+// are never human-editable because this gate only opens for agents on
+// their own rows). The error code is distinct from shape errors so clients
 // can tell "not your comment" from a malformed request.
 fn ensure_agent_may_mutate(actor: &Actor, author_token_id: Option<i64>) -> Result<(), CommandError> {
     match actor {
-        Actor::Human => Ok(()),
+        Actor::Human(_) => Ok(()),
         Actor::Agent(identity) if author_token_id == Some(identity.token_id) => Ok(()),
         Actor::Agent(_) => Err(CommandError::new(
             "not_comment_owner",
@@ -410,8 +414,8 @@ pub(crate) async fn review_identity_of_comment(
 }
 
 // One event per successful comment mutation, written after the comment
-// commits; a failed insert fails the mutation. Human authors narrate as
-// "human" even though their stored comment name is "you". The ingest's
+// commits; a failed insert fails the mutation. Human authors narrate under
+// their display name, exactly as agents do. The ingest's
 // delivery event is the exception: it rides the ingest transaction, and
 // the finding comments it auto-creates emit nothing.
 async fn emit_comment_event(
@@ -423,7 +427,7 @@ async fn emit_comment_event(
     action: &str,
 ) -> Result<(), CommandError> {
     let (actor_kind, actor_name) = match actor {
-        Actor::Human => (events::ACTOR_HUMAN, "human".to_string()),
+        Actor::Human(name) => (events::ACTOR_HUMAN, name.clone()),
         Actor::Agent(author) => (events::ACTOR_AGENT, author.name.clone()),
     };
     let summary = format!("{action} by {actor_name}");
@@ -469,7 +473,7 @@ async fn insert_comment(
         _ => (None, None),
     };
     let (author_kind, author_name, author_token_id) = match actor {
-        Actor::Human => ("human", "you", None),
+        Actor::Human(name) => ("human", name.as_str(), None),
         Actor::Agent(identity) => ("agent", identity.name.as_str(), Some(identity.token_id)),
     };
     let result = sqlx::query(
@@ -1012,7 +1016,7 @@ pub(crate) async fn ingest_submission_in_pool(
     request_changes: &RequestChangeSink,
 ) -> Result<i64, CommandError> {
     let author_token_id = match author {
-        Actor::Human => None,
+        Actor::Human(_) => None,
         Actor::Agent(identity) => Some(identity.token_id),
     };
     validate_submission(payload)?;
@@ -1074,7 +1078,7 @@ pub(crate) async fn ingest_submission_in_pool(
     // comments above are part of the delivery and emit nothing. Riding the
     // transaction keeps event and submission atomic.
     let (actor_kind, actor_name) = match author {
-        Actor::Human => (events::ACTOR_HUMAN, "human".to_string()),
+        Actor::Human(name) => (events::ACTOR_HUMAN, name.clone()),
         Actor::Agent(_) => (events::ACTOR_AGENT, payload.agent_name.to_string()),
     };
     events::record_event(
@@ -1167,7 +1171,9 @@ mod tests {
     use super::*;
     use crate::testutil::{seed_repo, test_pool};
 
-    const HUMAN: Actor = Actor::Human;
+    fn human() -> Actor {
+        Actor::Human("human".into())
+    }
 
     fn agent(token_id: i64) -> Actor {
         Actor::Agent(AgentIdentity { token_id, name: "reviewer-bot".into() })
@@ -1212,7 +1218,7 @@ mod tests {
         let review = resolve_review_id(&pool, "/demo", "base", "/demo", "worktree")
             .await
             .unwrap();
-        create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("review note"), &HUMAN, None)
+        create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("review note"), &human(), None)
             .await
             .unwrap();
         sqlx::query(
@@ -1230,7 +1236,7 @@ mod tests {
             "/demo",
             "worktree",
             &line_draft("line note", "RIGHT", 3, 4, &["x", "y"]),
-        &HUMAN, None)
+        &human(), None)
         .await
         .unwrap();
         assert_eq!(line.side.as_deref(), Some("RIGHT"));
@@ -1239,20 +1245,20 @@ mod tests {
         assert!(line.anchor_hash.is_some());
         assert_eq!(line.snippet.as_deref(), Some("x\ny"));
         assert_eq!(line.author_kind, "human");
-        assert_eq!(line.author_name, "you");
+        assert_eq!(line.author_name, "human");
 
         let reply =
-            reply_comment_in_pool(&pool, line.id, "a reply", Some("P1".into()), &HUMAN, None).await.unwrap();
+            reply_comment_in_pool(&pool, line.id, "a reply", Some("P1".into()), &human(), None).await.unwrap();
         assert_eq!(reply.parent_id, Some(line.id));
         assert_eq!(reply.severity.as_deref(), Some("P1"));
         assert_eq!(reply.file_path, None);
 
-        let resolved = set_comment_resolved_in_pool(&pool, line.id, true, &HUMAN).await.unwrap();
+        let resolved = set_comment_resolved_in_pool(&pool, line.id, true, &human()).await.unwrap();
         assert!(resolved.resolved_at.is_some());
-        let reopened = set_comment_resolved_in_pool(&pool, line.id, false, &HUMAN).await.unwrap();
+        let reopened = set_comment_resolved_in_pool(&pool, line.id, false, &human()).await.unwrap();
         assert!(reopened.resolved_at.is_none());
 
-        let edited = edit_comment_in_pool(&pool, line.id, "edited note", &HUMAN).await.unwrap();
+        let edited = edit_comment_in_pool(&pool, line.id, "edited note", &human()).await.unwrap();
         assert_eq!(edited.body, "edited note");
         assert!(edited.edited_at.is_some());
 
@@ -1270,13 +1276,13 @@ mod tests {
     async fn reply_to_reply_and_resolve_on_reply_are_rejected() {
         let pool = test_pool().await;
         seed_repo(&pool, "/demo").await;
-        let root = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("root"), &HUMAN, None)
+        let root = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("root"), &human(), None)
             .await
             .unwrap();
-        let reply = reply_comment_in_pool(&pool, root.id, "first reply", None, &HUMAN, None).await.unwrap();
-        let nested = reply_comment_in_pool(&pool, reply.id, "nested", None, &HUMAN, None).await;
+        let reply = reply_comment_in_pool(&pool, root.id, "first reply", None, &human(), None).await.unwrap();
+        let nested = reply_comment_in_pool(&pool, reply.id, "nested", None, &human(), None).await;
         assert_eq!(nested.unwrap_err().code, "invalid_comment");
-        let resolve_reply = set_comment_resolved_in_pool(&pool, reply.id, true, &HUMAN).await;
+        let resolve_reply = set_comment_resolved_in_pool(&pool, reply.id, true, &human()).await;
         assert_eq!(resolve_reply.unwrap_err().code, "invalid_comment");
     }
 
@@ -1284,16 +1290,16 @@ mod tests {
     async fn deleting_a_root_takes_its_replies_and_unknown_ids_are_rejected() {
         let pool = test_pool().await;
         seed_repo(&pool, "/demo").await;
-        let root = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("root"), &HUMAN, None)
+        let root = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("root"), &human(), None)
             .await
             .unwrap();
-        let reply = reply_comment_in_pool(&pool, root.id, "reply", None, &HUMAN, None).await.unwrap();
-        delete_comment_in_pool(&pool, root.id, &HUMAN).await.unwrap();
+        let reply = reply_comment_in_pool(&pool, root.id, "reply", None, &human(), None).await.unwrap();
+        delete_comment_in_pool(&pool, root.id, &human()).await.unwrap();
         let listed = list_comments_in_pool(&pool, "/demo", "base", "/demo", "worktree")
             .await
             .unwrap();
         assert!(listed.iter().all(|comment| comment.id != root.id && comment.id != reply.id));
-        let missing = delete_comment_in_pool(&pool, root.id, &HUMAN).await;
+        let missing = delete_comment_in_pool(&pool, root.id, &human()).await;
         assert_eq!(missing.unwrap_err().code, "invalid_comment");
     }
 
@@ -1331,7 +1337,7 @@ mod tests {
         seed_repo(&pool, "/demo").await;
         let mut no_body = draft("  ");
         assert_eq!(
-            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &no_body, &HUMAN, None)
+            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &no_body, &human(), None)
                 .await
                 .unwrap_err()
                 .code,
@@ -1340,7 +1346,7 @@ mod tests {
         no_body.body = "ok".into();
         no_body.severity = Some("P9".into());
         assert_eq!(
-            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &no_body, &HUMAN, None)
+            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &no_body, &human(), None)
                 .await
                 .unwrap_err()
                 .code,
@@ -1350,7 +1356,7 @@ mod tests {
         anchored_review.file_path = Some("file.txt".into());
         anchored_review.start_line = Some(1);
         assert_eq!(
-            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &anchored_review, &HUMAN, None)
+            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &anchored_review, &human(), None)
                 .await
                 .unwrap_err()
                 .code,
@@ -1360,7 +1366,7 @@ mod tests {
         file_with_lines.file_path = Some("file.txt".into());
         file_with_lines.lines = vec!["x".into()];
         assert_eq!(
-            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &file_with_lines, &HUMAN, None)
+            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &file_with_lines, &human(), None)
                 .await
                 .unwrap_err()
                 .code,
@@ -1368,7 +1374,7 @@ mod tests {
         );
         let backwards = line_draft("backwards", "LEFT", 5, 4, &["x"]);
         assert_eq!(
-            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &backwards, &HUMAN, None)
+            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &backwards, &human(), None)
                 .await
                 .unwrap_err()
                 .code,
@@ -1376,7 +1382,7 @@ mod tests {
         );
         let no_lines = line_draft("empty", "RIGHT", 3, 3, &[]);
         assert_eq!(
-            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &no_lines, &HUMAN, None)
+            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &no_lines, &human(), None)
                 .await
                 .unwrap_err()
                 .code,
@@ -1395,7 +1401,7 @@ mod tests {
             "/demo",
             "worktree",
             &line_draft("note", "RIGHT", 1, 1, &["x"]),
-        &HUMAN, None)
+        &human(), None)
         .await
         .unwrap();
         let review = comment.review_id;
@@ -1434,10 +1440,10 @@ mod tests {
         // and as a new-side line (reversed layout) must hash identically.
         let old_side = line_draft("left", "LEFT", 2, 3, &["x", "y"]);
         let new_side = line_draft("right", "RIGHT", 2, 3, &["x", "y"]);
-        let left = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &old_side, &HUMAN, None)
+        let left = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &old_side, &human(), None)
             .await
             .unwrap();
-        let right = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &new_side, &HUMAN, None)
+        let right = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &new_side, &human(), None)
             .await
             .unwrap();
         assert_eq!(left.anchor_hash, right.anchor_hash);
@@ -1448,13 +1454,13 @@ mod tests {
         let mut oversized = line_draft("huge", "RIGHT", 1, 1, &[long.as_str()]);
         oversized.file_path = Some("big.txt".into());
         let stored =
-            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &oversized, &HUMAN, None)
+            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &oversized, &human(), None)
                 .await
                 .unwrap();
         assert_eq!(stored.snippet.as_deref().map(|text| text.chars().count()), Some(2000));
         let differing = line_draft("other", "RIGHT", 5, 5, &["x", "z"]);
         let other =
-            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &differing, &HUMAN, None)
+            create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &differing, &human(), None)
                 .await
                 .unwrap();
         assert_ne!(other.anchor_hash, right.anchor_hash);
@@ -1471,7 +1477,7 @@ mod tests {
             "/demo",
             "worktree",
             &line_draft("note", "RIGHT", 3, 4, &["x", "y"]),
-        &HUMAN, None)
+        &human(), None)
         .await
         .unwrap();
         let lines = [
@@ -1508,7 +1514,7 @@ mod tests {
             "/demo",
             "worktree",
             &line_draft("note", "RIGHT", 2, 3, &["", "x"]),
-        &HUMAN, None)
+        &human(), None)
         .await
         .unwrap();
         let blank = create_comment_in_pool(
@@ -1518,7 +1524,7 @@ mod tests {
             "/demo",
             "worktree",
             &line_draft("blank note", "RIGHT", 5, 5, &[""]),
-        &HUMAN, None)
+        &human(), None)
         .await
         .unwrap();
         let lines = [
@@ -1562,7 +1568,7 @@ mod tests {
             "/demo",
             "worktree",
             &line_draft("note", "RIGHT", 10, 10, &["target"]),
-        &HUMAN, None)
+        &human(), None)
         .await
         .unwrap();
         let mut lines = Vec::new();
@@ -1597,7 +1603,7 @@ mod tests {
             "/demo",
             "worktree",
             &line_draft("note", "RIGHT", 5, 5, &["gone"]),
-        &HUMAN, None)
+        &human(), None)
         .await
         .unwrap();
         let mut lines = Vec::new();
@@ -1635,7 +1641,7 @@ mod tests {
             "/demo",
             "worktree",
             &line_draft("note", "LEFT", 4, 5, &["x", "y"]),
-        &HUMAN, None)
+        &human(), None)
         .await
         .unwrap();
         let display_rows = [
@@ -1668,7 +1674,7 @@ mod tests {
             "/demo",
             "worktree",
             &line_draft("right note", "RIGHT", 1, 1, &["added"]),
-        &HUMAN, None)
+        &human(), None)
         .await
         .unwrap();
         let untracked = [patch("added", None, Some(1)), patch("more", None, Some(2))];
@@ -1693,15 +1699,15 @@ mod tests {
             "/demo",
             "worktree",
             &line_draft("range note", "RIGHT", 2, 4, &["b", "c", "d"]),
-        &HUMAN, None)
+        &human(), None)
         .await
         .unwrap();
-        create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("review note"), &HUMAN, None)
+        create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("review note"), &human(), None)
             .await
             .unwrap();
         let mut file_note = draft("file note");
         file_note.file_path = Some("file.txt".into());
-        create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &file_note, &HUMAN, None)
+        create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &file_note, &human(), None)
             .await
             .unwrap();
         // Shifting one line of the range changes the hashed content.
@@ -1824,7 +1830,7 @@ mod tests {
     async fn ingest_round_trips_sections_and_materializes_findings_as_agent_comments() {
         let pool = test_pool().await;
         seed_repo(&pool, "/demo").await;
-        let submission_id = ingest(&pool, "/demo", &payload(), &HUMAN).await.unwrap();
+        let submission_id = ingest(&pool, "/demo", &payload(), &human()).await.unwrap();
 
         let submissions = list_submissions_in_pool(&pool, "/demo", "base", "/demo", "worktree")
             .await
@@ -1892,14 +1898,14 @@ mod tests {
         let mut empty_name = payload();
         empty_name.agent_name = "  ".into();
         assert_eq!(
-            ingest(&pool, "/demo", &empty_name, &HUMAN).await.unwrap_err().code,
+            ingest(&pool, "/demo", &empty_name, &human()).await.unwrap_err().code,
             "invalid_submission"
         );
 
         let mut bad_priority = payload();
         bad_priority.findings[0].priority = "P9".into();
         assert_eq!(
-            ingest(&pool, "/demo", &bad_priority, &HUMAN)
+            ingest(&pool, "/demo", &bad_priority, &human())
                 .await
                 .unwrap_err()
                 .code,
@@ -1910,7 +1916,7 @@ mod tests {
         let mut bad_anchor = payload();
         bad_anchor.findings[0].start = Some(3);
         assert_eq!(
-            ingest(&pool, "/demo", &bad_anchor, &HUMAN).await.unwrap_err().code,
+            ingest(&pool, "/demo", &bad_anchor, &human()).await.unwrap_err().code,
             "invalid_submission"
         );
 
@@ -1923,7 +1929,7 @@ mod tests {
             body: "a".repeat(MAX_PAYLOAD_BYTES + 1),
         }];
         assert_eq!(
-            ingest(&pool, "/demo", &oversized, &HUMAN)
+            ingest(&pool, "/demo", &oversized, &human())
                 .await
                 .unwrap_err()
                 .code,
@@ -1938,7 +1944,7 @@ mod tests {
             body: format!("<p>{}</p>", "a".repeat(MAX_HTML_SECTION_BYTES)),
         }];
         assert_eq!(
-            ingest(&pool, "/demo", &html, &HUMAN).await.unwrap_err().code,
+            ingest(&pool, "/demo", &html, &human()).await.unwrap_err().code,
             "invalid_submission"
         );
         let mut legal = payload();
@@ -1948,7 +1954,7 @@ mod tests {
             body: "<p>static</p>".into(),
         }];
         legal.findings.truncate(1);
-        assert!(ingest(&pool, "/demo", &legal, &HUMAN).await.is_ok());
+        assert!(ingest(&pool, "/demo", &legal, &human()).await.is_ok());
 
         // Non-html section bodies cap at 256 KiB.
         let mut text = payload();
@@ -1958,7 +1964,7 @@ mod tests {
             body: "a".repeat(MAX_TEXT_BODY_BYTES + 1),
         }];
         assert_eq!(
-            ingest(&pool, "/demo", &text, &HUMAN).await.unwrap_err().code,
+            ingest(&pool, "/demo", &text, &human()).await.unwrap_err().code,
             "invalid_submission"
         );
 
@@ -1966,7 +1972,7 @@ mod tests {
         let mut finding_body = payload();
         finding_body.findings[0].body = "a".repeat(MAX_TEXT_BODY_BYTES + 1);
         assert_eq!(
-            ingest(&pool, "/demo", &finding_body, &HUMAN)
+            ingest(&pool, "/demo", &finding_body, &human())
                 .await
                 .unwrap_err()
                 .code,
@@ -2020,7 +2026,7 @@ mod tests {
     async fn ingest_without_a_repo_row_is_unknown_review_target() {
         let pool = test_pool().await;
         seed_repo(&pool, "/demo").await;
-        let error = ingest(&pool, "/missing", &payload(), &HUMAN).await.unwrap_err();
+        let error = ingest(&pool, "/missing", &payload(), &human()).await.unwrap_err();
         assert_eq!(error.code, "unknown_review_target");
         // Nothing was written, not even a review shell for the target.
         assert_eq!(
@@ -2053,7 +2059,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let error = ingest(&pool, "/demo", &payload(), &HUMAN).await.unwrap_err();
+        let error = ingest(&pool, "/demo", &payload(), &human()).await.unwrap_err();
         assert_eq!(error.code, "persistence");
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM submissions")
@@ -2094,7 +2100,7 @@ mod tests {
             .await
             .unwrap();
         // A legacy comment row with no owning token is never agent-mutable.
-        let legacy = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("legacy"), &HUMAN, None)
+        let legacy = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("legacy"), &human(), None)
             .await
             .unwrap();
         sqlx::query("UPDATE comments SET author_token_id = NULL WHERE id = ?")
@@ -2131,7 +2137,7 @@ mod tests {
         seed_repo(&pool, "/demo").await;
         let replier = agent_actor(&pool, "agent-c").await;
         let other = agent_actor(&pool, "agent-d").await;
-        let root = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("root"), &HUMAN, None)
+        let root = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("root"), &human(), None)
             .await
             .unwrap();
         // Replies from any agent land on any comment and record the actor.
@@ -2146,7 +2152,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             owner,
-            match &replier { Actor::Agent(identity) => Some(identity.token_id), Actor::Human => None }
+            match &replier { Actor::Agent(identity) => Some(identity.token_id), Actor::Human(_) => None }
         );
         let resolved = set_comment_resolved_in_pool(&pool, root.id, true, &replier).await.unwrap();
         assert!(resolved.resolved_at.is_some());
@@ -2154,9 +2160,9 @@ mod tests {
         assert!(reopened.resolved_at.is_none());
 
         // The human IPC path is unchanged: edit and delete without checks.
-        let edited = edit_comment_in_pool(&pool, root.id, "human edit", &HUMAN).await.unwrap();
+        let edited = edit_comment_in_pool(&pool, root.id, "human edit", &human()).await.unwrap();
         assert_eq!(edited.body, "human edit");
-        delete_comment_in_pool(&pool, root.id, &HUMAN).await.unwrap();
+        delete_comment_in_pool(&pool, root.id, &human()).await.unwrap();
     }
 
     #[tokio::test]
@@ -2164,7 +2170,7 @@ mod tests {
         let pool = test_pool().await;
         seed_repo(&pool, "/demo").await;
         let submitter = agent_actor(&pool, "agent-e").await;
-        let submitter_id = match &submitter { Actor::Agent(identity) => identity.token_id, Actor::Human => unreachable!() };
+        let submitter_id = match &submitter { Actor::Agent(identity) => identity.token_id, Actor::Human(_) => unreachable!() };
         ingest(&pool, "/demo", &payload(), &submitter).await.unwrap();
         let comments = list_comments_in_pool(&pool, "/demo", "base", "/demo", "worktree")
             .await
@@ -2176,7 +2182,7 @@ mod tests {
             .unwrap();
         assert!(owners.iter().all(|owner| *owner == Some(submitter_id)));
         // Without a token the findings stay unowned (not agent-mutable).
-        ingest(&pool, "/demo", &payload(), &HUMAN).await.unwrap();
+        ingest(&pool, "/demo", &payload(), &human()).await.unwrap();
         let unowned: Vec<Option<i64>> = sqlx::query_scalar(
             "SELECT author_token_id FROM comments WHERE submission_id = \
              (SELECT MAX(id) FROM submissions)",
@@ -2217,7 +2223,7 @@ mod tests {
         clean_draft.head_sha = "head-2".into();
         let clean_target = crate::requests::create_request_in_pool(
             &pool, "/demo", "clean-base", "/demo", "worktree", &clean_draft,
-            &crate::requests::Actor::Human, &noop_request_changes(),
+            &crate::requests::Actor::Human("human".into()), &noop_request_changes(),
         )
         .await
         .unwrap();
@@ -2239,7 +2245,7 @@ mod tests {
             .findings
             .retain(|finding| finding.priority == "P2");
         ingest_submission_in_pool(
-            &pool, "/demo", "clean-base", "/demo", "worktree", &clean_payload, &HUMAN,
+            &pool, "/demo", "clean-base", "/demo", "worktree", &clean_payload, &human(),
             &noop_request_changes(),
         )
         .await
@@ -2248,7 +2254,7 @@ mod tests {
         assert_eq!(status(blocking_target.id).await, "requested");
 
         ingest_submission_in_pool(
-            &pool, "/demo", "base", "/demo", "worktree", &payload(), &HUMAN,
+            &pool, "/demo", "base", "/demo", "worktree", &payload(), &human(),
             &noop_request_changes(),
         )
         .await
@@ -2277,17 +2283,17 @@ mod tests {
         seed_repo(&pool, "/demo").await;
         let author = agent_actor(&pool, "reviewer-bot").await;
 
-        // Human roots post as "human" (the stored comment name is "you",
-        // but narration is cross-surface); agent replies carry the token's
-        // name; resolve/reopen narrate their own kinds. Edits and deletes
-        // have no kind in the closed vocabulary, so they narrate nothing.
-        let root = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("root"), &HUMAN, None)
+        // Human roots post under the actor's display name; agent replies
+        // carry the token's name; resolve/reopen narrate their own kinds.
+        // Edits and deletes have no kind in the closed vocabulary, so they
+        // narrate nothing.
+        let root = create_comment_in_pool(&pool, "/demo", "base", "/demo", "worktree", &draft("root"), &human(), None)
             .await
             .unwrap();
         let reply = reply_comment_in_pool(&pool, root.id, "reply", None, &author, None).await.unwrap();
-        set_comment_resolved_in_pool(&pool, root.id, true, &HUMAN).await.unwrap();
+        set_comment_resolved_in_pool(&pool, root.id, true, &human()).await.unwrap();
         set_comment_resolved_in_pool(&pool, root.id, false, &author).await.unwrap();
-        edit_comment_in_pool(&pool, root.id, "edited", &HUMAN).await.unwrap();
+        edit_comment_in_pool(&pool, root.id, "edited", &human()).await.unwrap();
         delete_comment_in_pool(&pool, reply.id, &author).await.unwrap();
 
         let rows = listed_events(&pool).await;

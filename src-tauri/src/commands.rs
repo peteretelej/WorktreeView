@@ -718,21 +718,21 @@ pub(crate) async fn search_portal(
 
 // The Activity tab's feed page: the store's event log newest-first, with
 // the seen watermark from the same read, so the "new since your last
-// visit" divider and the events it splits share one snapshot.
+// visit" divider and the events it splits share one snapshot. Shared by
+// the IPC command and the command API's route of the same name.
 #[derive(Debug, Serialize)]
 pub(crate) struct PortalActivityPage {
     pub(crate) events: Vec<crate::events::EventRow>,
     pub(crate) seen_id: i64,
 }
 
-#[tauri::command]
-pub(crate) async fn list_portal_activity(
+pub(crate) async fn portal_activity_page(
+    pool: &sqlx::SqlitePool,
     repo_path: Option<String>,
     limit: Option<usize>,
-    state: tauri::State<'_, AppState>,
 ) -> Result<PortalActivityPage, CommandError> {
     let events = crate::events::list_events_in_pool(
-        &state.pool,
+        pool,
         &crate::events::EventQuery {
             since_id: 0,
             repo_path,
@@ -741,12 +741,27 @@ pub(crate) async fn list_portal_activity(
         },
     )
     .await?;
-    let seen_id = get_settings_in_pool(&state.pool).await?.activity_seen_id;
+    let seen_id = get_settings_in_pool(pool).await?.activity_seen_id;
     Ok(PortalActivityPage { events, seen_id })
 }
 
-// The human review-header surface acts as Actor::Human on the shared
+#[tauri::command]
+pub(crate) async fn list_portal_activity(
+    repo_path: Option<String>,
+    limit: Option<usize>,
+    state: tauri::State<'_, AppState>,
+) -> Result<PortalActivityPage, CommandError> {
+    portal_activity_page(&state.pool, repo_path, limit).await
+}
+
+// The human review-header surface acts as a Human actor on the shared
 // request engine; the MCP face is not involved and gains no human caller.
+
+// The desktop's own human attribution: the single local user, displayed
+// as "you" on comments (and on events, via the human actor kind), so the
+// local IPC behavior stays what single-user installs expect. The command
+// API passes the authenticated account's name instead.
+const DESKTOP_HUMAN: &str = "you";
 
 // Who performs a human request update; a snake_case string on the wire,
 // typed routing below.
@@ -761,6 +776,7 @@ pub(crate) enum RequestAction {
 
 // The human create's shared implementation: payload flattening plus the
 // Human routing, tested directly; the IPC command adds only typed state.
+// The requester name attributes the request's events on every face.
 pub(crate) async fn create_request_as_human(
     pool: &sqlx::SqlitePool,
     repo_path: &str,
@@ -772,6 +788,7 @@ pub(crate) async fn create_request_as_human(
     reviewers: Option<Vec<String>>,
     max_rounds: Option<i64>,
     head_sha: String,
+    requester: &str,
     notify: &crate::transport::RequestChangeSink,
 ) -> Result<RequestRow, CommandError> {
     // Same open-repo gate as the agent face: without it a stale or wrong
@@ -800,7 +817,7 @@ pub(crate) async fn create_request_as_human(
         target_key,
         target_kind,
         &draft,
-        &crate::requests::Actor::Human,
+        &crate::requests::Actor::Human(requester.into()),
         notify,
     )
     .await?;
@@ -816,6 +833,7 @@ pub(crate) async fn update_request_in_pool(
     action: RequestAction,
     note: Option<String>,
     head_sha: Option<String>,
+    requester: &str,
     notify: &crate::transport::RequestChangeSink,
 ) -> Result<RequestRow, CommandError> {
     if !matches!(action, RequestAction::ReRequest) && head_sha.is_some() {
@@ -827,7 +845,7 @@ pub(crate) async fn update_request_in_pool(
     if let Some(note) = &note {
         validate_request_note(note)?;
     }
-    let actor = crate::requests::Actor::Human;
+    let actor = crate::requests::Actor::Human(requester.into());
     match action {
         RequestAction::Approve => {
             set_request_verdict_in_pool(pool, id, true, &actor, notify).await?;
@@ -890,6 +908,7 @@ pub(crate) async fn create_review_request(
         reviewers,
         max_rounds,
         head_sha,
+        DESKTOP_HUMAN,
         &deps.request_changes,
     )
     .await
@@ -910,6 +929,7 @@ pub(crate) async fn update_review_request(
         action,
         note,
         head_sha,
+        DESKTOP_HUMAN,
         &deps.request_changes,
     )
     .await
@@ -1189,7 +1209,7 @@ pub(crate) fn open_log_dir(app: tauri::AppHandle) -> Result<(), CommandError> {
 
 // Review identity keys on resolved SHAs: the frontend derives base_sha and
 // target_key from the loaded ReviewIndex, never from symbolic ref names.
-// Human IPC callers act as Actor::Human; ownership is enforced in the
+// Human IPC callers act as a Human actor; ownership is enforced in the
 // shared implementations, not here.
 #[tauri::command]
 pub(crate) async fn create_comment(
@@ -1207,7 +1227,7 @@ pub(crate) async fn create_comment(
         &target_key,
         &target_kind,
         &draft,
-        &Actor::Human,
+        &Actor::Human(DESKTOP_HUMAN.into()),
         None,
     )
     .await
@@ -1242,7 +1262,7 @@ pub(crate) async fn reply_comment(
     severity: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Comment, CommandError> {
-    reply_comment_in_pool(&state.pool, parent_id, &body, severity, &Actor::Human, None).await
+    reply_comment_in_pool(&state.pool, parent_id, &body, severity, &Actor::Human(DESKTOP_HUMAN.into()), None).await
 }
 
 #[tauri::command]
@@ -1251,7 +1271,7 @@ pub(crate) async fn set_comment_resolved(
     resolved: bool,
     state: tauri::State<'_, AppState>,
 ) -> Result<Comment, CommandError> {
-    set_comment_resolved_in_pool(&state.pool, comment_id, resolved, &Actor::Human).await
+    set_comment_resolved_in_pool(&state.pool, comment_id, resolved, &Actor::Human(DESKTOP_HUMAN.into())).await
 }
 
 #[tauri::command]
@@ -1260,7 +1280,7 @@ pub(crate) async fn edit_comment(
     body: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Comment, CommandError> {
-    edit_comment_in_pool(&state.pool, comment_id, &body, &Actor::Human).await
+    edit_comment_in_pool(&state.pool, comment_id, &body, &Actor::Human(DESKTOP_HUMAN.into())).await
 }
 
 #[tauri::command]
@@ -1268,7 +1288,7 @@ pub(crate) async fn delete_comment(
     comment_id: i64,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    delete_comment_in_pool(&state.pool, comment_id, &Actor::Human).await
+    delete_comment_in_pool(&state.pool, comment_id, &Actor::Human(DESKTOP_HUMAN.into())).await
 }
 
 #[tauri::command]
@@ -1559,7 +1579,7 @@ mod tests {
 
         let created = create_request_as_human(
             &pool, REPO, "base", "/demo", "worktree", "Please review my changes.".into(), None,
-            None, None, "head-1".into(), &notify,
+            None, None, "head-1".into(), "you", &notify,
         )
         .await
         .unwrap();
@@ -1568,7 +1588,7 @@ mod tests {
         assert_eq!(created.max_rounds, 2);
 
         // A verdict before any reviewer claims is a transition violation.
-        let refused = update_request_in_pool(&pool, created.id, RequestAction::Approve, None, None, &notify).await;
+        let refused = update_request_in_pool(&pool, created.id, RequestAction::Approve, None, None, "you", &notify).await;
         assert_eq!(refused.unwrap_err().code, "invalid_transition");
 
         crate::requests::claim_request_in_pool(&pool, created.id, &RequestActor::Agent(coder), &notify)
@@ -1576,35 +1596,35 @@ mod tests {
             .unwrap();
 
         // A head rides only a re-request, refused before anything runs.
-        let refused = update_request_in_pool(&pool, created.id, RequestAction::Withdraw, None, Some("head-2".into()), &notify).await;
+        let refused = update_request_in_pool(&pool, created.id, RequestAction::Withdraw, None, Some("head-2".into()), "you", &notify).await;
         assert_eq!(refused.unwrap_err().code, "invalid_request");
 
         // Approve with the optional refreshed note.
-        let approved = update_request_in_pool(&pool, created.id, RequestAction::Approve, Some("Looks good now.".into()), None, &notify).await.unwrap();
+        let approved = update_request_in_pool(&pool, created.id, RequestAction::Approve, Some("Looks good now.".into()), None, "you", &notify).await.unwrap();
         assert_eq!(approved.status, "approved");
         assert_eq!(approved.note, "Looks good now.");
 
         // Settled requests cannot be withdrawn.
-        let refused = update_request_in_pool(&pool, created.id, RequestAction::Withdraw, None, None, &notify).await;
+        let refused = update_request_in_pool(&pool, created.id, RequestAction::Withdraw, None, None, "you", &notify).await;
         assert_eq!(refused.unwrap_err().code, "invalid_transition");
 
         // The changes_requested round: re-request needs a new head, and
         // the refreshed note rides the re-request.
         let second = create_request_in_pool(&pool, REPO, "base", "/demo", "worktree", &draft("head-2"), &RequestActor::Agent(coder), &notify).await.unwrap();
         crate::requests::claim_request_in_pool(&pool, second.id, &RequestActor::Agent(coder), &notify).await.unwrap();
-        set_request_verdict_in_pool(&pool, second.id, false, &RequestActor::Human, &notify).await.unwrap();
+        set_request_verdict_in_pool(&pool, second.id, false, &RequestActor::Human("you".into()), &notify).await.unwrap();
 
-        let refused = update_request_in_pool(&pool, second.id, RequestAction::ReRequest, None, None, &notify).await;
+        let refused = update_request_in_pool(&pool, second.id, RequestAction::ReRequest, None, None, "you", &notify).await;
         assert_eq!(refused.unwrap_err().code, "invalid_request");
-        let refused = update_request_in_pool(&pool, second.id, RequestAction::ReRequest, None, Some("head-2".into()), &notify).await;
+        let refused = update_request_in_pool(&pool, second.id, RequestAction::ReRequest, None, Some("head-2".into()), "you", &notify).await;
         assert_eq!(refused.unwrap_err().code, "invalid_request");
-        let restarted = update_request_in_pool(&pool, second.id, RequestAction::ReRequest, Some("New round.".into()), Some("head-3".into()), &notify).await.unwrap();
+        let restarted = update_request_in_pool(&pool, second.id, RequestAction::ReRequest, Some("New round.".into()), Some("head-3".into()), "you", &notify).await.unwrap();
         assert_eq!(restarted.status, "in_review");
         assert_eq!(restarted.round, 1);
         assert_eq!(restarted.note, "New round.");
 
         // The note bound refuses before the transition runs.
-        let refused = update_request_in_pool(&pool, second.id, RequestAction::Withdraw, Some("a".repeat(2001)), None, &notify).await;
+        let refused = update_request_in_pool(&pool, second.id, RequestAction::Withdraw, Some("a".repeat(2001)), None, "you", &notify).await;
         assert_eq!(refused.unwrap_err().code, "invalid_request");
     }
 
