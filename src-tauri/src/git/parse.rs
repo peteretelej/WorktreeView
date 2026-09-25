@@ -1,6 +1,90 @@
 use crate::CommandError;
 use serde::Serialize;
 
+// One allowlisted fragment's result inside a framed ssh batch: its exit code
+// and captured stdout. Fragment stderr rides the batch's combined stderr.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FragmentOutput {
+    pub(crate) exit_code: i32,
+    pub(crate) stdout: Vec<u8>,
+}
+
+// Splits one batch's raw stdout into per-fragment outputs, keyed by the
+// invocation's nonce sentinel: bytes before the first begin marker (login
+// banners) are ignored, each closing line carries its fragment's exit code,
+// and a missing closing line is truncation rather than a silent partial.
+// NUL-terminated git output (-z) carries no trailing newline, so the exit
+// marker may glue onto the last output line; the nonce is unguessable, so
+// locating it mid-line splits the bytes exactly where the fragment ended.
+pub(crate) fn parse_framed_output(
+    nonce: &str,
+    raw: &[u8],
+) -> Result<Vec<FragmentOutput>, CommandError> {
+    let begin = format!("WTV-{nonce}-begin");
+    let exit_prefix = format!("WTV-{nonce}-exit-");
+    let malformed = || {
+        CommandError::new(
+            "remote_framing",
+            "The remote batch output was truncated or malformed.",
+        )
+    };
+    let mut fragments = Vec::new();
+    let mut collecting: Option<Vec<u8>> = None;
+    for line in raw.split(|byte| *byte == b'\n') {
+        if line == begin.as_bytes() {
+            if collecting.is_some() {
+                return Err(malformed());
+            }
+            collecting = Some(Vec::new());
+            continue;
+        }
+        if let Some(code) = line.strip_prefix(exit_prefix.as_bytes()) {
+            let Some(output) = collecting.take() else {
+                return Err(malformed());
+            };
+            let code = std::str::from_utf8(code)
+                .ok()
+                .and_then(|code| code.trim().parse::<i32>().ok())
+                .ok_or_else(malformed)?;
+            fragments.push(FragmentOutput {
+                exit_code: code,
+                stdout: output,
+            });
+            continue;
+        }
+        if collecting.is_some() {
+            // The exit marker glued onto this line's tail: everything before
+            // it is the fragment's last output bytes, byte-for-byte.
+            if let Some(position) = line
+                .windows(exit_prefix.len())
+                .position(|window| window == exit_prefix.as_bytes())
+            {
+                let code = std::str::from_utf8(&line[position + exit_prefix.len()..])
+                    .ok()
+                    .and_then(|code| code.trim().parse::<i32>().ok())
+                    .ok_or_else(malformed)?;
+                let mut output = collecting.take().unwrap();
+                if position > 0 {
+                    output.extend_from_slice(&line[..position]);
+                }
+                fragments.push(FragmentOutput {
+                    exit_code: code,
+                    stdout: output,
+                });
+                continue;
+            }
+            if let Some(output) = collecting.as_mut() {
+                output.extend_from_slice(line);
+                output.push(b'\n');
+            }
+        }
+    }
+    if collecting.is_some() {
+        return Err(malformed());
+    }
+    Ok(fragments)
+}
+
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Worktree {
     pub(crate) path: String,
@@ -421,6 +505,7 @@ pub(crate) fn parse_worktrees(output: &[u8]) -> Result<Vec<Worktree>, CommandErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::remote::{frame_fragment, new_nonce};
 
     #[test]
     fn parses_porcelain_records() {
@@ -577,5 +662,78 @@ bare
         assert!(parse_commits(extra_record.as_bytes()).is_err());
         let no_fields = b"garbage-without-separators";
         assert!(parse_commits(no_fields).is_err());
+    }
+
+    #[test]
+    fn framed_fragments_round_trip_with_exit_codes() {
+        let nonce = new_nonce().unwrap();
+        let sentinel = format!("WTV-{nonce}");
+        let first = frame_fragment(&nonce, "echo one");
+        let second = frame_fragment(&nonce, "echo two; exit 3");
+        // The frame wraps the fragment in a subshell so its own `exit`
+        // cannot end the batch, and the closing echo rides on $?.
+        assert_eq!(
+            first,
+            format!("echo {sentinel}-begin\n( echo one )\necho {sentinel}-exit-$?")
+        );
+        assert_eq!(
+            second,
+            format!("echo {sentinel}-begin\n( echo two; exit 3 )\necho {sentinel}-exit-$?")
+        );
+        // What the host shell prints for the two-frame batch: sentinel
+        // lines from the echoes, fragment output between them, and each
+        // fragment's exit code on its closing line.
+        let simulated = format!(
+            "{sentinel}-begin\none\n{sentinel}-exit-0\n\
+             {sentinel}-begin\ntwo\n{sentinel}-exit-3\n"
+        );
+        let fragments = parse_framed_output(&nonce, simulated.as_bytes()).unwrap();
+        assert_eq!(fragments.len(), 2);
+        assert_eq!(fragments[0].exit_code, 0);
+        assert_eq!(String::from_utf8_lossy(&fragments[0].stdout).trim(), "one");
+        assert_eq!(fragments[1].exit_code, 3);
+        assert_eq!(String::from_utf8_lossy(&fragments[1].stdout).trim(), "two");
+    }
+
+    #[test]
+    fn framing_ignores_banner_bytes_and_refuses_truncation() {
+        let nonce = new_nonce().unwrap();
+        let sentinel = format!("WTV-{nonce}");
+        // Login banners and other leading bytes are ignored.
+        let simulated =
+            format!("Welcome to the host.\n{sentinel}-begin\nabc123\n{sentinel}-exit-0\n");
+        let fragments = parse_framed_output(&nonce, simulated.as_bytes()).unwrap();
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].exit_code, 0);
+        assert_eq!(String::from_utf8_lossy(&fragments[0].stdout).trim(), "abc123");
+
+        // A missing closing sentinel is truncation, never a silent partial.
+        let truncated = format!("{sentinel}-begin\nabc123\n");
+        assert_eq!(
+            parse_framed_output(&nonce, truncated.as_bytes())
+                .unwrap_err()
+                .code,
+            "remote_framing"
+        );
+        // Command text is not output: only the host's echo lines carry the
+        // markers, so the raw frame yields no fragments when parsed.
+        let framed = frame_fragment(&nonce, "git rev-parse HEAD");
+        assert!(parse_framed_output(&nonce, framed.as_bytes())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn framing_splits_exit_markers_glued_onto_nul_output() {
+        let nonce = new_nonce().unwrap();
+        let sentinel = format!("WTV-{nonce}");
+        // NUL-terminated git output (-z) carries no trailing newline, so the
+        // exit echo glues onto the last output line; the split keeps the
+        // fragment's bytes exact, trailing NUL included.
+        let simulated = format!("{sentinel}-begin\nM\0file.rs\0{sentinel}-exit-0\n");
+        let fragments = parse_framed_output(&nonce, simulated.as_bytes()).unwrap();
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].exit_code, 0);
+        assert_eq!(fragments[0].stdout, b"M\0file.rs\0");
     }
 }

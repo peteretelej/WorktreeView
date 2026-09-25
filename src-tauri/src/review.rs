@@ -1,14 +1,18 @@
 use crate::cache;
 use crate::git::{
-    acceptable_diff_exit, configured_filter_names, effective_head_ref, ensure_work_tree,
-    filter_override_args, git_args, git_execution_error, parse_commits, parse_name_status,
-    parse_numstat, parse_untracked_paths, partial_clone_failure, primary_branch,
-    reject_applicable_filters, resolve_empty_tree, resolve_ref, run_git, run_git_with_stdin,
-    stdin_git_command, validate_file, validate_ref, validate_scope_combination,
-    validate_untracked_combination, ChangedFile, CommitInfo, CommitPage, MAX_OUTPUT,
+    acceptable_diff_exit, batch_fragment, configured_filter_names, effective_head_ref,
+    ensure_work_tree, filter_override_args, fragment_sha, git_args, git_execution_error,
+    parse_applicable_filter_paths, parse_commits, parse_configured_filter_names,
+    parse_name_status, parse_numstat, parse_untracked_paths, partial_clone_failure,
+    primary_branch, read_target, read_worktree_target, reject_applicable_filters,
+    resolve_empty_tree, resolve_ref, run_git, run_git_with_stdin, run_remote_batch,
+    run_remote_batch_with,
+    stdin_git_command, unsupported_filter_error, validate_file, validate_ref,
+    validate_scope_combination, validate_untracked_combination, BatchFragment, ChangedFile,
+    CommitInfo, CommitPage, ReadTarget, RemoteTarget, MAX_OUTPUT,
 };
 use crate::retrospection;
-use crate::{canonical_path, CommandError};
+use crate::CommandError;
 use cap_fs_ext::OpenOptionsSyncExt;
 use cap_std::{
     ambient_authority,
@@ -201,6 +205,7 @@ fn remote_default_ref<'a>(remotes: &'a [String], target_ref: &str) -> Option<&'a
 }
 
 pub(crate) async fn refs_inventory(
+    pool: &SqlitePool,
     path: String,
     worktree_branch: Option<String>,
     target_ref: Option<String>,
@@ -211,7 +216,35 @@ pub(crate) async fn refs_inventory(
     if let Some(target_ref) = &target_ref {
         validate_ref(target_ref, "target_ref")?;
     }
-    let path = canonical_path(&path)?;
+    match read_target(pool, &path).await? {
+        ReadTarget::Local(path) => refs_inventory_local(path, worktree_branch, target_ref).await,
+        ReadTarget::Remote(target) => refs_inventory_remote(&target, worktree_branch, target_ref).await,
+    }
+}
+
+fn split_ref_classes(stdout: &[u8]) -> Result<(Vec<String>, Vec<String>, Vec<String>), CommandError> {
+    let text = std::str::from_utf8(stdout)
+        .map_err(|_| CommandError::new("git_output_malformed", "Git returned invalid ref data."))?;
+    let mut heads = Vec::new();
+    let mut remotes = Vec::new();
+    let mut tags = Vec::new();
+    for reference in text.lines() {
+        if reference.starts_with("refs/heads/") {
+            heads.push(reference.to_string());
+        } else if reference.starts_with("refs/remotes/") {
+            remotes.push(reference.to_string());
+        } else if reference.starts_with("refs/tags/") {
+            tags.push(reference.to_string());
+        }
+    }
+    Ok((heads, remotes, tags))
+}
+
+async fn refs_inventory_local(
+    path: std::path::PathBuf,
+    worktree_branch: Option<String>,
+    target_ref: Option<String>,
+) -> Result<RefInventory, CommandError> {
     let (exit_code, stdout, stderr) = run_git(
         &path,
         &[
@@ -226,20 +259,7 @@ pub(crate) async fn refs_inventory(
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
     }
-    let text = std::str::from_utf8(&stdout)
-        .map_err(|_| CommandError::new("git_output_malformed", "Git returned invalid ref data."))?;
-    let mut heads = Vec::new();
-    let mut remotes = Vec::new();
-    let mut tags = Vec::new();
-    for reference in text.lines() {
-        if reference.starts_with("refs/heads/") {
-            heads.push(reference.to_string());
-        } else if reference.starts_with("refs/remotes/") {
-            remotes.push(reference.to_string());
-        } else if reference.starts_with("refs/tags/") {
-            tags.push(reference.to_string());
-        }
-    }
+    let (heads, remotes, tags) = split_ref_classes(&stdout)?;
     let primary = primary_branch(&heads);
     let remote_base = target_ref
         .as_deref()
@@ -283,6 +303,93 @@ pub(crate) async fn refs_inventory(
                 _ => primary.map(str::to_string),
             },
             _ => primary.map(str::to_string),
+        }
+    } else {
+        primary.map(str::to_string)
+    };
+    Ok(RefInventory {
+        heads,
+        remotes,
+        tags,
+        default_base,
+    })
+}
+
+// The remote inventory batches the conditional default-base probes into one
+// second invocation: the rev-parse and merge-base fragments are independent
+// of each other, and the caller reads them the way the local probes ran.
+async fn refs_inventory_remote(
+    target: &RemoteTarget,
+    worktree_branch: Option<String>,
+    target_ref: Option<String>,
+) -> Result<RefInventory, CommandError> {
+    let first = run_remote_batch(
+        target,
+        &[batch_fragment(vec![
+            "for-each-ref".into(),
+            "refs/heads".into(),
+            "refs/remotes".into(),
+            "refs/tags".into(),
+            "--format=%(refname)".into(),
+        ])],
+    )
+    .await?;
+    let (heads, remotes, tags) = split_ref_classes(&first.ok(0)?.stdout)?;
+    let primary = primary_branch(&heads);
+    let remote_base = target_ref
+        .as_deref()
+        .and_then(|reference| remote_default_ref(&remotes, reference));
+    let default_base = if worktree_branch.as_deref() == Some("detached") {
+        None
+    } else if let (Some(worktree_branch), Some(primary)) = (&worktree_branch, primary) {
+        let second = run_remote_batch(
+            target,
+            &[
+                batch_fragment(vec![
+                    "rev-parse".into(),
+                    "--verify".into(),
+                    "--quiet".into(),
+                    worktree_branch.clone(),
+                ]),
+                batch_fragment(vec![
+                    "merge-base".into(),
+                    worktree_branch.clone(),
+                    primary.to_string(),
+                ]),
+            ],
+        )
+        .await?;
+        if second.ok(0).is_err() {
+            None
+        } else {
+            match second.ok(1) {
+                Ok(fragment) => match String::from_utf8_lossy(&fragment.stdout).trim() {
+                    "" => None,
+                    sha => Some(sha.to_string()),
+                },
+                Err(_) => None,
+            }
+        }
+    } else if let (Some(target_ref), Some(base_ref)) = (&target_ref, remote_base) {
+        // A remote branch reviews from its fork point: the merge-base
+        // against the remote's own default ref, so the primary's staleness
+        // cannot inflate the change list. Unrelated histories fall back to
+        // the plain primary-branch base.
+        let second = run_remote_batch(
+            target,
+            &[batch_fragment(vec![
+                "merge-base".into(),
+                target_ref.clone(),
+                base_ref.into(),
+            ])],
+        )
+        .await?;
+        match second.ok(0) {
+            Ok(fragment) => match String::from_utf8_lossy(&fragment.stdout).trim() {
+                "" => primary.map(str::to_string),
+                sha => Some(sha.to_string()),
+            },
+            Err(_) => primary.map(str::to_string),
         }
     } else {
         primary.map(str::to_string)
@@ -358,10 +465,20 @@ fn head_decoration_label(commits: &[CommitInfo]) -> String {
 // parents. The rev may be an abbreviated hash, so resolution runs before the
 // read; an unresolvable rev is the caller's "no such commit" signal, not an
 // execution failure.
-pub(crate) async fn commit_detail(path: String, rev: String) -> Result<CommitDetail, CommandError> {
+pub(crate) async fn commit_detail(
+    pool: &SqlitePool,
+    path: String,
+    rev: String,
+) -> Result<CommitDetail, CommandError> {
     validate_ref(&rev, "rev")?;
-    let path = canonical_path(&path)?;
-    let sha = resolve_ref(&path, &rev).await?;
+    match read_target(pool, &path).await? {
+        ReadTarget::Local(path) => commit_detail_local(&path, &rev).await,
+        ReadTarget::Remote(target) => commit_detail_remote(&target, &rev).await,
+    }
+}
+
+async fn commit_detail_local(path: &Path, rev: &str) -> Result<CommitDetail, CommandError> {
+    let sha = resolve_ref(path, rev).await?;
     let owned_args = vec![
         "log".into(),
         "-1".into(),
@@ -374,11 +491,49 @@ pub(crate) async fn commit_detail(path: String, rev: String) -> Result<CommitDet
         sha.clone(),
     ];
     let args = git_args(&owned_args);
-    let (exit_code, stdout, stderr) = run_git(&path, &args).await?;
+    let (exit_code, stdout, stderr) = run_git(path, &args).await?;
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
     }
     parse_commit_detail(&stdout, &sha)
+}
+
+// The remote twin rides one batched invocation: the log fragment addresses
+// the raw rev expression, which names the same commit the resolved SHA
+// names, so resolution and read land together.
+async fn commit_detail_remote(target: &RemoteTarget, rev: &str) -> Result<CommitDetail, CommandError> {
+    let batch = run_remote_batch(
+        target,
+        &[
+            batch_fragment(vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                format!("{rev}^{{commit}}"),
+            ]),
+            batch_fragment(vec![
+                "log".into(),
+                "-1".into(),
+                "--format=%H%x00%an%x00%cd%x00%P%x00%s%x00%b".into(),
+                rev.to_string(),
+            ]),
+        ],
+    )
+    .await?;
+    let resolved = match batch.ok(0) {
+        Ok(fragment) if !fragment.stdout.is_empty() => fragment,
+        // The caller's "no such commit" signal, exactly as the local
+        // resolution reports it.
+        _ => {
+            return Err(CommandError::new(
+                "unresolvable_ref",
+                format!("The ref '{rev}' does not resolve to a commit."),
+            ))
+        }
+    };
+    let sha = String::from_utf8_lossy(&resolved.stdout).trim().to_string();
+    let fragment = batch.ok(1)?;
+    parse_commit_detail(&fragment.stdout, &sha)
 }
 
 fn parse_commit_detail(output: &[u8], sha: &str) -> Result<CommitDetail, CommandError> {
@@ -428,7 +583,68 @@ pub(crate) async fn commit_page(
     if let Some(against) = &against {
         validate_ref(against, "against")?;
     }
-    let path = canonical_path(&path)?;
+    match read_worktree_target(pool, repo_path, &path).await? {
+        ReadTarget::Local(path) => {
+            commit_page_local(pool, repo_path, path, start_ref, against, skip, limit).await
+        }
+        ReadTarget::Remote(target) => {
+            commit_page_remote(pool, repo_path, &target, start_ref, against, skip, limit).await
+        }
+    }
+}
+
+// Open-time retrospection shared by the local and remote history pages:
+// record a surface only for opens that resolved a real one. A HEAD-based
+// open is the worktree surface, labeled from the page's `HEAD ->`
+// decoration (empty when detached, keeping any recorded label); an explicit
+// `refs/heads/` open is the branch surface; tags, raw SHAs, and rev
+// expressions record nothing, so reopening a gone surface by SHA leaves
+// `last_seen` at "last open while alive".
+async fn record_page_surface(
+    pool: &SqlitePool,
+    repo_path: &str,
+    branch_start: Option<String>,
+    explicit_start: bool,
+    worktree_key: &str,
+    commits: &[CommitInfo],
+    start_sha: &str,
+) {
+    if let Some(branch_ref) = branch_start {
+        let label = branch_ref.strip_prefix("refs/heads/").unwrap_or(&branch_ref);
+        retrospection::record_surface_open(
+            pool,
+            repo_path,
+            "branch",
+            &branch_ref,
+            label,
+            &branch_ref,
+            start_sha,
+        )
+        .await;
+    } else if !explicit_start {
+        let label = head_decoration_label(commits);
+        retrospection::record_surface_open(
+            pool,
+            repo_path,
+            "worktree",
+            worktree_key,
+            &label,
+            worktree_key,
+            start_sha,
+        )
+        .await;
+    }
+}
+
+async fn commit_page_local(
+    pool: &SqlitePool,
+    repo_path: &str,
+    path: std::path::PathBuf,
+    start_ref: Option<String>,
+    against: Option<String>,
+    skip: Option<u32>,
+    limit: Option<u16>,
+) -> Result<CommitPage, CommandError> {
     let explicit_start = start_ref.is_some();
     let start_ref = effective_head_ref(start_ref);
     // Only explicit `refs/heads/` start refs name a surface worth recording;
@@ -566,41 +782,219 @@ pub(crate) async fn commit_page(
         }
         CommitPage { commits, has_more }
     };
-    // Open-time retrospection: record a surface only for opens that resolved
-    // a real one. A HEAD-based open is the worktree surface, labeled from the
-    // page's `HEAD ->` decoration (empty when detached, keeping any recorded
-    // label); an explicit `refs/heads/` open is the branch surface; tags,
-    // raw SHAs, and rev expressions record nothing, so reopening a gone
-    // surface by SHA leaves `last_seen` at "last open while alive".
-    if let Some(branch_ref) = branch_start {
-        let label = branch_ref
-            .strip_prefix("refs/heads/")
-            .unwrap_or(&branch_ref);
-        retrospection::record_surface_open(
-            pool,
-            repo_path,
-            "branch",
-            &branch_ref,
-            label,
-            &branch_ref,
-            &start_sha,
-        )
-        .await;
-    } else if !explicit_start {
-        let worktree_key = path.to_str().unwrap_or_default();
-        let label = head_decoration_label(&page.commits);
-        retrospection::record_surface_open(
-            pool,
-            repo_path,
-            "worktree",
-            worktree_key,
-            &label,
-            worktree_key,
-            &start_sha,
-        )
-        .await;
-    }
+    let worktree_key = path.to_str().unwrap_or_default().to_string();
+    record_page_surface(
+        pool,
+        repo_path,
+        branch_start,
+        explicit_start,
+        &worktree_key,
+        &page.commits,
+        &start_sha,
+    )
+    .await;
     Ok(page)
+}
+
+// The remote history page rides at most two batched invocations: the
+// resolutions, the page itself, and the ancestry probe when the marks are
+// not cached. The log fragment addresses the start ref expression directly,
+// so a symbolic page needs only one round trip before the probe.
+async fn commit_page_remote(
+    pool: &SqlitePool,
+    repo_path: &str,
+    target: &RemoteTarget,
+    start_ref: Option<String>,
+    against: Option<String>,
+    skip: Option<u32>,
+    limit: Option<u16>,
+) -> Result<CommitPage, CommandError> {
+    let explicit_start = start_ref.is_some();
+    let start_ref = effective_head_ref(start_ref);
+    let branch_start = if explicit_start && start_ref.starts_with("refs/heads/") {
+        Some(start_ref.clone())
+    } else {
+        None
+    };
+    let skip = skip.unwrap_or(0);
+    let limit = usize::from(limit.unwrap_or(100).min(100));
+    let literal = literal_sha(&start_ref);
+
+    let mut fragments: Vec<BatchFragment> = Vec::new();
+    let start_slot = if literal {
+        None
+    } else {
+        let slot = fragments.len();
+        fragments.push(batch_fragment(vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            format!("{start_ref}^{{commit}}"),
+        ]));
+        Some(slot)
+    };
+    let against_slot = against.as_ref().map(|against| {
+        let slot = fragments.len();
+        fragments.push(batch_fragment(vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            format!("{against}^{{commit}}"),
+        ]));
+        slot
+    });
+    let log_slot = {
+        let slot = fragments.len();
+        let mut owned_args = vec![
+            "log".into(),
+            format!("--skip={skip}"),
+            format!("--max-count={}", limit + 1),
+            "--decorate=full".into(),
+            "--format=%H%x1f%s%x1f%an%x1f%aI%x1f%D%x1f%P%x1e".into(),
+        ];
+        if explicit_start {
+            owned_args.push(start_ref.clone());
+        }
+        fragments.push(batch_fragment(owned_args));
+        slot
+    };
+    let batch = run_remote_batch(target, &fragments).await?;
+
+    let mut start_sha = match start_slot {
+        Some(slot) => fragment_sha(&batch, slot, &start_ref)?,
+        None => start_ref.clone(),
+    };
+    let against_sha = match against_slot {
+        Some(slot) => Some(fragment_sha(&batch, slot, against.as_deref().unwrap_or(""))?),
+        None => None,
+    };
+    // A literal start consults the cache before paying its resolution; a
+    // miss resolves it once, so a gc-pruned SHA still fails as
+    // content_unavailable rather than as a broken page.
+    let cached = if literal {
+        cache::lookup_log_page(
+            pool,
+            repo_path,
+            &start_ref,
+            against_sha.as_deref().unwrap_or(""),
+            skip,
+            limit,
+        )
+        .await
+    } else {
+        None
+    };
+    if literal && cached.is_none() {
+        let resolution = run_remote_batch(
+            target,
+            &[batch_fragment(vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                format!("{start_ref}^{{commit}}"),
+            ])],
+        )
+        .await?;
+        start_sha = fragment_sha(&resolution, 0, &start_ref).map_err(|error| {
+            if error.code == "unresolvable_ref" {
+                CommandError::new(
+                    "content_unavailable",
+                    "This surface's content is no longer available in the repository.",
+                )
+            } else {
+                error
+            }
+        })?;
+    }
+
+    let log_fragment = batch.ok(log_slot)?;
+    let mut commits = parse_commits(&log_fragment.stdout)?;
+    let mut has_more = commits.len() > limit;
+    commits.truncate(limit);
+    match cached {
+        // The cached page outranks the probe just read; serve it, with the
+        // same marks logic as the local hit path.
+        Some((cached_commits, cached_has_more)) => {
+            commits = cached_commits;
+            has_more = cached_has_more;
+            if let Some(against_sha) = &against_sha {
+                let shas: Vec<String> = commits.iter().map(|commit| commit.sha.clone()).collect();
+                if let Some(non_ancestors) = cache::lookup_marks(pool, &shas, against_sha).await {
+                    for (commit, non_ancestor) in commits.iter_mut().zip(non_ancestors) {
+                        commit.default_base_ancestor = !non_ancestor;
+                    }
+                } else {
+                    mark_default_base_ancestors_remote(target, &mut commits, against_sha).await?;
+                    let non_ancestors: Vec<bool> = commits
+                        .iter()
+                        .map(|commit| !commit.default_base_ancestor)
+                        .collect();
+                    cache::store_marks(pool, &shas, against_sha, &non_ancestors).await;
+                }
+            }
+        }
+        None => {
+            if let Some(against_sha) = &against_sha {
+                mark_default_base_ancestors_remote(target, &mut commits, against_sha).await?;
+            }
+            let page_shas: Vec<String> = commits.iter().map(|commit| commit.sha.clone()).collect();
+            cache::store_log_page(
+                pool,
+                repo_path,
+                &start_sha,
+                against_sha.as_deref().unwrap_or(""),
+                skip,
+                limit,
+                &commits,
+                has_more,
+            )
+            .await;
+            if let Some(against_sha) = &against_sha {
+                let non_ancestors: Vec<bool> = commits
+                    .iter()
+                    .map(|commit| !commit.default_base_ancestor)
+                    .collect();
+                cache::store_marks(pool, &page_shas, against_sha, &non_ancestors).await;
+            }
+        }
+    }
+    record_page_surface(
+        pool,
+        repo_path,
+        branch_start,
+        explicit_start,
+        // The remote worktree key is the caller's host-side path, compared
+        // raw because local canonicalization cannot resolve it.
+        &target.path,
+        &commits,
+        &start_sha,
+    )
+    .await;
+    Ok(CommitPage { commits, has_more })
+}
+
+async fn mark_default_base_ancestors_remote(
+    target: &RemoteTarget,
+    commits: &mut [CommitInfo],
+    against_sha: &str,
+) -> Result<(), CommandError> {
+    if commits.is_empty() {
+        return Ok(());
+    }
+    let mut owned_args: Vec<String> = Vec::with_capacity(commits.len() + 4);
+    owned_args.push("rev-list".into());
+    owned_args.push("--no-walk".into());
+    owned_args.extend(commits.iter().map(|commit| commit.sha.clone()));
+    owned_args.push("--not".into());
+    owned_args.push(against_sha.into());
+    let batch = run_remote_batch(target, &[batch_fragment(owned_args)]).await?;
+    let fragment = batch.ok(0)?;
+    let excluded = String::from_utf8_lossy(&fragment.stdout).into_owned();
+    let non_ancestors: Vec<&str> = excluded.split_whitespace().collect();
+    for commit in commits.iter_mut() {
+        commit.default_base_ancestor = !non_ancestors.contains(&commit.sha.as_str());
+    }
+    Ok(())
 }
 
 pub(crate) async fn review_changes(
@@ -617,7 +1011,84 @@ pub(crate) async fn review_changes(
     let head_ref = effective_head_ref(head_ref);
     validate_ref(&head_ref, "head_ref")?;
     validate_scope_combination(&base, &head_ref, committed_only)?;
-    let path = canonical_path(&path)?;
+    match read_worktree_target(pool, repo_path, &path).await? {
+        ReadTarget::Local(path) => {
+            review_changes_local(
+                pool,
+                repo_path,
+                path,
+                base,
+                head_ref,
+                explicit_head,
+                committed_only,
+                reversed,
+            )
+            .await
+        }
+        ReadTarget::Remote(target) => {
+            review_changes_remote(
+                pool,
+                repo_path,
+                &target,
+                base,
+                head_ref,
+                explicit_head,
+                committed_only,
+                reversed,
+            )
+            .await
+        }
+    }
+}
+
+// The worktree target records with an empty label (the branch name is not in
+// hand without an extra spawn; the CASE keeps the nicer label commit_page
+// recorded), a branch target records the full ref, commit targets record
+// nothing. Shared by the local and remote review loads.
+async fn record_review_surface(
+    pool: &SqlitePool,
+    repo_path: &str,
+    explicit_head: bool,
+    head_ref: &str,
+    worktree_key: &str,
+    target_sha: &str,
+) {
+    if !explicit_head {
+        retrospection::record_surface_open(
+            pool,
+            repo_path,
+            "worktree",
+            worktree_key,
+            "",
+            worktree_key,
+            target_sha,
+        )
+        .await;
+    } else if head_ref.starts_with("refs/heads/") {
+        let label = head_ref.strip_prefix("refs/heads/").unwrap_or(head_ref);
+        retrospection::record_surface_open(
+            pool,
+            repo_path,
+            "branch",
+            head_ref,
+            label,
+            head_ref,
+            target_sha,
+        )
+        .await;
+    }
+}
+
+async fn review_changes_local(
+    pool: &SqlitePool,
+    repo_path: &str,
+    path: std::path::PathBuf,
+    base: String,
+    head_ref: String,
+    explicit_head: bool,
+    committed_only: bool,
+    reversed: bool,
+) -> Result<ReviewIndex, CommandError> {
     // "empty-tree" is a reserved base value for parentless commits: it resolves
     // to the repository's empty tree object (no ^{commit} resolution) and the
     // committed-only range becomes two-dot, because three-dot computes a
@@ -629,35 +1100,16 @@ pub(crate) async fn review_changes(
         resolve_ref(&path, &base).await?
     };
     let target_sha = resolve_ref(&path, &head_ref).await?;
-    // Same conservative recording rules as commit_page: the worktree target
-    // records with an empty label (the branch name is not in hand without an
-    // extra spawn; the CASE keeps the nicer label commit_page recorded), a
-    // branch target records the full ref, commit targets record nothing.
-    if !explicit_head {
-        let worktree_key = path.to_str().unwrap_or_default();
-        retrospection::record_surface_open(
-            pool,
-            repo_path,
-            "worktree",
-            worktree_key,
-            "",
-            worktree_key,
-            &target_sha,
-        )
-        .await;
-    } else if head_ref.starts_with("refs/heads/") {
-        let label = head_ref.strip_prefix("refs/heads/").unwrap_or(&head_ref);
-        retrospection::record_surface_open(
-            pool,
-            repo_path,
-            "branch",
-            &head_ref,
-            label,
-            &head_ref,
-            &target_sha,
-        )
-        .await;
-    }
+    let worktree_key = path.to_str().unwrap_or_default().to_string();
+    record_review_surface(
+        pool,
+        repo_path,
+        explicit_head,
+        &head_ref,
+        &worktree_key,
+        &target_sha,
+    )
+    .await;
     // Filters configured in any scope are neutralized for inventory commands so
     // that enumeration never executes them; reviews are refused only when a
     // changed file's attributes actually map to a configured filter.
@@ -726,8 +1178,229 @@ pub(crate) async fn review_changes(
     })
 }
 
+// The remote review index batches into at most three invocations: the
+// resolutions plus the working-tree extras (filter config, untracked
+// listing) in one; the two diffs, whose ranges and filter overrides depend
+// on those results, in a second; and the filter applicability probe, which
+// needs the changed-file list, in a third only when filters are configured.
+// Committed reviews with plain refs ride a single invocation.
+async fn review_changes_remote(
+    pool: &SqlitePool,
+    repo_path: &str,
+    target: &RemoteTarget,
+    base: String,
+    head_ref: String,
+    explicit_head: bool,
+    committed_only: bool,
+    reversed: bool,
+) -> Result<ReviewIndex, CommandError> {
+    review_changes_remote_with(
+        &crate::git::process_spawner(),
+        pool,
+        repo_path,
+        target,
+        base,
+        head_ref,
+        explicit_head,
+        committed_only,
+        reversed,
+    )
+    .await
+}
+
+async fn review_changes_remote_with(
+    spawner: &crate::git::Spawner,
+    pool: &SqlitePool,
+    repo_path: &str,
+    target: &RemoteTarget,
+    base: String,
+    head_ref: String,
+    explicit_head: bool,
+    committed_only: bool,
+    reversed: bool,
+) -> Result<ReviewIndex, CommandError> {
+    let empty_tree_base = base == "empty-tree";
+    let mut first: Vec<BatchFragment> = Vec::new();
+    let base_slot = Some(first.len());
+    if empty_tree_base {
+        first.push(batch_fragment(vec![
+            "hash-object".into(),
+            "-t".into(),
+            "tree".into(),
+            "--stdin".into(),
+        ]));
+    } else {
+        first.push(batch_fragment(vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            format!("{base}^{{commit}}"),
+        ]));
+    }
+    let head_slot = first.len();
+    first.push(batch_fragment(vec![
+        "rev-parse".into(),
+        "--verify".into(),
+        "--quiet".into(),
+        format!("{head_ref}^{{commit}}"),
+    ]));
+    let filters_slot = if committed_only {
+        None
+    } else {
+        let slot = first.len();
+        first.push(batch_fragment(vec![
+            "config".into(),
+            "--get-regexp".into(),
+            r"^filter\..*\.(clean|process)$".into(),
+        ]));
+        Some(slot)
+    };
+    let untracked_slot = if committed_only || reversed {
+        None
+    } else {
+        let slot = first.len();
+        first.push(batch_fragment(vec![
+            "ls-files".into(),
+            "--others".into(),
+            "--exclude-standard".into(),
+            "-z".into(),
+        ]));
+        Some(slot)
+    };
+    // A committed review over plain refs has no data dependencies: its two
+    // diff fragments ride the same invocation as the resolutions. The
+    // empty-tree range needs its tree hash first, and the working-changes
+    // diffs need the configured filter overrides, so those split in two.
+    let committed_one_shot = committed_only && !empty_tree_base;
+    let mut diff_name_owned = Vec::new();
+    let mut diff_num_owned = Vec::new();
+    let one_shot_name_slot;
+    let one_shot_num_slot;
+    if committed_one_shot {
+        diff_name_owned.extend(review_index_args("--name-status", &format!("{base}...{head_ref}"), reversed));
+        diff_num_owned.extend(review_index_args("--numstat", &format!("{base}...{head_ref}"), reversed));
+        one_shot_name_slot = first.len();
+        first.push(batch_fragment(diff_name_owned.clone()));
+        one_shot_num_slot = first.len();
+        first.push(batch_fragment(diff_num_owned.clone()));
+    } else {
+        one_shot_name_slot = 0;
+        one_shot_num_slot = 0;
+    }
+    let first_batch = run_remote_batch_with(spawner, target, &first).await?;
+    let base_sha = if empty_tree_base {
+        let fragment = first_batch.ok(base_slot.unwrap())?;
+        let sha = String::from_utf8_lossy(&fragment.stdout).trim().to_string();
+        if sha.is_empty() {
+            return Err(CommandError::new(
+                "git_output_malformed",
+                "Git returned no empty-tree hash.",
+            ));
+        }
+        sha
+    } else {
+        fragment_sha(&first_batch, base_slot.unwrap(), &base)?
+    };
+    let target_sha = fragment_sha(&first_batch, head_slot, &head_ref)?;
+    // Read before the batch value moves into the one-shot path below.
+    let untracked_paths = match untracked_slot {
+        Some(slot) => parse_untracked_paths(&first_batch.ok(slot)?.stdout)?,
+        None => Vec::new(),
+    };
+    record_review_surface(
+        pool,
+        repo_path,
+        explicit_head,
+        &head_ref,
+        &target.path,
+        &target_sha,
+    )
+    .await;
+    // Exit 1 means no configured filters, mirroring the local read.
+    let filters: Vec<String> = match filters_slot {
+        Some(slot) => match first_batch.code(slot) {
+            1 => Vec::new(),
+            0 => parse_configured_filter_names(&first_batch.fragments[slot].stdout),
+            _ => return Err(git_execution_error(&first_batch.stderr)),
+        },
+        None => Vec::new(),
+    };
+
+    let range = if committed_only {
+        if empty_tree_base {
+            format!("{base_sha}..{head_ref}")
+        } else {
+            format!("{base}...{head_ref}")
+        }
+    } else {
+        base.clone()
+    };
+    diff_name_owned = filter_override_args(&filters);
+    diff_name_owned.extend(review_index_args("--name-status", &range, reversed));
+    diff_num_owned = filter_override_args(&filters);
+    diff_num_owned.extend(review_index_args("--numstat", &range, reversed));
+    let (second_batch, name_slot, num_slot) = if committed_one_shot {
+        (first_batch, one_shot_name_slot, one_shot_num_slot)
+    } else {
+        let second = run_remote_batch_with(
+            spawner,
+            target,
+            &[batch_fragment(diff_name_owned), batch_fragment(diff_num_owned)],
+        )
+        .await?;
+        (second, 0, 1)
+    };
+    let name_fragment = second_batch.ok(name_slot)?;
+    let mut files = parse_name_status(&name_fragment.stdout)?;
+    if !filters.is_empty() {
+        let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+        if !paths.is_empty() {
+            let check = run_remote_batch_with(
+                spawner,
+                target,
+                &[BatchFragment {
+                    cwd: None,
+                    args: vec![
+                        "check-attr".into(),
+                        "-z".into(),
+                        "--stdin".into(),
+                        "filter".into(),
+                    ],
+                    stdin: Some(paths),
+                }],
+            )
+            .await?;
+            let applicable = parse_applicable_filter_paths(&check.ok(0)?.stdout, &filters);
+            if !applicable.is_empty() {
+                return Err(unsupported_filter_error());
+            }
+        }
+    }
+    let num_fragment = second_batch.ok(num_slot)?;
+    let (additions, deletions, _) = parse_numstat(&num_fragment.stdout)?;
+
+    if !untracked_paths.is_empty() {
+        for file in untracked_paths {
+            files.push(ChangedFile {
+                path: file,
+                status: "A".into(),
+                untracked: true,
+            });
+        }
+    }
+    Ok(ReviewIndex {
+        files,
+        additions,
+        deletions,
+        base_sha,
+        target_sha,
+    })
+}
+
 pub(crate) async fn review_patch(
+    pool: &SqlitePool,
     path: String,
+    repo_path: Option<String>,
     base: String,
     head_ref: Option<String>,
     committed_only: bool,
@@ -741,10 +1414,57 @@ pub(crate) async fn review_patch(
     validate_scope_combination(&base, &head_ref, committed_only)?;
     validate_file(&file)?;
     validate_untracked_combination(untracked, committed_only, reversed)?;
-    let path = canonical_path(&path)?;
-    // Same reserved base as `review_changes`: parentless commits diff the
-    // empty tree via the two-dot committed-only range.
     let empty_tree_base = base == "empty-tree";
+    // The review identity's repo key classifies the target when the caller
+    // supplies it; otherwise the path itself is the store key.
+    match read_worktree_target(pool, repo_path.as_deref().unwrap_or(&path), &path).await? {
+        ReadTarget::Local(path) => {
+            review_patch_local(
+                path,
+                base,
+                head_ref,
+                committed_only,
+                reversed,
+                file,
+                untracked,
+                empty_tree_base,
+            )
+            .await
+        }
+        ReadTarget::Remote(target) => {
+            if untracked {
+                // The no-index untracked patch is the content-parity phase's
+                // addition; refuse it rather than misreading the request as
+                // a working-changes scope.
+                return Err(CommandError::new(
+                    "remote_scope_unsupported",
+                    "Untracked file patches for remote projects are not available yet.",
+                ));
+            }
+            review_patch_remote(
+                &target,
+                base,
+                head_ref,
+                committed_only,
+                reversed,
+                file,
+                empty_tree_base,
+            )
+            .await
+        }
+    }
+}
+
+async fn review_patch_local(
+    path: std::path::PathBuf,
+    base: String,
+    head_ref: String,
+    committed_only: bool,
+    reversed: bool,
+    file: String,
+    untracked: bool,
+    empty_tree_base: bool,
+) -> Result<FilePatch, CommandError> {
     // Literal SHA endpoints are content-addressed: the diff validates them
     // by executing, so they spawn no resolution. Symbolic endpoints keep
     // resolving fresh, because a missing ref must still fail as
@@ -858,6 +1578,170 @@ pub(crate) async fn review_patch(
     })
 }
 
+// The remote patch read composes the filter check (working scopes) with the
+// two diffs. Committed reviews with literal SHA endpoints and no filter
+// check ride one invocation; empty-tree bases need their tree hash first.
+async fn review_patch_remote(
+    target: &RemoteTarget,
+    base: String,
+    head_ref: String,
+    committed_only: bool,
+    reversed: bool,
+    file: String,
+    empty_tree_base: bool,
+) -> Result<FilePatch, CommandError> {
+    let mut first: Vec<BatchFragment> = Vec::new();
+    let base_slot = if empty_tree_base {
+        let slot = first.len();
+        first.push(batch_fragment(vec![
+            "hash-object".into(),
+            "-t".into(),
+            "tree".into(),
+            "--stdin".into(),
+        ]));
+        Some(slot)
+    } else if literal_sha(&base) {
+        None
+    } else {
+        let slot = first.len();
+        first.push(batch_fragment(vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            format!("{base}^{{commit}}"),
+        ]));
+        Some(slot)
+    };
+    let head_slot = if literal_sha(&head_ref) {
+        None
+    } else {
+        let slot = first.len();
+        first.push(batch_fragment(vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            format!("{head_ref}^{{commit}}"),
+        ]));
+        Some(slot)
+    };
+    let filters_slot = if committed_only {
+        None
+    } else {
+        let slot = first.len();
+        first.push(batch_fragment(vec![
+            "config".into(),
+            "--get-regexp".into(),
+            r"^filter\..*\.(clean|process)$".into(),
+        ]));
+        Some(slot)
+    };
+    let first_batch = run_remote_batch(target, &first).await?;
+    // A missing endpoint must still fail as unresolvable_ref, base first
+    // exactly like the local resolution order.
+    if let (Some(slot), false) = (base_slot, empty_tree_base) {
+        fragment_sha(&first_batch, slot, &base)?;
+    }
+    if let Some(slot) = head_slot {
+        fragment_sha(&first_batch, slot, &head_ref)?;
+    }
+    if !committed_only {
+        // Exit 1 means no configured filters, mirroring the local read.
+        let filters: Vec<String> = match filters_slot {
+            Some(slot) => match first_batch.code(slot) {
+                1 => Vec::new(),
+                0 => parse_configured_filter_names(&first_batch.fragments[slot].stdout),
+                _ => return Err(git_execution_error(&first_batch.stderr)),
+            },
+            None => Vec::new(),
+        };
+        if !filters.is_empty() {
+            let check = run_remote_batch(
+                target,
+                &[BatchFragment {
+                    cwd: None,
+                    args: vec![
+                        "check-attr".into(),
+                        "-z".into(),
+                        "--stdin".into(),
+                        "filter".into(),
+                    ],
+                    stdin: Some(vec![file.clone()]),
+                }],
+            )
+            .await?;
+            let applicable = parse_applicable_filter_paths(&check.ok(0)?.stdout, &filters);
+            if !applicable.is_empty() {
+                return Err(unsupported_filter_error());
+            }
+        }
+    }
+    let base_sha = if empty_tree_base {
+        let fragment = first_batch.ok(base_slot.unwrap())?;
+        let sha = String::from_utf8_lossy(&fragment.stdout).trim().to_string();
+        if sha.is_empty() {
+            return Err(CommandError::new(
+                "git_output_malformed",
+                "Git returned no empty-tree hash.",
+            ));
+        }
+        sha
+    } else {
+        String::new()
+    };
+    let range = if committed_only {
+        if empty_tree_base {
+            format!("{base_sha}..{head_ref}")
+        } else {
+            format!("{base}...{head_ref}")
+        }
+    } else {
+        base
+    };
+    let mut num_args = vec![
+        "diff".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+        "--numstat".into(),
+        "-z".into(),
+    ];
+    if reversed {
+        num_args.push("-R".into());
+    }
+    num_args.extend([range.clone(), "--".into(), file.clone()]);
+    let mut patch_args = vec![
+        "diff".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+        "--no-color".into(),
+        "-U3".into(),
+    ];
+    if reversed {
+        patch_args.push("-R".into());
+    }
+    patch_args.extend([range, "--".into(), file]);
+    let second = run_remote_batch(
+        target,
+        &[batch_fragment(num_args), batch_fragment(patch_args)],
+    )
+    .await?;
+    let num_fragment = second.ok(0)?;
+    let (_, _, binary) = parse_numstat(&num_fragment.stdout)?;
+    if binary {
+        return Ok(FilePatch {
+            binary: true,
+            text: String::new(),
+        });
+    }
+    let patch_fragment = second.ok(1)?;
+    let text = String::from_utf8(patch_fragment.stdout.clone()).map_err(|_| {
+        CommandError::new("git_output_malformed", "Git returned invalid patch text.")
+    })?;
+    Ok(FilePatch {
+        binary: false,
+        text,
+    })
+}
+
 // Git's binary heuristic: a NUL in the leading bytes marks binary content.
 fn content_is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8000).any(|&byte| byte == 0)
@@ -916,13 +1800,80 @@ async fn merge_base_or_none(
     Ok(if sha.is_empty() { None } else { Some(sha) })
 }
 
+async fn merge_base_or_none_remote(
+    target: &RemoteTarget,
+    left: &str,
+    right: &str,
+) -> Result<Option<String>, CommandError> {
+    let batch = run_remote_batch(
+        target,
+        &[batch_fragment(vec![
+            "merge-base".into(),
+            left.to_string(),
+            right.to_string(),
+        ])],
+    )
+    .await?;
+    if batch.code(0) != 0 {
+        return Ok(None);
+    }
+    let sha = String::from_utf8_lossy(&batch.fragments[0].stdout).trim().to_string();
+    Ok(if sha.is_empty() { None } else { Some(sha) })
+}
+
+// The remote twin of the ls-tree-then-cat-file read: the blob SHA comes
+// from ls-tree's output so no assembled `rev:path` name reaches Git.
+async fn read_committed_file_remote(
+    target: &RemoteTarget,
+    rev: &str,
+    file: &str,
+) -> Result<Vec<u8>, CommandError> {
+    let listed = run_remote_batch(
+        target,
+        &[batch_fragment(vec![
+            "ls-tree".into(),
+            "-z".into(),
+            rev.to_string(),
+            "--".into(),
+            file.to_string(),
+        ])],
+    )
+    .await?;
+    let fragment = listed.ok(0)?;
+    let entry = fragment.stdout.split(|&byte| byte == 0).next().unwrap_or(&[]);
+    let meta = match entry.iter().position(|&byte| byte == b'\t') {
+        Some(position) => &entry[..position],
+        None => &[],
+    };
+    let fields = std::str::from_utf8(meta)
+        .map_err(|_| CommandError::new("git_output_malformed", "Git returned invalid tree data."))?
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let sha = match fields.as_slice() {
+        [_, "blob", sha] => *sha,
+        _ => return Ok(Vec::new()),
+    };
+    let loaded = run_remote_batch(
+        target,
+        &[batch_fragment(vec![
+            "cat-file".into(),
+            "blob".into(),
+            sha.to_string(),
+        ])],
+    )
+    .await?;
+    Ok(loaded.ok(0)?.stdout.clone())
+}
+
 // The file content the displayed patch's new side points at: the checked-out
 // worktree file for working-changes scopes, otherwise the blob at the target
 // (or, reversed, at the base, resolved through the merge base for three-dot
 // committed ranges). Empty content means "no file on this side", not an
 // error.
 pub(crate) async fn review_file_content(
+    pool: &SqlitePool,
     path: String,
+    repo_path: Option<String>,
     base: String,
     head_ref: Option<String>,
     committed_only: bool,
@@ -931,7 +1882,9 @@ pub(crate) async fn review_file_content(
     untracked: bool,
 ) -> Result<FileContent, CommandError> {
     let bytes = resolve_review_file_bytes(
+        pool,
         path,
+        repo_path,
         base,
         head_ref,
         committed_only,
@@ -959,7 +1912,9 @@ pub(crate) async fn review_file_content(
 // bytes: renderable assets (images) need them without the binary check or
 // UTF-8 decode. Empty bytes mean "no file on this side", not an error.
 pub(crate) async fn review_file_bytes(
+    pool: &SqlitePool,
     path: String,
+    repo_path: Option<String>,
     base: String,
     head_ref: Option<String>,
     committed_only: bool,
@@ -968,7 +1923,9 @@ pub(crate) async fn review_file_bytes(
     untracked: bool,
 ) -> Result<Vec<u8>, CommandError> {
     resolve_review_file_bytes(
+        pool,
         path,
+        repo_path,
         base,
         head_ref,
         committed_only,
@@ -980,7 +1937,9 @@ pub(crate) async fn review_file_bytes(
 }
 
 async fn resolve_review_file_bytes(
+    pool: &SqlitePool,
     path: String,
+    repo_path: Option<String>,
     base: String,
     head_ref: Option<String>,
     committed_only: bool,
@@ -994,7 +1953,29 @@ async fn resolve_review_file_bytes(
     validate_scope_combination(&base, &head_ref, committed_only)?;
     validate_file(&file)?;
     validate_untracked_combination(untracked, committed_only, reversed)?;
-    let path = canonical_path(&path)?;
+    match read_worktree_target(pool, repo_path.as_deref().unwrap_or(&path), &path).await? {
+        ReadTarget::Local(path) => {
+            resolve_review_file_bytes_local(path, base, head_ref, committed_only, reversed, file, untracked)
+                .await
+        }
+        ReadTarget::Remote(target) => {
+            resolve_review_file_bytes_remote(
+                &target, base, head_ref, committed_only, reversed, file, untracked,
+            )
+            .await
+        }
+    }
+}
+
+async fn resolve_review_file_bytes_local(
+    path: std::path::PathBuf,
+    base: String,
+    head_ref: String,
+    committed_only: bool,
+    reversed: bool,
+    file: String,
+    untracked: bool,
+) -> Result<Vec<u8>, CommandError> {
     if untracked {
         return capture_untracked_file(&path, &file).await;
     }
@@ -1023,10 +2004,47 @@ async fn resolve_review_file_bytes(
     Ok(read_committed_file(&path, &head_ref, &file).await?)
 }
 
+// The remote new side reads pure Git: merge-base plus ls-tree and cat-file
+// for reversed committed scopes, plain ls-tree plus cat-file otherwise.
+// Untracked captures and working-changes file reads touch the local
+// filesystem by design and belong to the content-parity phase.
+async fn resolve_review_file_bytes_remote(
+    target: &RemoteTarget,
+    base: String,
+    head_ref: String,
+    committed_only: bool,
+    reversed: bool,
+    file: String,
+    untracked: bool,
+) -> Result<Vec<u8>, CommandError> {
+    if untracked || (!committed_only && !reversed) {
+        return Err(CommandError::new(
+            "remote_scope_unsupported",
+            "Working-changes and untracked content for remote projects is not available yet.",
+        ));
+    }
+    if reversed {
+        if base == "empty-tree" {
+            return Ok(Vec::new());
+        }
+        if committed_only {
+            return match merge_base_or_none_remote(target, &base, &head_ref).await? {
+                Some(merge_base) => {
+                    read_committed_file_remote(target, &merge_base, &file).await
+                }
+                None => Ok(Vec::new()),
+            };
+        }
+        return read_committed_file_remote(target, &base, &file).await;
+    }
+    read_committed_file_remote(target, &head_ref, &file).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::git::read_bounded;
+    use crate::git::batch_fake_spawner;
     use crate::git::spawn_counted;
     use crate::testutil::{seed_repo, test_git, test_path, test_pool, test_repo, test_rev_parse};
     #[cfg(unix)]
@@ -1085,6 +2103,7 @@ mod tests {
         test_git(&repo, &["commit", "--quiet", "-m", "feature change"]);
 
         let inventory = refs_inventory(
+            &pool,
             repo.to_str().unwrap().into(),
             Some("refs/heads/feature".into()),
             None,
@@ -1102,7 +2121,7 @@ mod tests {
             .iter()
             .any(|reference| reference == "refs/notes/review"));
 
-        let ref_context = refs_inventory(repo.to_str().unwrap().into(), None, None)
+        let ref_context = refs_inventory(&pool, repo.to_str().unwrap().into(), None, None)
             .await
             .unwrap();
         assert_eq!(ref_context.default_base.as_deref(), Some("refs/heads/main"));
@@ -1155,7 +2174,9 @@ mod tests {
             .trim()
         );
         let patch = review_patch(
+            &pool,
             repo.to_str().unwrap().into(),
+            None,
             "refs/heads/main".into(),
             Some("refs/heads/feature".into()),
             true,
@@ -1218,6 +2239,7 @@ mod tests {
             let repo = PathBuf::from(std::env::var_os(REPO_ENV).unwrap());
             let base = std::env::var(BASE_ENV).unwrap();
             let marker = PathBuf::from(std::env::var_os(MARKER_ENV).unwrap());
+            let pool = test_pool().await;
             let error = review_patch(
                 repo.to_str().unwrap().into(),
                 base,
@@ -1351,6 +2373,7 @@ mod tests {
     #[tokio::test]
     async fn literal_sha_patch_endpoints_spawn_no_resolutions() {
         let repo = test_repo("patch-literal-endpoints");
+        let pool = test_pool().await;
         std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
         test_git(&repo, &["add", "tracked.txt"]);
         test_git(&repo, &["commit", "--quiet", "-m", "base"]);
@@ -1361,7 +2384,9 @@ mod tests {
         let head_sha = test_rev_parse(&repo, "HEAD");
 
         let patch = review_patch(
+            &pool,
             repo.to_str().unwrap().into(),
+            None,
             base_sha.clone(),
             Some(head_sha.clone()),
             true,
@@ -1376,7 +2401,9 @@ mod tests {
         // Content-addressed endpoints are validated by the diff itself:
         // only the numstat probe and the patch spawn remain.
         let (spawns, again) = spawn_counted(review_patch(
+            &pool,
             repo.to_str().unwrap().into(),
+            None,
             base_sha.clone(),
             Some(head_sha.clone()),
             true,
@@ -1391,7 +2418,9 @@ mod tests {
         // A missing literal SHA fails at the diff as a Git execution error
         // rather than the symbolic-ref unresolvable_ref contract.
         let missing = review_patch(
+            &pool,
             repo.to_str().unwrap().into(),
+            None,
             "a".repeat(40),
             Some(head_sha),
             true,
@@ -1408,13 +2437,16 @@ mod tests {
 
     #[tokio::test]
     async fn untracked_patch_checks_the_selected_path_literally() {
+        let pool = test_pool().await;
         let repo = test_repo("untracked-literal-pathspec");
         std::fs::write(repo.join("foo[1].txt"), "bracket\n").unwrap();
 
         // A glob pathspec would not match this literal name; the literal
         // pathspec must, or bracketed names would render as invalid_path.
         let bracketed = review_patch(
+            &pool,
             repo.to_str().unwrap().into(),
+            None,
             "HEAD".into(),
             None,
             false,
@@ -1428,7 +2460,9 @@ mod tests {
 
         // A near-miss name that the path could glob-expand to stays invalid.
         let near_miss = review_patch(
+            &pool,
             repo.to_str().unwrap().into(),
+            None,
             "HEAD".into(),
             None,
             false,
@@ -1445,6 +2479,7 @@ mod tests {
 
     #[tokio::test]
     async fn untracked_patch_requires_current_git_inventory() {
+        let pool = test_pool().await;
         let repo = test_repo("untracked-inventory");
         std::fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(repo.join("ignored.txt"), "ignored\n").unwrap();
@@ -1452,7 +2487,9 @@ mod tests {
         std::fs::write(repo.join("binary.bin"), [b'a', 0, b'b']).unwrap();
 
         let patch = review_patch(
+            &pool,
             repo.to_str().unwrap().into(),
+            None,
             "HEAD".into(),
             None,
             false,
@@ -1465,7 +2502,9 @@ mod tests {
         assert!(patch.text.contains("new"));
 
         let binary = review_patch(
+            &pool,
             repo.to_str().unwrap().into(),
+            None,
             "HEAD".into(),
             None,
             false,
@@ -1479,7 +2518,9 @@ mod tests {
         assert!(binary.text.is_empty());
 
         let ignored = review_patch(
+            &pool,
             repo.to_str().unwrap().into(),
+            None,
             "HEAD".into(),
             None,
             false,
@@ -1495,7 +2536,9 @@ mod tests {
         std::fs::create_dir(&arbitrary).unwrap();
         std::fs::write(arbitrary.join("new.txt"), "new\n").unwrap();
         let error = review_patch(
+            &pool,
             arbitrary.to_str().unwrap().into(),
+            None,
             "HEAD".into(),
             None,
             false,
@@ -1883,7 +2926,9 @@ mod tests {
         assert_eq!(index.target_sha, root_sha);
 
         let patch = review_patch(
+            &pool,
             repo.to_str().unwrap().into(),
+            None,
             "empty-tree".into(),
             Some(root_sha),
             true,
@@ -2257,6 +3302,7 @@ mod tests {
     #[tokio::test]
     async fn review_file_content_follows_the_patch_new_side() {
         let repo = test_repo("file-content-sides");
+        let pool = test_pool().await;
         let base_sha = test_rev_parse(&repo, "HEAD");
         std::fs::write(repo.join("tracked.txt"), "committed change\n").unwrap();
         test_git(&repo, &["add", "tracked.txt"]);
@@ -2265,7 +3311,9 @@ mod tests {
 
         // Committed scope reads the blob at the head endpoint.
         let committed = review_file_content(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             base_sha.clone(),
             Some(head_sha.clone()),
             true,
@@ -2279,7 +3327,9 @@ mod tests {
 
         // Reversed commits read the blob at the base endpoint.
         let reversed = review_file_content(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             base_sha.clone(),
             Some(head_sha.clone()),
             true,
@@ -2296,7 +3346,9 @@ mod tests {
         // content, not an error.
         std::fs::write(repo.join("tracked.txt"), "working edit\n").unwrap();
         let working = review_file_content(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             base_sha.clone(),
             None,
             false,
@@ -2309,7 +3361,9 @@ mod tests {
         assert_eq!(working.text, "working edit\n");
         std::fs::remove_file(repo.join("tracked.txt")).unwrap();
         let deleted = review_file_content(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             base_sha.clone(),
             None,
             false,
@@ -2325,7 +3379,9 @@ mod tests {
         // Untracked files read through the same verified capture as patches.
         std::fs::write(repo.join("fresh.txt"), "untracked\n").unwrap();
         let untracked = review_file_content(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             base_sha.clone(),
             None,
             false,
@@ -2340,7 +3396,9 @@ mod tests {
         // Binary content keeps the binary flag instead of lossy text.
         std::fs::write(repo.join("blob.bin"), [b'a', 0, b'b']).unwrap();
         let binary = review_file_content(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             base_sha.clone(),
             None,
             false,
@@ -2355,7 +3413,9 @@ mod tests {
         // Raw byte reads skip the binary check: renderable assets need the
         // exact bytes, not a lossy flag.
         let bytes = review_file_bytes(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             base_sha.clone(),
             None,
             false,
@@ -2372,13 +3432,16 @@ mod tests {
 
     #[tokio::test]
     async fn review_file_content_bounds_and_refuses_like_patches() {
+        let pool = test_pool().await;
         let repo = test_repo("file-content-bounds");
         let base_sha = test_rev_parse(&repo, "HEAD");
 
         // A file beyond the output bound is refused, not truncated.
         std::fs::write(repo.join("huge.txt"), vec![b'x'; MAX_OUTPUT + 1]).unwrap();
         let oversized = review_file_content(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             base_sha.clone(),
             None,
             false,
@@ -2392,7 +3455,9 @@ mod tests {
 
         // A path outside the worktree or with traversal is refused.
         let escape = review_file_content(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             base_sha.clone(),
             None,
             false,
@@ -2406,7 +3471,9 @@ mod tests {
 
         // A file absent at the resolved revision reads as empty content.
         let absent = review_file_content(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             base_sha.clone(),
             Some(base_sha.clone()),
             true,
@@ -2424,6 +3491,7 @@ mod tests {
     #[tokio::test]
     async fn review_file_content_resolves_the_merge_base_for_reversed_commits() {
         let repo = test_repo("file-content-merge-base");
+        let pool = test_pool().await;
         // Feature forks the initial commit; the base branch then advances
         // past the fork, so the displayed reversed patch's new side is the
         // merge base, not the base branch tip.
@@ -2439,7 +3507,9 @@ mod tests {
         let base_tip = test_rev_parse(&repo, "HEAD");
 
         let reversed = review_file_content(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             base_tip,
             Some(feature_sha),
             true,
@@ -2462,8 +3532,11 @@ mod tests {
         let plain = test_path("file-content-not-repo");
         std::fs::create_dir(&plain).unwrap();
         std::fs::write(plain.join("secret.txt"), "nope\n").unwrap();
+        let pool = test_pool().await;
         let refused = review_file_content(
+            &pool,
             plain.to_str().unwrap().into(),
+            None,
             "HEAD".into(),
             None,
             false,
@@ -2480,6 +3553,7 @@ mod tests {
 
     #[tokio::test]
     async fn commit_detail_resolves_hashes_and_reads_bodies() {
+        let pool = test_pool().await;
         let repo = test_repo("commit-detail");
         let root_sha = test_rev_parse(&repo, "HEAD");
         std::fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
@@ -2495,7 +3569,7 @@ mod tests {
         );
         let head_sha = test_rev_parse(&repo, "HEAD");
 
-        let abbreviated = commit_detail(repo.to_str().unwrap().into(), head_sha[..7].into())
+        let abbreviated = commit_detail(&pool, repo.to_str().unwrap().into(), head_sha[..7].into())
             .await
             .unwrap();
         assert_eq!(abbreviated.sha, head_sha);
@@ -2505,7 +3579,7 @@ mod tests {
         assert!(!abbreviated.author.is_empty());
         assert_eq!(abbreviated.date.split_whitespace().count(), 6);
 
-        let root = commit_detail(repo.to_str().unwrap().into(), root_sha.clone())
+        let root = commit_detail(&pool, repo.to_str().unwrap().into(), root_sha.clone())
             .await
             .unwrap();
         assert_eq!(root.subject, "initial");
@@ -2518,18 +3592,18 @@ mod tests {
         test_git(&repo, &["add", "tracked.txt"]);
         test_git(&repo, &["commit", "--quiet", "-m", "tricky\u{1f}subject"]);
         let tricky_sha = test_rev_parse(&repo, "HEAD");
-        let tricky = commit_detail(repo.to_str().unwrap().into(), tricky_sha)
+        let tricky = commit_detail(&pool, repo.to_str().unwrap().into(), tricky_sha)
             .await
             .unwrap();
         assert_eq!(tricky.subject, "tricky\u{1f}subject");
         assert_eq!(tricky.parents, [head_sha]);
 
-        let missing = commit_detail(repo.to_str().unwrap().into(), "deadbeef".into())
+        let missing = commit_detail(&pool, repo.to_str().unwrap().into(), "deadbeef".into())
             .await
             .unwrap_err();
         assert_eq!(missing.code, "unresolvable_ref");
 
-        let flagged = commit_detail(repo.to_str().unwrap().into(), "--exec=x".into())
+        let flagged = commit_detail(&pool, repo.to_str().unwrap().into(), "--exec=x".into())
             .await
             .unwrap_err();
         assert_eq!(flagged.code, "invalid_path");
@@ -2561,6 +3635,7 @@ mod tests {
     #[tokio::test]
     async fn remote_ref_target_defaults_to_its_fork_point() {
         let repo = test_repo("remote-fork-base");
+        let pool = test_pool().await;
         test_git(&repo, &["branch", "-M", "main"]);
         let fork_sha = test_rev_parse(&repo, "HEAD");
 
@@ -2594,13 +3669,14 @@ mod tests {
             &["update-ref", "refs/remotes/origin/feature", &feature_sha],
         );
 
-        let inventory = refs_inventory(repo.to_str().unwrap().into(), None, None)
+        let inventory = refs_inventory(&pool, repo.to_str().unwrap().into(), None, None)
             .await
             .unwrap();
         assert_eq!(inventory.default_base, Some("refs/heads/main".into()));
 
         let inventory = refs_inventory(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
             None,
             Some("refs/remotes/origin/feature".into()),
         )
@@ -2610,7 +3686,8 @@ mod tests {
 
         // Reviewing the remote default itself forks from its own tip.
         let inventory = refs_inventory(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
             None,
             Some("refs/remotes/origin/main".into()),
         )
@@ -2620,7 +3697,8 @@ mod tests {
 
         // Local targets keep the primary-branch base.
         let inventory = refs_inventory(
-            repo.to_str().unwrap().into(),
+            &pool,
+repo.to_str().unwrap().into(),
             None,
             Some("refs/heads/feature".into()),
         )
@@ -2629,5 +3707,49 @@ mod tests {
         assert_eq!(inventory.default_base, Some("refs/heads/main".into()));
 
         std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    // A committed review over plain refs composes its resolutions and both
+    // diffs into one ssh invocation, with every variable slot shell-quoted.
+    #[tokio::test]
+    async fn remote_committed_review_rides_one_invocation() {
+        let base_sha = "a".repeat(40);
+        let head_sha = "b".repeat(40);
+        let range = format!("'{base_sha}...{head_sha}'");
+        let (spawner, scripts) = batch_fake_spawner(vec![vec![
+            (0, format!("{base_sha}\n").into_bytes()),
+            (0, format!("{head_sha}\n").into_bytes()),
+            (0, b"M\0src/app.rs\0".to_vec()),
+            (0, b"3\t1\tsrc/app.rs\0".to_vec()),
+        ]]);
+        let target =
+            crate::git::RemoteTarget::from_parts(Some("dev"), "host.example", None, "/srv/re po")
+                .unwrap();
+        let pool = test_pool().await;
+        let index = review_changes_remote_with(
+            &spawner,
+            &pool,
+            "dev@host.example:/srv/repo",
+            &target,
+            base_sha.clone(),
+            head_sha.clone(),
+            false,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        // One ssh invocation for the whole committed review load.
+        assert_eq!(scripts.lock().unwrap().len(), 1);
+        let script = scripts.lock().unwrap()[0].clone();
+        assert_eq!(script.matches("-begin").count(), 4);
+        assert!(script.contains("'/srv/re po'"));
+        assert!(script.contains(&range));
+        assert_eq!(index.base_sha, base_sha);
+        assert_eq!(index.target_sha, head_sha);
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].path, "src/app.rs");
+        assert_eq!(index.additions, 3);
+        assert_eq!(index.deletions, 1);
     }
 }

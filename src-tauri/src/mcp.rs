@@ -1,5 +1,5 @@
 use crate::agents::AgentIdentity;
-use crate::commands::{list_worktrees_in_path, refresh_repo};
+use crate::commands::{list_worktrees_in_pool, refresh_repo};
 use crate::events::{list_events_in_pool, EventQuery, EVENT_LIST_LIMIT};
 use crate::overview::branch_inventory;
 use crate::portal::{
@@ -855,10 +855,10 @@ async fn list_review_targets(state: &TransportState, args: ListReviewTargetsArgs
     ensure_repo_open(state, &args.repo_path)
         .await
         .map_err(|error| error.message)?;
-    let worktrees = list_worktrees_in_path(&args.repo_path)
+    let worktrees = list_worktrees_in_pool(&state.pool, &args.repo_path)
         .await
         .map_err(|error| error.message)?;
-    let inventory = branch_inventory(args.repo_path.clone())
+    let inventory = branch_inventory(&state.pool, args.repo_path.clone())
         .await
         .map_err(|error| error.message)?;
     payload(json!({

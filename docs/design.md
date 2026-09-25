@@ -174,9 +174,10 @@ themes) persist locally.
   [safety-model.md](safety-model.md).
 - No libgit2. The native Git CLI is the semantic authority; see
   [architecture.md](architecture.md).
-- No network beyond the refresh action's explicit fetch. Remote and SSH
-  review wait until their execution, trust, latency, freshness,
-  reconnection, and persistence model is settled.
+- No network beyond each remote project's own SSH host. A remote
+  project's review reads run on that host through the user's own ssh,
+  and every other network touch stays the refresh action's explicit
+  fetch; see [safety-model.md](safety-model.md).
 - No repository-defined code (hooks, filters, text converters) runs
   while inspecting repositories.
 

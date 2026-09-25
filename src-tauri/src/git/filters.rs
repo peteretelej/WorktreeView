@@ -2,6 +2,13 @@ use super::exec::{git_execution_error, repo_stdin_git_command, run_git, run_git_
 use crate::CommandError;
 use std::path::Path;
 
+pub(crate) fn unsupported_filter_error() -> CommandError {
+    CommandError::new(
+        "git_filter_unsupported",
+        "This review cannot run because Git conversion filters apply to files in this review.",
+    )
+}
+
 pub(crate) async fn configured_filter_names(path: &Path) -> Result<Vec<String>, CommandError> {
     let (exit_code, stdout, stderr) = run_git(
         path,
@@ -15,8 +22,7 @@ pub(crate) async fn configured_filter_names(path: &Path) -> Result<Vec<String>, 
     }
 }
 
-fn parse_configured_filter_names(output: &[u8]) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
+pub(crate) fn parse_configured_filter_names(output: &[u8]) -> Vec<String> {    let mut names: Vec<String> = Vec::new();
     for line in output.split(|byte| *byte == b'\n') {
         let line = std::str::from_utf8(line).unwrap_or("");
         let key = line.split(' ').next().unwrap_or("");
@@ -80,13 +86,10 @@ pub(crate) async fn reject_applicable_filters(
     if applicable.is_empty() {
         return Ok(());
     }
-    Err(CommandError::new(
-        "git_filter_unsupported",
-        "This review cannot run because Git conversion filters apply to files in this review.",
-    ))
+    Err(unsupported_filter_error())
 }
 
-fn parse_applicable_filter_paths(output: &[u8], configured: &[String]) -> Vec<String> {
+pub(crate) fn parse_applicable_filter_paths(output: &[u8], configured: &[String]) -> Vec<String> {
     let mut fields = output.split(|byte| *byte == 0);
     let mut applicable = Vec::new();
     while let Some(path) = fields.next() {
@@ -117,8 +120,7 @@ fn parse_applicable_filter_paths(output: &[u8], configured: &[String]) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::read_review_patch;
-    use crate::review::review_changes;
+    use crate::review::{review_changes, review_patch};
     use crate::testutil::{test_git, test_pool, test_repo};
     use std::path::PathBuf;
     use std::process::Command as StdCommand;
@@ -200,8 +202,10 @@ mod tests {
         assert!(review.files.iter().any(|file| file.path == "plain.txt"));
         assert!(!review.files.iter().any(|file| file.path == "blob.mark"));
 
-        let patch = read_review_patch(
-            repo.to_str().unwrap().into(),
+        let patch = review_patch(
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             "HEAD".into(),
             None,
             false,
@@ -228,8 +232,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(refused.code, "git_filter_unsupported");
 
-        let patch_error = read_review_patch(
-            repo.to_str().unwrap().into(),
+        let patch_error = review_patch(
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             "HEAD".into(),
             None,
             false,
@@ -253,12 +259,15 @@ mod tests {
         if std::env::var_os(CHILD_ENV).is_some() {
             let repo = PathBuf::from(std::env::var_os(REPO_ENV).unwrap());
             let configured_attributes = PathBuf::from(std::env::var_os(ATTRS_ENV).unwrap());
+            let pool = test_pool().await;
 
             let force_binary = "* binary\n- binary\ntext.txt binary\n";
             std::fs::write(repo.join(".gitattributes"), force_binary).unwrap();
             std::fs::write(&configured_attributes, force_binary).unwrap();
-            let text = read_review_patch(
-                repo.to_str().unwrap().into(),
+            let text = review_patch(
+                &pool,
+repo.to_str().unwrap().into(),
+                None,
                 "HEAD".into(),
                 None,
                 false,
@@ -274,8 +283,10 @@ mod tests {
             let force_text = "* text\n- text\nbinary.bin text\n";
             std::fs::write(repo.join(".gitattributes"), force_text).unwrap();
             std::fs::write(&configured_attributes, force_text).unwrap();
-            let binary = read_review_patch(
-                repo.to_str().unwrap().into(),
+            let binary = review_patch(
+                &pool,
+repo.to_str().unwrap().into(),
+                None,
                 "HEAD".into(),
                 None,
                 false,
@@ -375,8 +386,11 @@ mod tests {
         assert!(marker.exists());
         std::fs::remove_file(&marker).unwrap();
 
-        let index_error = list_review_changes(
-            repo.to_str().unwrap().into(),
+        let pool = test_pool().await;
+        let index_error = review_changes(
+            &pool,
+            repo.to_str().unwrap(),
+repo.to_str().unwrap().into(),
             "HEAD".into(),
             None,
             false,
@@ -387,8 +401,10 @@ mod tests {
         assert_eq!(index_error.code, "git_filter_unsupported");
         assert!(!marker.exists());
 
-        let patch_error = read_review_patch(
-            repo.to_str().unwrap().into(),
+        let patch_error = review_patch(
+            &pool,
+repo.to_str().unwrap().into(),
+            None,
             "HEAD".into(),
             None,
             false,
@@ -420,8 +436,10 @@ mod tests {
             .unwrap();
         assert!(marker.exists());
         std::fs::remove_file(&marker).unwrap();
-        let process_error = list_review_changes(
-            repo.to_str().unwrap().into(),
+        let process_error = review_changes(
+            &pool,
+            repo.to_str().unwrap(),
+repo.to_str().unwrap().into(),
             "HEAD".into(),
             None,
             false,
@@ -433,8 +451,10 @@ mod tests {
         assert!(!marker.exists());
 
         std::fs::write(repo.join(".gitattributes"), "other.txt filter=marker\n").unwrap();
-        let review = list_review_changes(
-            repo.to_str().unwrap().into(),
+        let review = review_changes(
+            &pool,
+            repo.to_str().unwrap(),
+repo.to_str().unwrap().into(),
             "HEAD".into(),
             None,
             false,

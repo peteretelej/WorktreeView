@@ -21,6 +21,27 @@ later optimization target.
   the untracked-file check inspects only the selected path instead of
   walking the whole worktree.
 
+## Remote projects
+
+- Network round trips are the remote cost driver, so read groups batch:
+  a load action composes its git commands into one ssh invocation and
+  demultiplexes the framed output locally. A committed review load runs
+  in a single round trip; worktree statuses run two (enumeration, then
+  the per-worktree probes); a branch inventory runs at most two
+  (unconditional reads, then the merged and divergence probes that need
+  the resolved default branch). The callers own the grouping exactly as
+  they own their local spawn sequences.
+- Where the platform supports it, ssh multiplexes invocations over one
+  connection (ControlMaster on non-Windows hosts), so batched groups
+  after the first skip connection setup. Windows OpenSSH has no
+  multiplexing; batching already bounds the round trips, so Windows runs
+  one connection per group.
+- Every remote invocation carries a 60 second deadline sized to include
+  connection setup, with kill-on-drop, and the 16 MiB output ceiling
+  applies to each batch. Failed loads are explicit offline or stale
+  states; nothing retries in the background, so a flaky link costs
+  nothing while the app sits idle.
+
 ## Webview side
 
 - The changed-files pane renders the whole list at once: there is no

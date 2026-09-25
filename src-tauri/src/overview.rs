@@ -1,9 +1,12 @@
 use crate::git::{
     git_args, git_execution_error, parse_branch_records, parse_worktrees, primary_branch,
-    run_git, BranchRecord, BranchSummary,
+    read_target, run_git, run_remote_batch_with, BatchFragment, ReadTarget, RemoteTarget,
+    BranchRecord,
+    BranchSummary,
 };
-use crate::{canonical_path, CommandError};
+use crate::CommandError;
 use serde::Serialize;
+use sqlx::SqlitePool;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -32,10 +35,19 @@ pub struct BranchInventory {
 // contain any character except the separators, mirroring parse_commits.
 const BRANCH_FORMAT: &str = "--format=%(refname)\u{1f}%(objectname)\u{1f}%(committerdate:unix)\u{1f}%(authorname)\u{1f}%(contents:subject)\u{1f}%(upstream)\u{1f}%(upstream:track)\u{1e}";
 
-pub(crate) async fn branch_inventory(path: String) -> Result<BranchInventory, CommandError> {
-    let path = canonical_path(&path)?;
+pub(crate) async fn branch_inventory(
+    pool: &SqlitePool,
+    path: String,
+) -> Result<BranchInventory, CommandError> {
+    match read_target(pool, &path).await? {
+        ReadTarget::Local(path) => branch_inventory_local(&path).await,
+        ReadTarget::Remote(target) => branch_inventory_remote(&target).await,
+    }
+}
+
+async fn branch_inventory_local(path: &Path) -> Result<BranchInventory, CommandError> {
     let (exit_code, stdout, stderr) =
-        run_git(&path, &["for-each-ref", "refs/heads", "refs/remotes", BRANCH_FORMAT]).await?;
+        run_git(path, &["for-each-ref", "refs/heads", "refs/remotes", BRANCH_FORMAT]).await?;
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
     }
@@ -52,7 +64,7 @@ pub(crate) async fn branch_inventory(path: String) -> Result<BranchInventory, Co
         })
         .collect();
 
-    let origin_url = origin_url(&path).await;
+    let origin_url = origin_url(path).await;
 
     let heads: Vec<String> = local
         .iter()
@@ -63,13 +75,13 @@ pub(crate) async fn branch_inventory(path: String) -> Result<BranchInventory, Co
     // One --merged pass answers for every ref at once; no per-branch
     // merge-base probes.
     let merged = match default_branch.as_deref() {
-        Some(base) => merged_refs(&path, base).await,
+        Some(base) => merged_refs(path, base).await,
         None => HashSet::new(),
     };
 
     // The fallback is bounded by the worktree count: only local branches
     // actually checked out somewhere get an extra probe.
-    let worktree_branches = worktree_branches(&path).await;
+    let worktree_branches = worktree_branches(path).await;
     let mut branches = Vec::with_capacity(local.len());
     for record in &local {
         let counts = match record.upstream.as_deref() {
@@ -80,7 +92,7 @@ pub(crate) async fn branch_inventory(path: String) -> Result<BranchInventory, Co
                 });
                 match fallback {
                     Some(base) => {
-                        ahead_behind_vs(&path, base, &record.ref_name)
+                        ahead_behind_vs(path, base, &record.ref_name)
                             .await
                             .unwrap_or(None)
                     }
@@ -134,6 +146,166 @@ fn branch_summary(
         behind,
         merged,
     }
+}
+
+// The remote inventory rides at most two batched invocations: the
+// unconditional reads (branch records, origin URL, worktree list) in one,
+// then the conditional merged/fallback probes, which need the resolved
+// default branch, in a second sized exactly to what is needed. Batch-level
+// failures propagate like local spawn failures; fragment-level failures
+// degrade exactly like the local probes.
+async fn branch_inventory_remote(target: &RemoteTarget) -> Result<BranchInventory, CommandError> {
+    branch_inventory_remote_with(&crate::git::process_spawner(), target).await
+}
+
+async fn branch_inventory_remote_with(
+    spawner: &crate::git::Spawner,
+    target: &RemoteTarget,
+) -> Result<BranchInventory, CommandError> {
+    let unconditional = run_remote_batch_with(
+        spawner,
+        target,
+        &[
+            crate::git::batch_fragment(vec![
+                "for-each-ref".into(),
+                "refs/heads".into(),
+                "refs/remotes".into(),
+                BRANCH_FORMAT.into(),
+            ]),
+            crate::git::batch_fragment(vec![
+                "config".into(),
+                "--get".into(),
+                "remote.origin.url".into(),
+            ]),
+            crate::git::worktree_list_fragment(),
+        ],
+    )
+    .await?;
+    let records = parse_branch_records(&unconditional.ok(0)?.stdout)?;
+    let origin_url = match unconditional.ok(1) {
+        Ok(fragment) => {
+            let url = String::from_utf8_lossy(&fragment.stdout).trim().to_string();
+            (!url.is_empty()).then_some(url)
+        }
+        Err(_) => None,
+    };
+    let worktree_branches: Vec<String> = parse_worktrees(&unconditional.ok(2)?.stdout)?
+        .into_iter()
+        .filter(|worktree| worktree.branch.starts_with("refs/heads/"))
+        .map(|worktree| worktree.branch)
+        .collect();
+
+    // The symbolic refs/remotes/<remote>/HEAD is a pointer, not a branch.
+    let local: Vec<&BranchRecord> = records
+        .iter()
+        .filter(|record| record.ref_name.starts_with("refs/heads/"))
+        .collect();
+    let remote: Vec<&BranchRecord> = records
+        .iter()
+        .filter(|record| {
+            record.ref_name.starts_with("refs/remotes/") && !record.ref_name.ends_with("/HEAD")
+        })
+        .collect();
+    let heads: Vec<String> = local
+        .iter()
+        .map(|record| record.ref_name.clone())
+        .collect();
+    let default_branch = primary_branch(&heads).map(str::to_string);
+
+    let mut second: Vec<BatchFragment> = Vec::new();
+    let mut merged_slot = None;
+    if let Some(base) = default_branch.as_deref() {
+        merged_slot = Some(second.len());
+        second.push(crate::git::batch_fragment(vec![
+            "for-each-ref".into(),
+            "refs/heads".into(),
+            "refs/remotes".into(),
+            format!("--merged={base}"),
+            "--format=%(refname)".into(),
+        ]));
+    }
+    // The fallback is bounded by the worktree count: only local branches
+    // actually checked out somewhere get an extra probe.
+    let mut fallbacks: Vec<(String, Option<(u32, u32)>)> = Vec::new();
+    for record in &local {
+        let fallback = record
+            .upstream
+            .is_none()
+            .then(|| {
+                default_branch.as_deref().filter(|base| {
+                    *base != record.ref_name && worktree_branches.contains(&record.ref_name)
+                })
+            })
+            .flatten();
+        if let Some(base) = fallback {
+            fallbacks.push((record.ref_name.clone(), None));
+            second.push(crate::git::batch_fragment(vec![
+                "rev-list".into(),
+                "--left-right".into(),
+                "--count".into(),
+                format!("{base}...{}", record.ref_name),
+            ]));
+        }
+    }
+
+    let mut merged = HashSet::new();
+    if !second.is_empty() {
+        let probed = run_remote_batch_with(spawner, target, &second).await?;
+        if let Some(slot) = merged_slot {
+            if let Ok(fragment) = probed.ok(slot) {
+                merged.extend(
+                    String::from_utf8_lossy(&fragment.stdout)
+                        .lines()
+                        .map(str::to_string),
+                );
+            }
+        }
+        for (offset, (_, counts)) in fallbacks.iter_mut().enumerate() {
+            let slot = merged_slot.map_or(0, |merged| merged + 1) + offset;
+            *counts = probed
+                .ok(slot)
+                .ok()
+                .and_then(|fragment| parse_ahead_behind(&fragment.stdout).ok())
+                .flatten();
+        }
+    }
+
+    let mut branches = Vec::with_capacity(local.len());
+    for record in &local {
+        let counts = match record.upstream.as_deref() {
+            Some(_) => parse_track(&record.track),
+            None => fallbacks
+                .iter()
+                .find(|(ref_name, _)| *ref_name == record.ref_name)
+                .and_then(|(_, counts)| *counts),
+        };
+        let (ahead, behind) = match counts {
+            Some((ahead, behind)) => (Some(ahead), Some(behind)),
+            None => (None, None),
+        };
+        branches.push(branch_summary(
+            record,
+            ahead,
+            behind,
+            merged.contains(&record.ref_name),
+        ));
+    }
+    // Remote-tracking branches carry no meaningful upstream track of their
+    // own; their sync columns stay unknown.
+    let remote_branches: Vec<BranchSummary> = remote
+        .iter()
+        .map(|record| {
+            branch_summary(record, None, None, merged.contains(&record.ref_name))
+        })
+        .collect();
+
+    Ok(BranchInventory {
+        default_branch,
+        origin_url,
+        remote_branch_count: remote_branches.len() as u32,
+        branches,
+        remote_branches,
+    })
 }
 
 // `--merged` lists refs whose tip the base already contains, i.e. fully
@@ -203,7 +375,11 @@ async fn ahead_behind_vs(
     if exit_code != 0 {
         return Ok(None);
     }
-    let text = std::str::from_utf8(&stdout)
+    parse_ahead_behind(&stdout)
+}
+
+fn parse_ahead_behind(stdout: &[u8]) -> Result<Option<(u32, u32)>, CommandError> {
+    let text = std::str::from_utf8(stdout)
         .map_err(|_| CommandError::new("git_output_malformed", "Git returned invalid count data."))?;
     let mut parts = text.split_whitespace();
     let behind = parts.next().and_then(|value| value.parse::<u32>().ok());
@@ -255,7 +431,8 @@ async fn worktree_branches(path: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{test_git, test_repo};
+    use crate::git::batch_fake_spawner;
+    use crate::testutil::{test_git, test_pool, test_repo};
     use std::process::Command as StdCommand;
 
     #[test]
@@ -302,7 +479,8 @@ mod tests {
         test_git(&repo, &["config", "branch.master.remote", "origin"]);
         test_git(&repo, &["config", "branch.master.merge", "refs/heads/master"]);
 
-        let inventory = branch_inventory(repo.to_str().unwrap().into())
+        let pool = test_pool().await;
+        let inventory = branch_inventory(&pool, repo.to_str().unwrap().into())
             .await
             .unwrap();
         assert_eq!(inventory.default_branch, Some("refs/heads/master".into()));
@@ -362,7 +540,8 @@ mod tests {
                 "https://github.com/example/demo.git",
             ],
         );
-        let inventory = branch_inventory(repo.to_str().unwrap().into())
+        let pool = test_pool().await;
+        let inventory = branch_inventory(&pool, repo.to_str().unwrap().into())
             .await
             .unwrap();
         assert_eq!(
@@ -388,7 +567,8 @@ mod tests {
         test_git(&repo, &["checkout", "--quiet", "master"]);
         test_git(&repo, &["merge", "--quiet", "--ff-only", "landed"]);
 
-        let inventory = branch_inventory(repo.to_str().unwrap().into())
+        let pool = test_pool().await;
+        let inventory = branch_inventory(&pool, repo.to_str().unwrap().into())
             .await
             .unwrap();
         let merged_of = |name: &str| {
@@ -426,7 +606,8 @@ mod tests {
         test_git(&linked, &["add", "fix.txt"]);
         test_git(&linked, &["commit", "--quiet", "-m", "agent fix"]);
 
-        let inventory = branch_inventory(repo.to_str().unwrap().into())
+        let pool = test_pool().await;
+        let inventory = branch_inventory(&pool, repo.to_str().unwrap().into())
             .await
             .unwrap();
         let agent = inventory
@@ -443,5 +624,64 @@ mod tests {
             .output()
             .unwrap();
         std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    // The remote inventory rides two batched invocations: unconditional
+    // reads first, then the merged/fallback probes that need the resolved
+    // default branch.
+    #[tokio::test]
+    async fn remote_branch_inventory_batches_unconditional_then_conditional_reads() {
+        let record = |refname: &str, upstream: &str, track: &str| {
+            format!(
+                "{refname}\u{1f}{}\u{1f}1768176000\u{1f}A U Thor\u{1f}subject\u{1f}{upstream}\u{1f}{track}\u{1e}\n",
+                "a".repeat(40)
+            )
+        };
+        let records = format!(
+            "{}{}{}",
+            record("refs/heads/master", "refs/remotes/origin/master", ""),
+            record("refs/heads/feature", "", ""),
+            record("refs/remotes/origin/master", "", ""),
+        );
+        let (spawner, scripts) = batch_fake_spawner(vec![
+            vec![
+                (0, records.into_bytes()),
+                (1, Vec::new()),
+                (
+                    0,
+                    b"worktree /srv/main\nHEAD a\nbranch refs/heads/master\n\nworktree /srv/feature\nHEAD b\nbranch refs/heads/feature\n\n".to_vec(),
+                ),
+            ],
+            vec![(0, b"refs/heads/master\n".to_vec()), (0, b"0 1\n".to_vec())],
+        ]);
+        let target = crate::git::RemoteTarget::from_parts(
+            Some("dev"),
+            "host.example",
+            None,
+            "/srv/repo",
+        )
+        .unwrap();
+        let inventory = branch_inventory_remote_with(&spawner, &target)
+            .await
+            .unwrap();
+        assert_eq!(scripts.lock().unwrap().len(), 2);
+        assert_eq!(
+            inventory.default_branch.as_deref(),
+            Some("refs/heads/master")
+        );
+        assert_eq!(inventory.remote_branch_count, 1);
+        assert_eq!(inventory.origin_url, None);
+        let feature = inventory
+            .branches
+            .iter()
+            .find(|branch| branch.ref_name == "refs/heads/feature")
+            .unwrap();
+        assert_eq!((feature.ahead, feature.behind), (Some(1), Some(0)));
+        let master = inventory
+            .branches
+            .iter()
+            .find(|branch| branch.ref_name == "refs/heads/master")
+            .unwrap();
+        assert!(master.merged);
     }
 }

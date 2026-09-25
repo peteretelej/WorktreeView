@@ -1,4 +1,5 @@
 use super::exec::{git_execution_error, read_bounded};
+use super::parse::{parse_framed_output, FragmentOutput};
 use super::validate::is_not_a_repository_diagnostic;
 use crate::CommandError;
 use std::future::Future;
@@ -53,7 +54,6 @@ impl RemoteTarget {
 
     // Parses the identity string users type (`user@host:path` or
     // `ssh://[user@]host[:port]/path`) into the canonical target.
-    #[allow(dead_code)] // identity parsing lands with the frontend form (phase 4)
     pub(crate) fn parse_identity(input: &str) -> Result<Self, CommandError> {
         let input = input.trim();
         if input.is_empty() {
@@ -248,7 +248,6 @@ pub(crate) fn shell_quote(value: &str) -> String {
 // end the batch) between two nonce sentinel lines, and the closing line
 // carries the fragment's exit code. The nonce is per-invocation random, so
 // fragment output can never forge framing lines it cannot predict.
-#[allow(dead_code)] // consumed by the batched remote reads (phase 2)
 pub(crate) fn new_nonce() -> Result<String, CommandError> {
     const HEX_DIGITS: &[u8] = b"0123456789abcdef";
     let mut bytes = [0u8; 8];
@@ -262,71 +261,13 @@ pub(crate) fn new_nonce() -> Result<String, CommandError> {
     Ok(nonce)
 }
 
-#[allow(dead_code)] // consumed by the batched remote reads (phase 2)
 fn sentinel(nonce: &str) -> String {
     format!("WTV-{nonce}")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by the batched remote reads (phase 2)
-pub(crate) struct FragmentOutput {
-    pub(crate) exit_code: i32,
-    pub(crate) stdout: Vec<u8>,
-}
-
-#[allow(dead_code)] // consumed by the batched remote reads (phase 2)
 pub(crate) fn frame_fragment(nonce: &str, fragment: &str) -> String {
     let sentinel = sentinel(nonce);
     format!("echo {sentinel}-begin\n( {fragment} )\necho {sentinel}-exit-$?")
-}
-
-#[allow(dead_code)] // consumed by the batched remote reads (phase 2)
-pub(crate) fn parse_framed_output(
-    nonce: &str,
-    raw: &[u8],
-) -> Result<Vec<FragmentOutput>, CommandError> {
-    let begin = format!("{}-begin", sentinel(nonce));
-    let exit_prefix = format!("{}-exit-", sentinel(nonce));
-    let malformed = || {
-        CommandError::new(
-            "remote_framing",
-            "The remote batch output was truncated or malformed.",
-        )
-    };
-    let mut fragments = Vec::new();
-    let mut collecting: Option<Vec<u8>> = None;
-    for line in raw.split(|byte| *byte == b'\n') {
-        if line == begin.as_bytes() {
-            if collecting.is_some() {
-                return Err(malformed());
-            }
-            collecting = Some(Vec::new());
-            continue;
-        }
-        if let Some(code) = line.strip_prefix(exit_prefix.as_bytes()) {
-            let Some(output) = collecting.take() else {
-                return Err(malformed());
-            };
-            let code = std::str::from_utf8(code)
-                .ok()
-                .and_then(|code| code.trim().parse::<i32>().ok())
-                .ok_or_else(malformed)?;
-            fragments.push(FragmentOutput {
-                exit_code: code,
-                stdout: output,
-            });
-            continue;
-        }
-        if let Some(output) = collecting.as_mut() {
-            output.extend_from_slice(line);
-            output.push(b'\n');
-        }
-        // Bytes before the first begin marker (login banners) are ignored.
-    }
-    if collecting.is_some() {
-        return Err(malformed());
-    }
-    Ok(fragments)
 }
 
 // The remote allowlist: the single match deciding which git argv may run on
@@ -544,8 +485,7 @@ pub(crate) fn git_command_string(
 
 // ControlMaster multiplexes connections where the platform supports it;
 // Windows OpenSSH has none (Win32-OpenSSH issue #1328), so the options are
-// gated on a non-Windows host. Consumed by the batched reads (phase 2).
-#[allow(dead_code)] // consumed by the batched remote reads (phase 2)
+// gated on a non-Windows host. The batched reads pass the per-target socket.
 pub(crate) fn control_master_options(socket: Option<&str>) -> Vec<String> {
     if cfg!(windows) {
         return Vec::new();
@@ -669,7 +609,7 @@ fn hide_console(command: &mut Command) {
 #[cfg(not(windows))]
 fn hide_console(_command: &mut Command) {}
 
-fn process_spawner() -> Spawner {
+fn process_spawner_impl() -> Spawner {
     static SPAWNER: OnceLock<Spawner> = OnceLock::new();
     SPAWNER
         .get_or_init(|| {
@@ -795,12 +735,144 @@ async fn run_child(
     }
 }
 
+// Stable per-target socket path so ControlMaster=auto multiplexes the
+// app's invocations on platforms that support it; the option builder
+// drops it on Windows, where every batch runs one-shot.
+fn multiplex_socket(target: &RemoteTarget) -> Option<String> {
+    if cfg!(windows) {
+        return None;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in target.identity().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Some(
+        std::env::temp_dir()
+            .join(format!("worktreeview-ssh-{hash:016x}.sock"))
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+// One allowlisted git command inside a read group. `cwd` addresses a
+// specific worktree on the host instead of the target's repository path
+// (per-worktree probes); `stdin` feeds NUL-separated operands through the
+// host shell's printf so stdin-reading plumbing (check-attr) keeps its
+// exact allowlisted argv inside the batch.
+pub(crate) struct BatchFragment {
+    pub(crate) cwd: Option<String>,
+    pub(crate) args: Vec<String>,
+    pub(crate) stdin: Option<Vec<String>>,
+}
+
+// One ssh invocation's demultiplexed result: per-fragment outputs plus the
+// batch's combined stderr, which carries a failing fragment's diagnostic.
+#[derive(Debug)]
+pub(crate) struct BatchOutput {
+    pub(crate) fragments: Vec<FragmentOutput>,
+    pub(crate) stderr: Vec<u8>,
+}
+
+impl BatchOutput {
+    // The fragment's output, or the git execution error its nonzero exit
+    // and the batch stderr describe.
+    pub(crate) fn ok(&self, index: usize) -> Result<&FragmentOutput, CommandError> {
+        let fragment = &self.fragments[index];
+        if fragment.exit_code != 0 {
+            return Err(git_execution_error(&self.stderr));
+        }
+        Ok(fragment)
+    }
+
+    // The raw exit code, for callers that distinguish codes (config reads
+    // treat 1 as "no matches").
+    pub(crate) fn code(&self, index: usize) -> i32 {
+        self.fragments[index].exit_code
+    }
+}
+
+// Runs every read group through the production spawner.
+pub(crate) fn process_spawner() -> Spawner {
+    process_spawner_impl()
+}
+
+// Runs every read group through the production spawner.
+pub(crate) async fn run_remote_batch(
+    target: &RemoteTarget,
+    fragments: &[BatchFragment],
+) -> Result<BatchOutput, CommandError> {
+    run_remote_batch_with(&process_spawner_impl(), target, fragments).await
+}
+
+// One ssh invocation per read group: the fragments compose into one framed
+// script, the allowlist gates each fragment's argv before anything spawns,
+// and the demultiplexer returns per-fragment outputs. Connection-level
+// failures (ssh refused, dropped mid-batch, timed out) surface as the typed
+// offline classifications; host-side git failures stay per-fragment exit
+// codes the caller maps to git execution errors.
+pub(crate) async fn run_remote_batch_with(
+    spawner: &Spawner,
+    target: &RemoteTarget,
+    fragments: &[BatchFragment],
+) -> Result<BatchOutput, CommandError> {
+    let nonce = new_nonce()?;
+    let mut script = String::new();
+    for fragment in fragments {
+        allowlisted(&fragment.args)?;
+        let effective = match &fragment.cwd {
+            Some(cwd) => RemoteTarget {
+                user: target.user.clone(),
+                host: target.host.clone(),
+                port: target.port,
+                path: cwd.clone(),
+            },
+            None => target.clone(),
+        };
+        let mut command = git_command_string(&effective, &fragment.args, true);
+        if let Some(operands) = &fragment.stdin {
+            let mut feed = String::from("printf '%s\\000'");
+            for operand in operands {
+                feed.push(' ');
+                feed.push_str(&shell_quote(operand));
+            }
+            command = format!("{feed} | {command}");
+        }
+        if !script.is_empty() {
+            script.push('\n');
+        }
+        script.push_str(&frame_fragment(&nonce, &command));
+    }
+    let spawn = ssh_invocation(
+        target,
+        &ssh_program(),
+        &script,
+        multiplex_socket(target).as_deref(),
+    );
+    let child = (spawner)(spawn).await?;
+    let (exit_code, stdout, stderr) = run_child(child, REMOTE_TIMEOUT).await?;
+    if exit_code == 255 {
+        return Err(ssh_failure(&stderr));
+    }
+    let outputs = parse_framed_output(&nonce, &stdout)?;
+    if outputs.len() != fragments.len() {
+        return Err(CommandError::new(
+            "remote_framing",
+            "The remote batch output was truncated or malformed.",
+        ));
+    }
+    Ok(BatchOutput {
+        fragments: outputs,
+        stderr,
+    })
+}
+
 // Adding a remote project validates with the same probe the local open
 // uses, run on the host. Failures land in the three typed errors the
 // frontend renders inline; ssh reserves exit 255 for its own failures
 // (git never exits it here), which is the classification seam.
 pub(crate) async fn validate_work_tree(target: &RemoteTarget) -> Result<(), CommandError> {
-    validate_work_tree_with(&process_spawner(), target).await
+    validate_work_tree_with(&process_spawner_impl(), target).await
 }
 
 pub(crate) async fn validate_work_tree_with(
@@ -857,9 +929,48 @@ fn ssh_failure(stderr: &[u8]) -> CommandError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use super::super::batch_fragment;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+// A fake spawner for read-group tests: it records every composed ssh
+// invocation, extracts the batch nonce from the script's echo lines, and
+// emits one canned framed output per begin marker, so module tests can
+// drive full remote loads without a host. Recorded scripts are the
+// composition assertions: one entry per invocation, one frame per fragment.
+#[cfg(test)]
+pub(crate) fn batch_fake_spawner(
+    per_invocation: Vec<Vec<(i32, Vec<u8>)>>,
+) -> (Spawner, Arc<std::sync::Mutex<Vec<String>>>) {
+    let scripts: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorder = scripts.clone();
+    let spawner: Spawner = Arc::new(move |spawn: SshSpawn| {
+        let script = spawn.args.last().cloned().unwrap_or_default();
+        let nonce = script
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("echo WTV-")
+                    .and_then(|rest| rest.strip_suffix("-begin"))
+            })
+            .unwrap_or_default()
+            .to_string();
+        let index = recorder.lock().unwrap().len();
+        let frames = per_invocation.get(index).cloned().unwrap_or_default();
+        let mut output = String::new();
+        for (exit_code, body) in frames {
+            output.push_str(&format!("WTV-{nonce}-begin\n"));
+            output.push_str(&String::from_utf8_lossy(&body));
+            // The host's exit echo glues onto fragment output that lacks a
+            // trailing newline, exactly as the real shell produces it.
+            output.push_str(&format!("WTV-{nonce}-exit-{exit_code}\n"));
+        }
+        recorder.lock().unwrap().push(script);
+        let child = canned_child(0, output.as_bytes(), b"");
+        Box::pin(async move { Ok(child) }) as SpawnResult
+    });
+    (spawner, scripts)
+}
 
     fn target() -> RemoteTarget {
         RemoteTarget::from_parts(Some("dev"), "host.example", None, "/srv/repo").unwrap()
@@ -991,65 +1102,6 @@ mod tests {
         let plain = git_command_string(&target, &[], false);
         assert!(plain.starts_with("GIT_NO_LAZY_FETCH=1"));
         assert!(!plain.starts_with("LC_ALL"));
-    }
-
-    #[test]
-    fn framed_fragments_round_trip_with_exit_codes() {
-        let nonce = new_nonce().unwrap();
-        let sentinel = sentinel(&nonce);
-        let first = frame_fragment(&nonce, "echo one");
-        let second = frame_fragment(&nonce, "echo two; exit 3");
-        // The frame wraps the fragment in a subshell so its own `exit`
-        // cannot end the batch, and the closing echo rides on $?.
-        assert_eq!(
-            first,
-            format!("echo {sentinel}-begin\n( echo one )\necho {sentinel}-exit-$?")
-        );
-        assert_eq!(
-            second,
-            format!("echo {sentinel}-begin\n( echo two; exit 3 )\necho {sentinel}-exit-$?")
-        );
-        // What the host shell prints for the two-frame batch: sentinel
-        // lines from the echoes, fragment output between them, and each
-        // fragment's exit code on its closing line.
-        let simulated = format!(
-            "{sentinel}-begin\none\n{sentinel}-exit-0\n\
-             {sentinel}-begin\ntwo\n{sentinel}-exit-3\n"
-        );
-        let fragments = parse_framed_output(&nonce, simulated.as_bytes()).unwrap();
-        assert_eq!(fragments.len(), 2);
-        assert_eq!(fragments[0].exit_code, 0);
-        assert_eq!(String::from_utf8_lossy(&fragments[0].stdout).trim(), "one");
-        assert_eq!(fragments[1].exit_code, 3);
-        assert_eq!(String::from_utf8_lossy(&fragments[1].stdout).trim(), "two");
-    }
-
-    #[test]
-    fn framing_ignores_banner_bytes_and_refuses_truncation() {
-        let nonce = new_nonce().unwrap();
-        let sentinel = sentinel(&nonce);
-        // Login banners and other leading bytes are ignored.
-        let simulated =
-            format!("Welcome to the host.\n{sentinel}-begin\nabc123\n{sentinel}-exit-0\n");
-        let fragments = parse_framed_output(&nonce, simulated.as_bytes()).unwrap();
-        assert_eq!(fragments.len(), 1);
-        assert_eq!(fragments[0].exit_code, 0);
-        assert_eq!(String::from_utf8_lossy(&fragments[0].stdout).trim(), "abc123");
-
-        // A missing closing sentinel is truncation, never a silent partial.
-        let truncated = format!("{sentinel}-begin\nabc123\n");
-        assert_eq!(
-            parse_framed_output(&nonce, truncated.as_bytes())
-                .unwrap_err()
-                .code,
-            "remote_framing"
-        );
-        // Command text is not output: only the host's echo lines carry the
-        // markers, so the raw frame yields no fragments when parsed.
-        let framed = frame_fragment(&nonce, "git rev-parse HEAD");
-        assert!(parse_framed_output(&nonce, framed.as_bytes())
-            .unwrap()
-            .is_empty());
     }
 
     #[test]
@@ -1473,5 +1525,110 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "auth_failed");
         assert!(error.message.contains("host key"));
+    }
+
+    #[tokio::test]
+    async fn batch_runs_one_invocation_per_group_and_demultiplexes() {
+        let (spawner, scripts) = batch_fake_spawner(vec![vec![
+            (0, b"one\n".to_vec()),
+            (3, b"two".to_vec()),
+            (0, Vec::new()),
+        ]]);
+        let output = run_remote_batch_with(
+            &spawner,
+            &target(),
+            &[
+                batch_fragment(args_of(&["worktree", "list", "--porcelain"])),
+                batch_fragment(args_of(&["status", "--porcelain=v1"])),
+                batch_fragment(args_of(&["remote"])),
+            ],
+        )
+        .await
+        .unwrap();
+        // Exactly one ssh invocation carries the whole read group.
+        assert_eq!(scripts.lock().unwrap().len(), 1);
+        assert_eq!(scripts.lock().unwrap()[0].matches("-begin").count(), 3);
+        // Outputs come back per fragment with their own exit codes.
+        assert_eq!(output.fragments.len(), 3);
+        assert_eq!(output.fragments[0].exit_code, 0);
+        assert_eq!(output.fragments[0].stdout, b"one\n");
+        assert_eq!(output.fragments[1].exit_code, 3);
+        assert_eq!(output.fragments[2].exit_code, 0);
+        assert!(output.ok(0).is_ok());
+        // A failing fragment maps onto the git execution error.
+        assert_eq!(output.ok(1).unwrap_err().code, "git_execution");
+        assert!(output.ok(2).is_ok());
+    }
+
+    #[tokio::test]
+    async fn batch_refuses_non_allowlisted_fragments_before_spawning() {
+        let (spawner, scripts) = batch_fake_spawner(vec![]);
+        let error = run_remote_batch_with(
+            &spawner,
+            &target(),
+            &[
+                batch_fragment(args_of(&["remote"])),
+                batch_fragment(args_of(&["push", "origin"])),
+            ],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "remote_command_refused");
+        assert!(scripts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn batch_composes_quoted_fragments_and_stdin_feeds() {
+        let (spawner, scripts) =
+            batch_fake_spawner(vec![vec![(0, b"a.bin\0filter\0lfs\0".to_vec())]]);
+        run_remote_batch_with(
+            &spawner,
+            &target(),
+            &[BatchFragment {
+                cwd: Some("/srv/re po".into()),
+                args: args_of(&["check-attr", "-z", "--stdin", "filter"]),
+                stdin: Some(vec!["it's a file".into()]),
+            }],
+        )
+        .await
+        .unwrap();
+        let script = scripts.lock().unwrap()[0].clone();
+        // Every variable slot rides the quoting helper.
+        assert!(script.contains("'/srv/re po'"));
+        assert!(script.contains("'it'\\''s a file'"));
+        // The stdin feed pipes NUL-separated operands into the allowlisted
+        // command, and machine-parsed output keeps the locale pin.
+        assert!(script.contains("printf '%s\\000' 'it'\\''s a file' | "));
+        assert!(script.contains("LC_ALL=C LANG=C"));
+        assert!(script.contains("GIT_NO_LAZY_FETCH=1"));
+    }
+
+    #[tokio::test]
+    async fn batch_maps_ssh_failures_and_output_truncation() {
+        // ssh's own exit 255 classifies through the phase-1 failure map.
+        let spawner = canned_spawner(255, b"", b"host.example: Permission denied.\n");
+        let error = run_remote_batch_with(
+            &spawner,
+            &target(),
+            &[batch_fragment(args_of(&["remote"]))],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "auth_failed");
+
+        // Fewer closing frames than fragments is truncation, never a
+        // silent partial result.
+        let (spawner, _scripts) = batch_fake_spawner(vec![vec![(0, b"partial".to_vec())]]);
+        let error = run_remote_batch_with(
+            &spawner,
+            &target(),
+            &[
+                batch_fragment(args_of(&["remote"])),
+                batch_fragment(args_of(&["worktree", "list", "--porcelain"])),
+            ],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "remote_framing");
     }
 }

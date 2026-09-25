@@ -3,8 +3,10 @@ use crate::agents::{
     AgentToken, CreatedAgentToken,
 };
 use crate::git::{
-    fetch_remote_branch, fetch_remotes, git_execution_error, parse_status_count, parse_worktrees,
-    remote_branch_of_tracking_ref, run_git, validate_fetch_name, validate_ref, CommitPage,
+    fetch_remote_branch, fetch_remotes, git_args, git_execution_error, parse_status_count,
+    parse_worktrees, read_target, read_worktree_target, remote_branch_of_tracking_ref, run_git,
+    run_remote_batch_with, validate_fetch_name, validate_ref, BatchFragment, CommitPage,
+    ReadTarget,
     RemoteTarget, Worktree,
 };
 use crate::overview::{branch_inventory, BranchInventory};
@@ -32,18 +34,121 @@ use crate::reviews::{
     Submission,
 };
 use crate::store::{
-    get_settings_in_pool, load_repos, mark_activity_seen_in_pool, open_remote_repo_path,
-    open_repo_path, remove_repo_in_pool, set_repo_pinned_in_pool, set_settings_in_pool, Repo,
-    Settings,
+    get_settings_in_pool, load_repos, mark_activity_seen_in_pool, now_millis,
+    open_remote_repo_path, open_repo_path, remove_repo_in_pool, set_repo_pinned_in_pool,
+    set_settings_in_pool, Repo, Settings,
 };
 use crate::transport::{
     restart, ListenerConfig, ListenerOwner, ListenerStatus, McpStatusHandle, TransportDeps,
 };
 use crate::{canonical_path, plain_path, AppState, CommandError};
 use serde::Serialize;
+use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Manager;
+
+// The backend-owned freshness taxonomy for remote project loads. A local
+// load serializes exactly as before; a remote load carries the explicit
+// state, the age of the last successful read, and an actionable message on
+// failure, so the webview renders badges without inferring from errors.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub(crate) enum ReadOutcome<T> {
+    Local(T),
+    Remote(RemoteRead<T>),
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub(crate) struct RemoteRead<T> {
+    state: ReadState,
+    last_success_age_ms: Option<i64>,
+    message: Option<String>,
+    data: Option<T>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ReadState {
+    Live,
+    Offline,
+    Stale,
+}
+
+// The stale threshold reuses the webview's quiet-interval re-read cadence
+// (src/App.tsx OVERVIEW_RELOAD_INTERVAL_MS): a load failing while the last
+// successful read is still fresh shows offline; once that read ages past
+// one quiet interval, the surface shows stale instead.
+const STALE_AFTER_MS: i64 = 20_000;
+
+// Connection-level failure codes: the offline/stale taxonomy, never raw
+// error surfaces. Host-side git failures keep their own errors.
+fn is_offline_failure(error: &CommandError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "auth_failed" | "unreachable_host" | "remote_spawn" | "remote_timeout" | "remote_framing"
+    )
+}
+
+// Last successful remote read per stored repo path. Session-scoped by
+// design: statelessness makes reconnection free, and a fresh app start
+// reports no age until the first read lands.
+fn remote_read_successes() -> &'static Mutex<HashMap<String, i64>> {
+    static TRACKER: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+    TRACKER.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn note_remote_read_success(repo_path: &str, now: i64) {
+    remote_read_successes()
+        .lock()
+        .unwrap()
+        .insert(repo_path.to_string(), now);
+}
+
+fn remote_read_success_age(repo_path: &str, now: i64) -> Option<i64> {
+    remote_read_successes()
+        .lock()
+        .unwrap()
+        .get(repo_path)
+        .map(|then| (now - *then).max(0))
+}
+
+fn local_outcome<T>(result: Result<T, CommandError>) -> Result<ReadOutcome<T>, CommandError> {
+    result.map(ReadOutcome::Local)
+}
+
+fn remote_outcome<T>(
+    repo_path: &str,
+    result: Result<T, CommandError>,
+) -> Result<ReadOutcome<T>, CommandError> {
+    match result {
+        Ok(data) => {
+            note_remote_read_success(repo_path, now_millis());
+            Ok(ReadOutcome::Remote(RemoteRead {
+                state: ReadState::Live,
+                last_success_age_ms: Some(0),
+                message: None,
+                data: Some(data),
+            }))
+        }
+        Err(error) if is_offline_failure(&error) => {
+            let age = remote_read_success_age(repo_path, now_millis());
+            let state = if age.is_some_and(|age| age > STALE_AFTER_MS) {
+                ReadState::Stale
+            } else {
+                ReadState::Offline
+            };
+            Ok(ReadOutcome::Remote(RemoteRead {
+                state,
+                last_success_age_ms: age,
+                message: Some(error.message),
+                data: None,
+            }))
+        }
+        Err(error) => Err(error),
+    }
+}
 
 #[tauri::command]
 pub(crate) async fn open_repo(
@@ -77,10 +182,19 @@ pub(crate) async fn list_repos(
 
 // Path-scoped worktree listing behind the list_worktrees command: the MCP
 // face's list_review_targets reuses the same inventory the UI shows.
-pub(crate) async fn list_worktrees_in_path(path: &str) -> Result<Vec<Worktree>, CommandError> {
-    let path = canonical_path(path)?;
+pub(crate) async fn list_worktrees_in_pool(
+    pool: &SqlitePool,
+    path: &str,
+) -> Result<Vec<Worktree>, CommandError> {
+    match read_target(pool, path).await? {
+        ReadTarget::Local(path) => list_worktrees_local(&path).await,
+        ReadTarget::Remote(target) => list_worktrees_remote(&target).await,
+    }
+}
+
+async fn list_worktrees_local(path: &Path) -> Result<Vec<Worktree>, CommandError> {
     let (exit_code, stdout, stderr) = run_git(
-        &path,
+        path,
         &[
             "-c",
             "core.quotePath=false",
@@ -96,12 +210,42 @@ pub(crate) async fn list_worktrees_in_path(path: &str) -> Result<Vec<Worktree>, 
     parse_worktrees(&stdout)
 }
 
-#[tauri::command]
-pub(crate) async fn list_worktrees(path: String) -> Result<Vec<Worktree>, CommandError> {
-    list_worktrees_in_path(&path).await
+async fn list_worktrees_remote(target: &RemoteTarget) -> Result<Vec<Worktree>, CommandError> {
+    list_worktrees_remote_with(&crate::git::process_spawner(), target).await
 }
 
-#[derive(Debug, Serialize)]
+async fn list_worktrees_remote_with(
+    spawner: &crate::git::Spawner,
+    target: &RemoteTarget,
+) -> Result<Vec<Worktree>, CommandError> {
+    let output = run_remote_batch_with(spawner, target, &[crate::git::worktree_list_fragment()]).await?;
+    parse_worktrees(&output.ok(0)?.stdout)
+}
+
+#[tauri::command]
+pub(crate) async fn list_worktrees(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ReadOutcome<Vec<Worktree>>, CommandError> {
+    let remote = matches!(read_target(&state.pool, &path).await?, ReadTarget::Remote(_));
+    wrap_outcome(&path, remote, list_worktrees_in_pool(&state.pool, &path).await)
+}
+
+// Local loads serialize exactly as before; remote loads carry the explicit
+// offline/stale/live state.
+fn wrap_outcome<T>(
+    repo_path: &str,
+    remote: bool,
+    result: Result<T, CommandError>,
+) -> Result<ReadOutcome<T>, CommandError> {
+    if remote {
+        remote_outcome(repo_path, result)
+    } else {
+        local_outcome(result)
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
 pub(crate) struct WorktreeStatus {
     pub path: String,
     // None marks a worktree whose change count is unknown (the status probe
@@ -112,8 +256,27 @@ pub(crate) struct WorktreeStatus {
 #[tauri::command]
 pub(crate) async fn list_worktree_status(
     path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ReadOutcome<Vec<WorktreeStatus>>, CommandError> {
+    let remote = matches!(read_target(&state.pool, &path).await?, ReadTarget::Remote(_));
+    wrap_outcome(
+        &path,
+        remote,
+        list_worktree_status_in_pool(&state.pool, &path).await,
+    )
+}
+
+pub(crate) async fn list_worktree_status_in_pool(
+    pool: &SqlitePool,
+    path: &str,
 ) -> Result<Vec<WorktreeStatus>, CommandError> {
-    let path = canonical_path(&path)?;
+    match read_target(pool, path).await? {
+        ReadTarget::Local(path) => list_worktree_status_local(path).await,
+        ReadTarget::Remote(target) => list_worktree_status_remote(&target).await,
+    }
+}
+
+async fn list_worktree_status_local(path: std::path::PathBuf) -> Result<Vec<WorktreeStatus>, CommandError> {
     let (exit_code, stdout, stderr) = run_git(
         &path,
         &[
@@ -146,21 +309,67 @@ pub(crate) async fn list_worktree_status(
     Ok(statuses)
 }
 
+// The worktree statuses batch into one invocation after the enumeration:
+// the probes depend on the listed host paths, so the group is two round
+// trips regardless of worktree count.
+async fn list_worktree_status_remote(
+    target: &RemoteTarget,
+) -> Result<Vec<WorktreeStatus>, CommandError> {
+    list_worktree_status_remote_with(&crate::git::process_spawner(), target).await
+}
+
+async fn list_worktree_status_remote_with(
+    spawner: &crate::git::Spawner,
+    target: &RemoteTarget,
+) -> Result<Vec<WorktreeStatus>, CommandError> {
+    let listed = run_remote_batch_with(spawner, target, &[crate::git::worktree_list_fragment()]).await?;
+    let worktrees = parse_worktrees(&listed.ok(0)?.stdout)?;
+    let mut statuses = Vec::with_capacity(worktrees.len());
+    if worktrees.is_empty() {
+        return Ok(statuses);
+    }
+    let probes: Vec<BatchFragment> = worktrees
+        .iter()
+        .map(|worktree| crate::git::batch_fragment_at(&worktree.path, change_count_args()))
+        .collect();
+    let probed = run_remote_batch_with(spawner, target, &probes).await?;
+    for (index, worktree) in worktrees.iter().enumerate() {
+        let changes = match probed.ok(index) {
+            Ok(fragment) => Some(parse_status_count(&fragment.stdout)),
+            // A count beyond the output bound is itself the signal; other
+            // failures leave that worktree's count unknown without sinking
+            // the badges of every healthy worktree.
+            Err(error) if error.code == "git_output_too_large" => Some(u32::MAX),
+            Err(_) => None,
+        };
+        statuses.push(WorktreeStatus {
+            path: worktree.path.clone(),
+            changes,
+        });
+    }
+    Ok(statuses)
+}
+
+fn change_count_args() -> Vec<String> {
+    [
+        "--no-optional-locks",
+        "status",
+        "--porcelain=v1",
+        "--no-renames",
+        "--untracked-files=all",
+        "-z",
+    ]
+    .iter()
+    .map(|arg| arg.to_string())
+    .collect()
+}
+
 async fn worktree_change_count(worktree_path: &Path) -> Result<u32, CommandError> {
     // --no-optional-locks keeps the status probe from taking the index lock
     // or refreshing the index, so the read-only guarantee holds.
-    let (exit_code, stdout, stderr) = run_git(
-        worktree_path,
-        &[
-            "--no-optional-locks",
-            "status",
-            "--porcelain=v1",
-            "--no-renames",
-            "--untracked-files=all",
-            "-z",
-        ],
-    )
-    .await?;
+    let args = change_count_args();
+    let args = git_args(&args);
+    let (exit_code, stdout, stderr) = run_git(worktree_path, &args).await?;
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
     }
@@ -187,8 +396,11 @@ pub(crate) async fn remove_repo(
 #[tauri::command]
 pub(crate) async fn get_branch_inventory(
     path: String,
-) -> Result<BranchInventory, CommandError> {
-    branch_inventory(path).await
+    state: tauri::State<'_, AppState>,
+) -> Result<ReadOutcome<BranchInventory>, CommandError> {
+    let remote = matches!(read_target(&state.pool, &path).await?, ReadTarget::Remote(_));
+    let result = branch_inventory(&state.pool, path.clone()).await;
+    wrap_outcome(&path, remote, result)
 }
 
 // Announces a completed refresh or, after `add_repo`, a newly registered
@@ -345,8 +557,11 @@ pub(crate) async fn list_refs(
     path: String,
     worktree_branch: Option<String>,
     target_ref: Option<String>,
-) -> Result<RefInventory, CommandError> {
-    refs_inventory(path, worktree_branch, target_ref).await
+    state: tauri::State<'_, AppState>,
+) -> Result<ReadOutcome<RefInventory>, CommandError> {
+    let remote = matches!(read_target(&state.pool, &path).await?, ReadTarget::Remote(_));
+    let result = refs_inventory(&state.pool, path.clone(), worktree_branch, target_ref).await;
+    wrap_outcome(&path, remote, result)
 }
 
 #[tauri::command]
@@ -358,8 +573,12 @@ pub(crate) async fn list_commits(
     skip: Option<u32>,
     limit: Option<u16>,
     state: tauri::State<'_, AppState>,
-) -> Result<CommitPage, CommandError> {
-    commit_page(
+) -> Result<ReadOutcome<CommitPage>, CommandError> {
+    let remote = matches!(
+        read_target(&state.pool, &repo_path).await?,
+        ReadTarget::Remote(_)
+    );
+    let result = commit_page(
         &state.pool,
         &repo_path,
         path,
@@ -368,15 +587,17 @@ pub(crate) async fn list_commits(
         skip,
         limit,
     )
-    .await
+    .await;
+    wrap_outcome(&repo_path, remote, result)
 }
 
 #[tauri::command]
 pub(crate) async fn list_surfaces(
     path: String,
     state: tauri::State<'_, AppState>,
-) -> Result<SurfaceListing, CommandError> {
-    list_surfaces_in_pool(&state.pool, &path).await
+) -> Result<ReadOutcome<SurfaceListing>, CommandError> {
+    let remote = matches!(read_target(&state.pool, &path).await?, ReadTarget::Remote(_));
+    wrap_outcome(&path, remote, list_surfaces_in_pool(&state.pool, &path).await)
 }
 
 // The cross-repo attention queue: one read-only store pass, no Git runs on
@@ -661,8 +882,12 @@ pub(crate) async fn list_review_changes(
     committed_only: bool,
     reversed: bool,
     state: tauri::State<'_, AppState>,
-) -> Result<ReviewIndex, CommandError> {
-    review_changes(
+) -> Result<ReadOutcome<ReviewIndex>, CommandError> {
+    let remote = matches!(
+        read_target(&state.pool, &repo_path).await?,
+        ReadTarget::Remote(_)
+    );
+    let result = review_changes(
         &state.pool,
         &repo_path,
         path,
@@ -671,21 +896,31 @@ pub(crate) async fn list_review_changes(
         committed_only,
         reversed,
     )
-    .await
+    .await;
+    wrap_outcome(&repo_path, remote, result)
 }
 
 #[tauri::command]
 pub(crate) async fn read_review_patch(
     path: String,
+    repo_path: Option<String>,
     base: String,
     head_ref: Option<String>,
     committed_only: bool,
     reversed: bool,
     file: String,
     untracked: bool,
-) -> Result<FilePatch, CommandError> {
-    review_patch(
+    state: tauri::State<'_, AppState>,
+) -> Result<ReadOutcome<FilePatch>, CommandError> {
+    let repo_key = repo_path.clone().unwrap_or_else(|| path.clone());
+    let remote = matches!(
+        read_worktree_target(&state.pool, &repo_key, &path).await?,
+        ReadTarget::Remote(_)
+    );
+    let result = review_patch(
+        &state.pool,
         path,
+        repo_path,
         base,
         head_ref,
         committed_only,
@@ -693,7 +928,12 @@ pub(crate) async fn read_review_patch(
         file,
         untracked,
     )
-    .await
+    .await;
+    if remote {
+        remote_outcome(&repo_key, result)
+    } else {
+        local_outcome(result)
+    }
 }
 
 // The reviewed file's content on the patch's new side, for context expansion
@@ -701,15 +941,24 @@ pub(crate) async fn read_review_patch(
 #[tauri::command]
 pub(crate) async fn read_review_file(
     path: String,
+    repo_path: Option<String>,
     base: String,
     head_ref: Option<String>,
     committed_only: bool,
     reversed: bool,
     file: String,
     untracked: bool,
-) -> Result<FileContent, CommandError> {
-    review_file_content(
+    state: tauri::State<'_, AppState>,
+) -> Result<ReadOutcome<FileContent>, CommandError> {
+    let repo_key = repo_path.clone().unwrap_or_else(|| path.clone());
+    let remote = matches!(
+        read_worktree_target(&state.pool, &repo_key, &path).await?,
+        ReadTarget::Remote(_)
+    );
+    let result = review_file_content(
+        &state.pool,
         path,
+        repo_path,
         base,
         head_ref,
         committed_only,
@@ -717,24 +966,34 @@ pub(crate) async fn read_review_file(
         file,
         untracked,
     )
-    .await
+    .await;
+    if remote {
+        remote_outcome(&repo_key, result)
+    } else {
+        local_outcome(result)
+    }
 }
 
 // The reviewed file's raw bytes on the patch's new side: renderable assets
 // (images) need them without the binary check or UTF-8 decode. Same review
-// identity arguments as the text read.
+// identity arguments as the text read. Raw bytes cannot carry the taxonomy,
+// so a connection failure surfaces as its typed offline error.
 #[tauri::command]
 pub(crate) async fn read_review_file_bytes(
     path: String,
+    repo_path: Option<String>,
     base: String,
     head_ref: Option<String>,
     committed_only: bool,
     reversed: bool,
     file: String,
     untracked: bool,
+    state: tauri::State<'_, AppState>,
 ) -> Result<tauri::ipc::Response, CommandError> {
     let bytes = review_file_bytes(
+        &state.pool,
         path,
+        repo_path,
         base,
         head_ref,
         committed_only,
@@ -752,8 +1011,11 @@ pub(crate) async fn read_review_file_bytes(
 pub(crate) async fn describe_commit(
     path: String,
     rev: String,
-) -> Result<CommitDetail, CommandError> {
-    commit_detail(path, rev).await
+    state: tauri::State<'_, AppState>,
+) -> Result<ReadOutcome<CommitDetail>, CommandError> {
+    let remote = matches!(read_target(&state.pool, &path).await?, ReadTarget::Remote(_));
+    let result = commit_detail(&state.pool, path.clone(), rev).await;
+    wrap_outcome(&path, remote, result)
 }
 
 // Handing a reviewed file to the OS shell is user-initiated and must stay
@@ -923,9 +1185,14 @@ pub(crate) async fn match_comment_anchors(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_request_as_human, fetch_remote_branch, refresh_repo, update_request_in_pool,
-        worktree_change_count, RequestAction, RefreshSink,
+        create_request_as_human, fetch_remote_branch, is_offline_failure, list_worktrees_in_pool,
+        list_worktrees_remote_with, list_worktree_status_remote_with, local_outcome,
+        note_remote_read_success, read_target, refresh_repo, remote_outcome, update_request_in_pool,
+        worktree_change_count, CommandError, ReadOutcome, ReadState, ReadTarget, RemoteRead,
+        RemoteTarget, RequestAction, RefreshSink, Worktree, WorktreeStatus, STALE_AFTER_MS,
     };
+    use crate::git::batch_fake_spawner;
+    use crate::store::now_millis;
     use crate::agents::create_agent_token_in_pool;
     use crate::overview::branch_inventory;
     use crate::requests::{create_request_in_pool, set_request_verdict_in_pool, Actor as RequestActor, RequestDraft};
@@ -964,6 +1231,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_updates_remote_tracking_refs_and_announces() {
+        let pool = test_pool().await;
         let origin = test_repo("fetch-origin");
         test_git(&origin, &["branch", "-M", "main"]);
         let clone = test_path("fetch-clone");
@@ -978,7 +1246,7 @@ mod tests {
         // A repository with no fetched refs yet picks up the remote's
         // branches on the first refresh.
         refresh_repo(&clone, &refreshes).await.unwrap();
-        let inventory = branch_inventory(clone.to_str().unwrap().into())
+        let inventory = branch_inventory(&pool, clone.to_str().unwrap().into())
             .await
             .unwrap();
         assert_eq!(inventory.remote_branch_count, 1);
@@ -996,7 +1264,7 @@ mod tests {
         std::fs::write(origin.join("tracked.txt"), "changed\n").unwrap();
         test_git(&origin, &["commit", "--quiet", "-am", "advance"]);
         refresh_repo(&clone, &refreshes).await.unwrap();
-        let inventory = branch_inventory(clone.to_str().unwrap().into())
+        let inventory = branch_inventory(&pool, clone.to_str().unwrap().into())
             .await
             .unwrap();
         assert_eq!(inventory.remote_branch_count, 2);
@@ -1220,5 +1488,149 @@ mod tests {
         // The note bound refuses before the transition runs.
         let refused = update_request_in_pool(&pool, second.id, RequestAction::Withdraw, Some("a".repeat(2001)), None, &notify).await;
         assert_eq!(refused.unwrap_err().code, "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn worktree_listing_routes_local_and_remote_targets() {
+        let pool = test_pool().await;
+        // A local target keeps the hardened local builder end to end.
+        let repo = test_repo("routing-local");
+        let worktrees = list_worktrees_in_pool(&pool, repo.to_str().unwrap())
+            .await
+            .unwrap();
+        let expected = crate::plain_path(&repo.canonicalize().unwrap());
+        assert!(worktrees
+            .iter()
+            .any(|worktree| std::path::Path::new(&worktree.path) == expected.as_path()));
+
+        // A remote row routes its identity through the runner even though
+        // the host-side path cannot exist locally: canonical_path is never
+        // reached with it.
+        let identity = "dev@host.example:/srv/re po";
+        sqlx::query(
+            "INSERT INTO repos (path, name, remote, last_opened_at, created_at) \
+             VALUES (?, 'demo', 1, 1, 1)",
+        )
+        .bind(identity)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let target = match read_target(&pool, identity).await.unwrap() {
+            ReadTarget::Remote(target) => target,
+            ReadTarget::Local(_) => panic!("remote identity must route to the runner"),
+        };
+        let (spawner, scripts) = batch_fake_spawner(vec![vec![(
+            0,
+            b"worktree /srv/main\nHEAD abc\nbranch refs/heads/main\n\n".to_vec(),
+        )]]);
+        let worktrees = list_worktrees_remote_with(&spawner, &target).await.unwrap();
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0].path, "/srv/main");
+        assert_eq!(scripts.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    // The per-worktree status probes batch into one invocation after the
+    // enumeration; failing probes leave that worktree's count unknown
+    // without sinking the badges of healthy worktrees.
+    #[tokio::test]
+    async fn worktree_statuses_batch_into_enumeration_plus_probes() {
+        let (spawner, scripts) = batch_fake_spawner(vec![
+            vec![(
+                0,
+                b"worktree /srv/main\nHEAD a\nbranch refs/heads/main\n\nworktree /srv/fe ature\nHEAD b\ndetached\n\n".to_vec(),
+            )],
+            vec![(0, Vec::new()), (1, Vec::new())],
+        ]);
+        let target =
+            RemoteTarget::from_parts(Some("dev"), "host.example", None, "/srv/repo").unwrap();
+        let statuses = list_worktree_status_remote_with(&spawner, &target)
+            .await
+            .unwrap();
+        // Two round trips regardless of worktree count, each probe its own
+        // frame with the host path quoted.
+        assert_eq!(scripts.lock().unwrap().len(), 2);
+        let probes = scripts.lock().unwrap()[1].clone();
+        assert_eq!(probes.matches("-begin").count(), 2);
+        assert!(probes.contains("'/srv/fe ature'"));
+        assert!(probes.contains("--no-optional-locks"));
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].path, "/srv/main");
+        assert_eq!(statuses[0].changes, Some(0));
+        assert_eq!(statuses[1].changes, None);
+    }
+
+    // The backend-owned taxonomy: connection-level failures carry the
+    // explicit offline/stale state with the actionable message, host-side
+    // git failures stay error surfaces, and local loads keep bare payloads.
+    #[test]
+    fn remote_load_failures_map_to_the_offline_stale_taxonomy() {
+        let repo = "/taxonomy-demo";
+        let error = CommandError::new("unreachable_host", "The remote host could not be reached.");
+        match remote_outcome::<Vec<Worktree>>(repo, Err(error)).unwrap() {
+            ReadOutcome::Remote(read) => {
+                assert!(matches!(read.state, ReadState::Offline));
+                assert!(read.data.is_none());
+                assert!(read.message.unwrap().contains("The remote host could not be reached."));
+            }
+            ReadOutcome::Local(_) => panic!("remote loads must carry the envelope"),
+        }
+
+        // A last success older than the quiet-interval cadence flips the
+        // state to stale.
+        note_remote_read_success(repo, now_millis() - (STALE_AFTER_MS + 5_000));
+        let error = CommandError::new("remote_timeout", "The remote host did not respond in time.");
+        match remote_outcome::<Vec<Worktree>>(repo, Err(error)).unwrap() {
+            ReadOutcome::Remote(read) => {
+                assert!(matches!(read.state, ReadState::Stale));
+                assert!(read.last_success_age_ms.unwrap() > STALE_AFTER_MS);
+            }
+            ReadOutcome::Local(_) => panic!("remote loads must carry the envelope"),
+        }
+
+        // Host-side git failures are never mapped onto offline/stale.
+        let error = CommandError::new("git_execution", "fatal: bad object");
+        assert!(remote_outcome::<Vec<Worktree>>(repo, Err(error)).is_err());
+
+        // The connection-level code set is exactly the offline taxonomy.
+        for code in [
+            "auth_failed",
+            "unreachable_host",
+            "remote_spawn",
+            "remote_timeout",
+            "remote_framing",
+        ] {
+            assert!(is_offline_failure(&CommandError::new(code, "x")), "{code}");
+        }
+        for code in ["git_execution", "git_timeout", "unresolvable_ref"] {
+            assert!(!is_offline_failure(&CommandError::new(code, "x")), "{code}");
+        }
+
+        // Local loads keep their payloads bare.
+        assert!(matches!(
+            local_outcome::<Vec<Worktree>>(Ok(Vec::new())).unwrap(),
+            ReadOutcome::Local(_)
+        ));
+    }
+
+    // Serialization contract: a local payload is byte-for-byte today's JSON
+    // and a remote payload carries the explicit state and age.
+    #[test]
+    fn local_payloads_serialize_bare_and_remote_payloads_carry_state() {
+        let payload = vec![WorktreeStatus {
+            path: "/w".into(),
+            changes: Some(0),
+        }];
+        let local = serde_json::to_string(&ReadOutcome::Local(payload.clone())).unwrap();
+        assert_eq!(local, serde_json::to_string(&payload).unwrap());
+        let remote = serde_json::to_string(&ReadOutcome::Remote(RemoteRead {
+            state: ReadState::Live,
+            last_success_age_ms: Some(0),
+            message: None,
+            data: Some(payload),
+        }))
+        .unwrap();
+        assert!(remote.contains("\"state\":\"live\""));
+        assert!(remote.contains("\"last_success_age_ms\":0"));
     }
 }

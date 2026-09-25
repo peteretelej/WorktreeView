@@ -75,12 +75,36 @@ repository cannot mutate it or execute code it defines.
 
 ## Network
 
-- Review computations make no network requests; inspection commands spawn
-  with `GIT_NO_LAZY_FETCH`, so reading a repository can never pull objects
-  from a remote. A filtered partial clone (blobless or treeless) therefore
-  reviews only what is already on disk: history renders, but a diff over
-  unfetched content fails with an explicit `partial_clone_content` error
-  instead of silently lazy-fetching.
+- Review computations for a local project make no network requests;
+  inspection commands spawn with `GIT_NO_LAZY_FETCH`, so reading a
+  repository can never pull objects from a remote. A filtered partial
+  clone (blobless or treeless) therefore reviews only what is already on
+  disk: history renders, but a diff over unfetched content fails with an
+  explicit `partial_clone_content` error instead of silently
+  lazy-fetching.
+- A remote project's review computations contact only that project's
+  configured SSH host, reached with the user's own `ssh` binary and its
+  config, agent, and known hosts. The same read-only plumbing runs on the
+  host: every remote git invocation passes one allowlist of read-only
+  subcommands, the identity of that allowlist check is the same choke
+  point for validation and for batched review reads, and anything outside
+  it is refused before a connection is used. The same neutralizations
+  apply on the host (filters never execute, ext-diff and textconv are
+  off, the locale is pinned where output is machine-parsed), so hosting
+  the read elsewhere runs no repository-defined code there either.
+- Remote reads carry no credentials of their own. ssh runs in batch mode
+  and never answers a passphrase or host-key prompt; a rejected key or an
+  unaccepted host key fails the read with an actionable message that
+  points at the terminal-side fix. Where the platform supports it, ssh
+  multiplexes the app's invocations over one connection (ControlMaster on
+  non-Windows hosts); the app stores no key material and keeps no
+  connection daemons alive beyond ssh's own persistence.
+- Connection and authentication failures surface as explicit offline or
+  stale states on remote payloads, never as raw error surfaces, with the
+  age of the last successful read attached. Host-side Git failures keep
+  their own diagnostics. Statelessness makes reconnection free: a failed
+  read retries nothing on its own; the next user- or refresh-driven load
+  simply runs again.
 - Two deliberate outbound network operations exist, both user-initiated
   (or agent-pinged through the endpoint) and never part of review
   computation. The project fetch contacts only the repository's own
@@ -109,9 +133,6 @@ repository cannot mutate it or execute code it defines.
   can already read the app's store and the config file, so the token
   guards against stale clients and accidents, not against user-level
   processes.
-- Remote and SSH review are still not implemented; they wait until their
-  execution, trust, latency, freshness, reconnection, and persistence model
-  is settled.
 
 ## Test isolation
 

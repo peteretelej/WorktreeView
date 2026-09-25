@@ -1,6 +1,6 @@
-use crate::git::{git_execution_error, parse_worktrees, run_git};
+use crate::git::{git_execution_error, parse_worktrees, read_target, run_git, ReadTarget};
 use crate::store::now_millis;
-use crate::{canonical_path, plain_path, CommandError};
+use crate::{plain_path, CommandError};
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
 use std::collections::HashSet;
@@ -112,43 +112,83 @@ pub(crate) async fn list_surfaces_in_pool(
     pool: &SqlitePool,
     path: &str,
 ) -> Result<SurfaceListing, CommandError> {
-    let repo = canonical_path(path)?;
-    let repo_path = repo.to_str().ok_or_else(|| {
-        CommandError::new("invalid_path", "The selected path is not valid UTF-8.")
-    })?;
-    let (exit_code, stdout, stderr) = run_git(
-        &repo,
-        &[
-            "-c",
-            "core.quotePath=false",
-            "worktree",
-            "list",
-            "--porcelain",
-        ],
-    )
-    .await?;
-    if exit_code != 0 {
-        return Err(git_execution_error(&stderr));
+    match read_target(pool, path).await? {
+        ReadTarget::Local(repo) => {
+            let repo_path = repo.to_str().ok_or_else(|| {
+                CommandError::new("invalid_path", "The selected path is not valid UTF-8.")
+            })?;
+            let (exit_code, stdout, stderr) = run_git(
+                &repo,
+                &[
+                    "-c",
+                    "core.quotePath=false",
+                    "worktree",
+                    "list",
+                    "--porcelain",
+                ],
+            )
+            .await?;
+            if exit_code != 0 {
+                return Err(git_execution_error(&stderr));
+            }
+            let mut live_worktrees = HashSet::new();
+            for worktree in parse_worktrees(&stdout)? {
+                live_worktrees.insert(live_worktree_key(&worktree.path));
+            }
+            let (exit_code, stdout, stderr) = run_git(
+                &repo,
+                &["for-each-ref", "refs/heads", "refs/remotes", "--format=%(refname)"],
+            )
+            .await?;
+            if exit_code != 0 {
+                return Err(git_execution_error(&stderr));
+            }
+            let live_branch_refs = parse_refnames(&stdout)?;
+            classify_surfaces(pool, repo_path, live_worktrees, live_branch_refs).await
+        }
+        ReadTarget::Remote(target) => {
+            // Both live inventories ride one batched invocation; the store
+            // rows key on the remote identity string.
+            let batch = crate::git::run_remote_batch(
+                &target,
+                &[
+                    crate::git::worktree_list_fragment(),
+                    crate::git::batch_fragment(vec![
+                        "for-each-ref".into(),
+                        "refs/heads".into(),
+                        "refs/remotes".into(),
+                        "--format=%(refname)".into(),
+                    ]),
+                ],
+            )
+            .await?;
+            let mut live_worktrees = HashSet::new();
+            for worktree in parse_worktrees(&batch.ok(0)?.stdout)? {
+                // Remote worktree paths are host-side POSIX paths; they are
+                // compared in their raw form because local canonicalization
+                // cannot resolve them.
+                live_worktrees.insert(worktree.path);
+            }
+            let live_branch_refs = parse_refnames(&batch.ok(1)?.stdout)?;
+            classify_surfaces(pool, path, live_worktrees, live_branch_refs).await
+        }
     }
-    let mut live_worktrees = HashSet::new();
-    for worktree in parse_worktrees(&stdout)? {
-        live_worktrees.insert(live_worktree_key(&worktree.path));
-    }
-    let (exit_code, stdout, stderr) = run_git(
-        &repo,
-        &["for-each-ref", "refs/heads", "refs/remotes", "--format=%(refname)"],
-    )
-    .await?;
-    if exit_code != 0 {
-        return Err(git_execution_error(&stderr));
-    }
+}
+
+fn parse_refnames(stdout: &[u8]) -> Result<HashSet<String>, CommandError> {
+    let text = std::str::from_utf8(stdout)
+        .map_err(|_| CommandError::new("git_output_malformed", "Git returned invalid ref data."))?;
+    Ok(text.lines().map(str::to_string).collect())
+}
+
+async fn classify_surfaces(
+    pool: &SqlitePool,
+    repo_path: &str,
+    live_worktrees: HashSet<String>,
+    live_branch_refs: HashSet<String>,
+) -> Result<SurfaceListing, CommandError> {
     // Branch pins can point at remote-tracking refs, so a ref counts as live
     // when either side of the inventory still carries it.
-    let live_branch_refs: HashSet<String> = std::str::from_utf8(&stdout)
-        .map_err(|_| CommandError::new("git_output_malformed", "Git returned invalid ref data."))?
-        .lines()
-        .map(str::to_string)
-        .collect();
     let rows = sqlx::query(
         "SELECT kind, identity_key, label, detail, head_sha, last_seen_at, pinned_at \
          FROM retrospected_surfaces WHERE repo_path = ? \
@@ -258,8 +298,9 @@ fn live_worktree_key(path: &str) -> String {
 
 // Pin or unpin one surface. An already-recorded surface (live or gone) is
 // pinned in place with no spawn; only an unknown identity resolves fresh,
-// with at most one bounded spawn. Unpinning deletes pin-created rows (a pin
-// is the only thing holding them) and just clears review-recorded rows.
+// with at most one bounded spawn (one batched invocation remotely). Unpinning
+// deletes pin-created rows (a pin is the only thing holding them) and just
+// clears review-recorded rows.
 pub(crate) async fn set_surface_pinned_in_pool(
     pool: &SqlitePool,
     path: &str,
@@ -267,14 +308,55 @@ pub(crate) async fn set_surface_pinned_in_pool(
     identity_key: &str,
     pinned: bool,
 ) -> Result<Option<i64>, CommandError> {
-    let repo = canonical_path(path)?;
-    let repo_path = repo.to_str().ok_or_else(|| {
-        CommandError::new("invalid_path", "The selected path is not valid UTF-8.")
-    })?;
-    let identity_key = match kind {
-        "worktree" => live_worktree_key(identity_key),
-        _ => identity_key.to_string(),
-    };
+    match read_target(pool, path).await? {
+        ReadTarget::Local(repo) => {
+            let repo_path = repo.to_str().ok_or_else(|| {
+                CommandError::new("invalid_path", "The selected path is not valid UTF-8.")
+            })?;
+            let identity_key = match kind {
+                "worktree" => live_worktree_key(identity_key),
+                _ => identity_key.to_string(),
+            };
+            set_surface_pinned(
+                pool,
+                repo_path,
+                kind,
+                &identity_key,
+                pinned,
+                SurfaceIdentity::Local(&repo),
+            )
+            .await
+        }
+        ReadTarget::Remote(target) => {
+            // Remote worktree keys are host-side POSIX paths, compared raw.
+            set_surface_pinned(
+                pool,
+                path,
+                kind,
+                identity_key,
+                pinned,
+                SurfaceIdentity::Remote(&target),
+            )
+            .await
+        }
+    }
+}
+
+// Where a not-yet-recorded surface's identity resolves: live inventory over
+// Git on the local checkout or, batched, on the host.
+enum SurfaceIdentity<'a> {
+    Local(&'a Path),
+    Remote(&'a crate::git::RemoteTarget),
+}
+
+async fn set_surface_pinned(
+    pool: &SqlitePool,
+    repo_path: &str,
+    kind: &str,
+    identity_key: &str,
+    pinned: bool,
+    resolver: SurfaceIdentity<'_>,
+) -> Result<Option<i64>, CommandError> {
     let persisted_error = || {
         CommandError::new(
             "persistence",
@@ -287,7 +369,7 @@ pub(crate) async fn set_surface_pinned_in_pool(
     )
     .bind(repo_path)
     .bind(kind)
-    .bind(&identity_key)
+    .bind(identity_key)
     .fetch_optional(pool)
     .await?;
     let pinned_at = pinned.then(now_millis);
@@ -300,7 +382,7 @@ pub(crate) async fn set_surface_pinned_in_pool(
             .bind(pinned_at)
             .bind(repo_path)
             .bind(kind)
-            .bind(&identity_key)
+            .bind(identity_key)
             .execute(pool)
             .await?;
         } else if origin == "pin" {
@@ -310,7 +392,7 @@ pub(crate) async fn set_surface_pinned_in_pool(
             )
             .bind(repo_path)
             .bind(kind)
-            .bind(&identity_key)
+            .bind(identity_key)
             .execute(pool)
             .await?;
         } else {
@@ -320,7 +402,7 @@ pub(crate) async fn set_surface_pinned_in_pool(
             )
             .bind(repo_path)
             .bind(kind)
-            .bind(&identity_key)
+            .bind(identity_key)
             .execute(pool)
             .await?;
         }
@@ -329,7 +411,8 @@ pub(crate) async fn set_surface_pinned_in_pool(
     if !pinned {
         return Err(persisted_error());
     }
-    let (label, detail, head_sha) = resolve_surface_identity(&repo, kind, &identity_key).await?;
+    let (label, detail, head_sha) =
+        resolve_surface_identity(&resolver, kind, identity_key).await?;
     sqlx::query(
         "INSERT INTO retrospected_surfaces \
          (repo_path, kind, identity_key, label, detail, head_sha, last_seen_at, pinned_at, origin) \
@@ -337,7 +420,7 @@ pub(crate) async fn set_surface_pinned_in_pool(
     )
     .bind(repo_path)
     .bind(kind)
-    .bind(&identity_key)
+    .bind(identity_key)
     .bind(&label)
     .bind(&detail)
     .bind(&head_sha)
@@ -352,7 +435,7 @@ pub(crate) async fn set_surface_pinned_in_pool(
 // with one rev-parse; worktrees come from one worktree listing that also
 // carries the branch label and head.
 async fn resolve_surface_identity(
-    repo: &Path,
+    repo: &SurfaceIdentity<'_>,
     kind: &str,
     identity_key: &str,
 ) -> Result<(String, String, String), CommandError> {
@@ -362,15 +445,18 @@ async fn resolve_surface_identity(
             "The surface is not recorded and cannot be pinned.",
         ));
     }
-    match kind {
-        "branch" => {
+    let not_recorded = || {
+        CommandError::new(
+            "persistence",
+            format!("The surface '{identity_key}' is not recorded and cannot be pinned."),
+        )
+    };
+    match (kind, repo) {
+        ("branch", SurfaceIdentity::Local(path)) => {
             let (exit_code, stdout, _stderr) =
-                run_git(repo, &["rev-parse", "--verify", identity_key]).await?;
+                run_git(path, &["rev-parse", "--verify", identity_key]).await?;
             if exit_code != 0 {
-                return Err(CommandError::new(
-                    "persistence",
-                    format!("The surface '{identity_key}' is not recorded and cannot be pinned."),
-                ));
+                return Err(not_recorded());
             }
             let head_sha = std::str::from_utf8(&stdout)
                 .map_err(|_| {
@@ -378,24 +464,38 @@ async fn resolve_surface_identity(
                 })?
                 .trim();
             if head_sha.is_empty() {
-                return Err(CommandError::new(
-                    "persistence",
-                    format!("The surface '{identity_key}' is not recorded and cannot be pinned."),
-                ));
+                return Err(not_recorded());
             }
-            let label = identity_key
-                .strip_prefix("refs/heads/")
-                .or_else(|| identity_key.strip_prefix("refs/remotes/"))
-                .unwrap_or(identity_key);
             Ok((
-                label.to_string(),
+                branch_label(identity_key),
                 identity_key.to_string(),
                 head_sha.to_string(),
             ))
         }
-        "worktree" => {
+        ("branch", SurfaceIdentity::Remote(target)) => {
+            let batch = crate::git::run_remote_batch(
+                target,
+                &[crate::git::batch_fragment(vec![
+                    "rev-parse".into(),
+                    "--verify".into(),
+                    identity_key.into(),
+                ])],
+            )
+            .await?;
+            let fragment = batch.ok(0)?;
+            let head_sha = String::from_utf8_lossy(&fragment.stdout).trim().to_string();
+            if head_sha.is_empty() {
+                return Err(not_recorded());
+            }
+            Ok((
+                branch_label(identity_key),
+                identity_key.to_string(),
+                head_sha,
+            ))
+        }
+        ("worktree", SurfaceIdentity::Local(path)) => {
             let (exit_code, stdout, stderr) = run_git(
-                repo,
+                path,
                 &[
                     "-c",
                     "core.quotePath=false",
@@ -410,23 +510,44 @@ async fn resolve_surface_identity(
             }
             for worktree in parse_worktrees(&stdout)? {
                 if live_worktree_key(&worktree.path) == identity_key {
-                    let label = worktree
-                        .branch
-                        .strip_prefix("refs/heads/")
-                        .unwrap_or(&worktree.branch);
-                    return Ok((label.to_string(), identity_key.to_string(), worktree.head));
+                    return Ok((
+                        worktree_label(&worktree.branch),
+                        identity_key.to_string(),
+                        worktree.head,
+                    ));
                 }
             }
-            Err(CommandError::new(
-                "persistence",
-                format!("The surface '{identity_key}' is not recorded and cannot be pinned."),
-            ))
+            Err(not_recorded())
         }
-        _ => Err(CommandError::new(
-            "persistence",
-            format!("The surface '{identity_key}' is not recorded and cannot be pinned."),
-        )),
+        ("worktree", SurfaceIdentity::Remote(target)) => {
+            let batch =
+                crate::git::run_remote_batch(target, &[crate::git::worktree_list_fragment()])
+                    .await?;
+            for worktree in parse_worktrees(&batch.ok(0)?.stdout)? {
+                if worktree.path == identity_key {
+                    return Ok((
+                        worktree_label(&worktree.branch),
+                        identity_key.to_string(),
+                        worktree.head,
+                    ));
+                }
+            }
+            Err(not_recorded())
+        }
+        _ => Err(not_recorded()),
     }
+}
+
+fn branch_label(ref_name: &str) -> String {
+    ref_name
+        .strip_prefix("refs/heads/")
+        .or_else(|| ref_name.strip_prefix("refs/remotes/"))
+        .unwrap_or(ref_name)
+        .to_string()
+}
+
+fn worktree_label(branch: &str) -> String {
+    branch.strip_prefix("refs/heads/").unwrap_or(branch).to_string()
 }
 
 // Keep `Worktree`'s fields `pub(crate)` in `git::parse.rs` so retrospection
