@@ -4,6 +4,7 @@ mod commands;
 mod events;
 mod git;
 mod home;
+mod identity;
 mod mcp;
 mod overview;
 mod portal;
@@ -594,8 +595,8 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        // The embedded set: the consolidated baseline plus 0002 through 0006.
-        assert_eq!(versions.len(), 6);
+        // The embedded set: the consolidated baseline plus 0002 through 0007.
+        assert_eq!(versions.len(), 7);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await
@@ -656,7 +657,7 @@ mod tests {
                 .unwrap();
         // The overwritten backup held the first rebuilt store: the full
         // embedded migration set.
-        assert_eq!(preserved.0, 6);
+        assert_eq!(preserved.0, 7);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -731,7 +732,7 @@ mod tests {
                 .await
                 .unwrap();
         // The rebuilt store carries the full embedded migration set.
-        assert_eq!(versions.len(), 6);
+        assert_eq!(versions.len(), 7);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await

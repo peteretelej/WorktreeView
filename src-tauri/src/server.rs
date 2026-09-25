@@ -5,6 +5,7 @@
 //! agent face is the desktop's, unchanged; only the surroundings differ.
 
 use crate::home;
+use crate::identity;
 use crate::transport::{self, ListenerConfig, McpStatusHandle, PushEvent, TransportDeps};
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::path::{Path, PathBuf};
@@ -21,12 +22,37 @@ const SERVER_STORE_NAME: &str = "worktreeview-server.sqlite3";
 // Loopback, one port above the desktop's 9888, so a desktop app and a
 // server coexist on one host without configuration.
 const DEFAULT_BIND: &str = "127.0.0.1:9890";
-const USAGE: &str = "usage: worktreeview-server serve [--home <dir>] [--bind <addr:port>]";
+const USAGE: &str = "usage: worktreeview-server serve [--home <dir>] [--bind <addr:port>]\n       worktreeview-server create-admin <name> [--home <dir>]";
+const CREATE_ADMIN_USAGE: &str =
+    "usage: worktreeview-server create-admin <name> [--home <dir>]";
 
 #[derive(Debug)]
 struct ServeOptions {
     home: Option<String>,
     bind: String,
+}
+
+#[derive(Debug)]
+struct CreateAdminOptions {
+    home: Option<String>,
+    name: String,
+}
+
+// The face this invocation runs: the listener, or the one-shot identity
+// bootstrap.
+#[derive(Debug)]
+enum Command {
+    Serve(ServeOptions),
+    CreateAdmin(CreateAdminOptions),
+}
+
+impl Command {
+    fn home(&self) -> Option<&str> {
+        match self {
+            Command::Serve(options) => options.home.as_deref(),
+            Command::CreateAdmin(options) => options.home.as_deref(),
+        }
+    }
 }// The user profile root without a Tauri runtime to ask.
 #[cfg(windows)]
 fn home_root() -> Option<PathBuf> {
@@ -98,8 +124,6 @@ fn split_bind(bind: &str) -> Result<(String, u16), String> {
     Ok((address.trim().to_string(), port))
 }
 
-// `serve` is the only subcommand today; identity management joins in a
-// later phase.
 fn serve_options(args: &[std::ffi::OsString]) -> Result<ServeOptions, String> {
     if args.get(1).and_then(|arg| arg.to_str()) != Some("serve") {
         return Err(USAGE.to_string());
@@ -108,6 +132,28 @@ fn serve_options(args: &[std::ffi::OsString]) -> Result<ServeOptions, String> {
         home: home::home_arg_from(args.iter().cloned()),
         bind: bind_arg_from(args.iter().cloned()).unwrap_or_else(|| DEFAULT_BIND.to_string()),
     })
+}
+
+// The name is the first positional argument; name validation (trim,
+// non-empty, length) belongs to the store accessor that owns the users
+// table, so a leading dash only means "no name given" here.
+fn create_admin_options(args: &[std::ffi::OsString]) -> Result<CreateAdminOptions, String> {
+    let name = match args.get(2).and_then(|arg| arg.to_str()) {
+        Some(name) if !name.starts_with('-') => name,
+        _ => return Err(CREATE_ADMIN_USAGE.to_string()),
+    };
+    Ok(CreateAdminOptions {
+        home: home::home_arg_from(args.iter().cloned()),
+        name: name.to_string(),
+    })
+}
+
+fn command_from(args: &[std::ffi::OsString]) -> Result<Command, String> {
+    match args.get(1).and_then(|arg| arg.to_str()) {
+        Some("serve") => serve_options(args).map(Command::Serve),
+        Some("create-admin") => create_admin_options(args).map(Command::CreateAdmin),
+        _ => Err(USAGE.to_string()),
+    }
 }
 
 // The server store opens with the same migrations. A store written by a
@@ -218,56 +264,93 @@ async fn serve(data_dir: PathBuf, address: String, port: u16) -> i32 {
     }
 }
 
-// The server binary's entry point; the desktop's `run()` is never called.
-// Returns only on a fatal startup error, with the process exit code.
-pub fn run_server() -> i32 {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let options = match serve_options(&args) {
-        Ok(options) => options,
-        Err(usage) => {
-            eprintln!("{usage}");
-            return 2;
-        }
-    };
-    let (address, port) = match split_bind(&options.bind) {
-        Ok(bind) => bind,
+// The one-shot identity bootstrap: opens the store, creates the first
+// admin with their initial token, and prints the secret once to stdout.
+// Refusals (a user already exists, an invalid name) are clear stderr
+// reasons and a nonzero exit.
+async fn create_admin(data_dir: PathBuf, name: &str) -> i32 {
+    let pool = match open_store(&data_dir.join(SERVER_STORE_NAME)).await {
+        Ok(pool) => pool,
         Err(message) => {
             eprintln!("{message}");
-            eprintln!("{USAGE}");
-            return 2;
+            return 1;
         }
     };
+    let created = identity::create_first_admin_in_pool(&pool, name).await;
+    pool.close().await;
+    match created {
+        Ok(created) => {
+            println!("created admin {}", created.user.name);
+            println!("bearer token (printed once): {}", created.secret);
+            0
+        }
+        Err(error) => {
+            eprintln!("{}", error.message);
+            1
+        }
+    }
+}
+
+// Shared boot for both subcommands: resolve and create the server home,
+// then build the runtime the store and listener run on.
+fn server_runtime(home: Option<&str>) -> Result<(PathBuf, tokio::runtime::Runtime), i32> {
     let Some(home_root) = home_root() else {
         eprintln!("Could not resolve the user home directory; pass --home with the server home directory.");
-        return 1;
+        return Err(1);
     };
-    let data_dir = server_home_dir(
-        &home_root,
-        options.home.as_deref(),
-        std::env::var(SERVER_ENV_VAR).ok().as_deref(),
-    );
+    let data_dir = server_home_dir(&home_root, home, std::env::var(SERVER_ENV_VAR).ok().as_deref());
     if let Err(error) = std::fs::create_dir_all(&data_dir) {
         eprintln!(
             "Could not create the server home directory {}: {error}",
             data_dir.display()
         );
-        return 1;
+        return Err(1);
     }
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-        Ok(runtime) => runtime,
+    match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(runtime) => Ok((data_dir, runtime)),
         Err(error) => {
             eprintln!("Could not start the server runtime: {error}");
-            return 1;
+            Err(1)
+        }
+    }
+}
+
+// The server binary's entry point; the desktop's `run()` is never called.
+// Returns only on a fatal error, with the process exit code.
+pub fn run_server() -> i32 {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let command = match command_from(&args) {
+        Ok(command) => command,
+        Err(usage) => {
+            eprintln!("{usage}");
+            return 2;
         }
     };
-    runtime.block_on(serve(data_dir, address, port))
+    let (data_dir, runtime) = match server_runtime(command.home()) {
+        Ok(pair) => pair,
+        Err(code) => return code,
+    };
+    match command {
+        Command::Serve(options) => {
+            let (address, port) = match split_bind(&options.bind) {
+                Ok(bind) => bind,
+                Err(message) => {
+                    eprintln!("{message}");
+                    eprintln!("{USAGE}");
+                    return 2;
+                }
+            };
+            runtime.block_on(serve(data_dir, address, port))
+        }
+        Command::CreateAdmin(options) => runtime.block_on(create_admin(data_dir, &options.name)),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_arg_from, serve_options, server_home_dir, split_bind, DEFAULT_BIND,
-        SERVER_DEFAULT_HOME, SERVER_ENV_VAR, USAGE,
+        bind_arg_from, command_from, serve_options, server_home_dir, split_bind,
+        Command, CREATE_ADMIN_USAGE, DEFAULT_BIND, SERVER_DEFAULT_HOME, SERVER_ENV_VAR, USAGE,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -334,18 +417,56 @@ mod tests {
     }
 
     #[test]
-    fn serve_is_the_only_subcommand() {
+    fn unknown_subcommands_are_refused_and_known_ones_dispatch() {
+        assert_eq!(command_from(&args(&["worktreeview-server"])).unwrap_err(), USAGE);
         assert_eq!(
-            serve_options(&args(&["worktreeview-server"])).unwrap_err(),
+            command_from(&args(&["worktreeview-server", "daemonize"])).unwrap_err(),
             USAGE
         );
-        assert_eq!(
-            serve_options(&args(&["worktreeview-server", "daemonize"])).unwrap_err(),
-            USAGE
-        );
+        assert!(matches!(
+            command_from(&args(&["worktreeview-server", "serve"])).unwrap(),
+            Command::Serve(_)
+        ));
         let options = serve_options(&args(&["worktreeview-server", "serve"])).unwrap();
         assert_eq!(options.home, None);
         assert_eq!(options.bind, DEFAULT_BIND);
+    }
+
+    #[test]
+    fn create_admin_reads_the_name_and_home_flags() {
+        let command = command_from(&args(&["worktreeview-server", "create-admin", "ops"])).unwrap();
+        let Command::CreateAdmin(options) = command else {
+            panic!("create-admin must parse into the create-admin command");
+        };
+        assert_eq!(options.name, "ops");
+        assert_eq!(options.home, None);
+
+        let command = command_from(&args(&[
+            "worktreeview-server",
+            "create-admin",
+            "ops",
+            "--home=/tmp/srv",
+        ]))
+        .unwrap();
+        let Command::CreateAdmin(options) = command else {
+            panic!("create-admin must parse into the create-admin command");
+        };
+        assert_eq!(options.name, "ops");
+        assert_eq!(options.home.as_deref(), Some("/tmp/srv"));
+    }
+
+    #[test]
+    fn create_admin_needs_a_name() {
+        assert_eq!(
+            command_from(&args(&["worktreeview-server", "create-admin"])).unwrap_err(),
+            CREATE_ADMIN_USAGE
+        );
+        // A leading dash is a forgotten name, not a name.
+        assert_eq!(
+            command_from(&args(&["worktreeview-server", "create-admin", "--home", "/tmp/srv"]))
+                .unwrap_err(),
+            CREATE_ADMIN_USAGE
+        );
     }
 
     #[test]

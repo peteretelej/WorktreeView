@@ -27,6 +27,16 @@ normalized domain data through narrow, typed Tauri commands.
   default token, which the listener's startup path provisions fresh
   per listener start, boot or restart (deleting the previous default in
   the same transaction) and publishes only through the config file.
+- `identity.rs`: the server's named human accounts and their bearer
+  tokens: `users` and `user_tokens` rows that reuse the agent token
+  secret mechanism (same generation, hashing, and verify path). Exactly
+  the first created user is admin: `create_first_admin_in_pool`
+  bootstraps that admin and their initial token in one transaction and
+  refuses once any user exists, which is the no-open-registration gate;
+  the `worktreeview-server create-admin <name>` subcommand drives it and
+  prints the token exactly once. User deletion cascades their tokens,
+  and admin-count helpers here back the enforcement that lands with
+  human auth.
 - `git/exec.rs`: spawns Git with explicit argument arrays, bounded output
   (16 MiB per stream), a deadline (30 seconds for local probes, 300 for the
   fetch the refresh action runs), and kill-on-drop cancellation.
@@ -253,8 +263,8 @@ then on. The schema is one consolidated `0001` migration plus
 append-only additive migrations (`0002` adds the `agent_tokens` table and
 comment ownership; `0003` adds review requests; `0004` adds the `events`
 table; `0005` rebuilds it with an extended kind vocabulary; `0006` marks
-remote project rows); migration divergence handling is described at the end of this
-section.
+remote project rows; `0007` adds the `users` and `user_tokens` tables);
+migration divergence handling is described at the end of this section.
 
 The `events` table is the append-only activity log: every review-relevant
 mutation (request lifecycle, submission delivery, comment posts and

@@ -52,7 +52,7 @@ pub(crate) fn generate_token() -> Result<String, String> {
     Ok(token)
 }
 
-fn hash_secret(secret: &str) -> String {
+pub(crate) fn hash_secret(secret: &str) -> String {
     let digest = Sha256::digest(secret.as_bytes());
     let mut hex = String::with_capacity(64);
     for byte in digest {
