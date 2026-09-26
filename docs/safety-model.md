@@ -171,5 +171,7 @@ repository cannot mutate it or execute code it defines.
 The desktop e2e suite runs the real bundled app in a container with no
 network, no display sockets, a read-only fixture mount, a non-root user,
 dropped capabilities, and CPU, memory, and PID limits. Cleanup removes only
-the resources labeled with the run's own nonce. See
+the resources labeled with the run's own nonce. The remote-project spec
+runs its throwaway sshd on loopback inside that container, so the suite
+still reaches no external network. See
 [CONTRIBUTING.md](../CONTRIBUTING.md).

@@ -297,7 +297,10 @@ home. A first run after an upgrade copies the store once from the old
 per-OS app data directory, leaving it as a backup. Migrations are
 append-only
 (CONTRIBUTING.md), so divergence is not expected on normal upgrades; desktop
-e2e containers rebuild their database on every run. Review flows remain
+e2e containers rebuild their database on every run. The suite's
+remote-project spec exercises the full remote path against a throwaway
+sshd on loopback inside the container, with the fixture's keys and
+repositories under the per-run fixture root. Review flows remain
 read-only; the refresh action's fetch is the one Git write, and it touches
 remote-tracking refs only. Comment and submission data lives only in the
 app store, so a set-aside backup retains it. See

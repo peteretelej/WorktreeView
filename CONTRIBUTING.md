@@ -134,7 +134,11 @@ bind.
 
 The command runs the real bundled Tauri app, UI, Rust IPC, native read-only
 Git, SQLite reload and restart flows, failure handling, and bounded
-collection checks inside Docker. It writes bounded diagnostics to one
+collection checks inside Docker. The runtime image carries the OpenSSH
+client and server so the remote-project spec can run a throwaway sshd on
+loopback and drive the remote review path end to end; the container itself
+still has no network, and loopback is unaffected by that. It writes bounded
+diagnostics to one
 `artifacts/tauri-e2e/<run-id>/` directory. The runtime is offline, non-root,
 capability-dropped, and resource-bounded. Cleanup removes only the recorded
 owned container and immutable loaded image, while retaining the shared

@@ -37,6 +37,45 @@ COPY skills/ ./skills/
 COPY src-tauri/src/ ./src-tauri/src/
 COPY e2e ./e2e
 
+# The suite runs the container as the host's numeric uid, which no passwd
+# entry names, and ssh refuses to run for such a user. This NSS service
+# synthesizes that one missing entry (and the matching "e2e" login name the
+# fixture authenticates as); it sits after `files` in nsswitch.conf, so real
+# entries always win. Compiled here, shipped without any compiler.
+COPY <<EOF /tmp/fixuid.c
+#define _GNU_SOURCE
+#include <nss.h>
+#include <pwd.h>
+#include <string.h>
+#include <errno.h>
+#include <unistd.h>
+static const char NAME[] = "e2e";
+static const char HOME[] = "/tmp/worktreeview-e2e-home";
+static const char SHELL[] = "/bin/sh";
+static enum nss_status fill(struct passwd *pw, char *buf, size_t buflen, int *errnop) {
+    size_t need = sizeof(NAME) + sizeof("x") + sizeof("worktreeview e2e runtime user") + sizeof(HOME) + sizeof(SHELL);
+    if (buflen < need) { *errnop = ERANGE; return NSS_STATUS_TRYAGAIN; }
+    char *cursor = buf;
+    pw->pw_uid = geteuid();
+    pw->pw_gid = getegid();
+#define PLACE(field, value) do { memcpy(cursor, value, sizeof(value)); (field) = cursor; cursor += sizeof(value); } while (0)
+    PLACE(pw->pw_name, NAME);
+    PLACE(pw->pw_passwd, "x");
+    PLACE(pw->pw_gecos, "worktreeview e2e runtime user");
+    PLACE(pw->pw_dir, HOME);
+    PLACE(pw->pw_shell, SHELL);
+#undef PLACE
+    *errnop = 0;
+    return NSS_STATUS_SUCCESS;
+}
+enum nss_status _nss_fixuid_getpwuid_r(uid_t uid, struct passwd *pw, char *buf, size_t buflen, int *errnop) { (void)uid; return fill(pw, buf, buflen, errnop); }
+enum nss_status _nss_fixuid_getpwnam_r(const char *name, struct passwd *pw, char *buf, size_t buflen, int *errnop) {
+    if (strcmp(name, NAME) != 0) { *errnop = 0; return NSS_STATUS_NOTFOUND; }
+    return fill(pw, buf, buflen, errnop);
+}
+EOF
+RUN gcc -shared -fPIC -O2 -Wall -o /tmp/libnss_fixuid.so.2 /tmp/fixuid.c
+
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     cargo install tauri-driver --version 2.0.6 --locked --root /tmp/tauri-driver
@@ -56,6 +95,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dbus \
     git \
     libwebkit2gtk-4.1-0 \
+    openssh-client \
+    openssh-server \
     scrot \
     webkit2gtk-driver \
     xauth \
@@ -68,8 +109,10 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/e2e ./e2e
 COPY --from=build /tmp/tauri-driver/bin/tauri-driver /usr/local/bin/tauri-driver
 COPY --from=build /tmp/worktreeview /app/worktreeview
+COPY --from=build /tmp/libnss_fixuid.so.2 /usr/lib/x86_64-linux-gnu/libnss_fixuid.so.2
 
-RUN for command in cargo rustc cc gcc g++ make; do \
+RUN sed -E -i 's/^(passwd:.*)$/\1 fixuid/' /etc/nsswitch.conf \
+  && for command in cargo rustc cc gcc g++ make; do \
       if command -v "$command"; then exit 1; fi; \
     done \
   && ! dpkg-query -W -f='${Package}\n' | grep -Eq -- '-dev(:[^ ]+)?$' \
