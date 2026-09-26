@@ -11,7 +11,7 @@
 //! that does not parse into the command's arguments answers 400
 //! `invalid_arguments`.
 //!
-//! Coverage mirrors the shipped 46-command IPC surface, classified once:
+//! Coverage mirrors the shipped 52-command IPC surface, classified once:
 //!
 //! 33 straight dispatch routes (the human review domain): `open_repo`,
 //! `list_repos`, `list_worktrees`, `list_worktree_status`, `remove_repo`,
@@ -42,7 +42,7 @@
 //! `create_user_token` (rotation; printed once), `delete_user_token`
 //! (revoke a leaked token without deleting the account).
 //!
-//! 10 IPC commands are excluded from HTTP, each with the reason it has no
+//! 16 IPC commands are excluded from HTTP, each with the reason it has no
 //! server meaning: `set_repo_pinned` and `set_surface_pinned`
 //! (presentation prefs stay client-local), `get_settings` and
 //! `set_settings` (desktop-local settings; server bind config is
@@ -51,8 +51,14 @@
 //! `open_review_file` and `open_log_dir` (act on the server host's OS,
 //! not the viewer's machine), `get_mcp_status` and `restart_mcp`
 //! (endpoint lifecycle is ops-level via systemd/Docker, documented in
-//! docs/server.md), and `open_remote_repo` (a desktop-only SSH
-//! affordance; the server reviews repositories on their own disks).
+//! docs/server.md), `open_remote_repo` (a desktop-only SSH
+//! affordance; the server reviews repositories on their own disks), and
+//! `save_server_connection`, `list_server_connections`,
+//! `delete_server_connection`, `add_server_project`,
+//! `remove_server_project`, and `set_server_project_pinned` (desktop
+//! connection and project-source management: which servers a desktop
+//! app talks to is viewer-local state, and a server's own deployment
+//! is configured on its host, not over its API).
 
 use crate::agents::{
     create_agent_token_in_pool, delete_agent_token_in_pool, list_agent_tokens_in_pool,

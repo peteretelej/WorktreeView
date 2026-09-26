@@ -133,10 +133,11 @@ normalized domain data through narrow, typed Tauri commands.
   authenticated human actors. Coverage is classified once from the IPC
   surface (33 straight routes any member may call, 3 admin-only
   agent-token routes, 6 admin-only user/user-token management routes over
-  `identity.rs`, and 10 commands excluded with recorded reasons, from
-  client-local preferences to desktop-only OS and SSH actions;
-  `open_remote_repo` is a desktop affordance and the server reviews
-  repositories on their own disks); the module doc is the classification
+  `identity.rs`, and 16 commands excluded with recorded reasons, from
+  client-local preferences and viewer-local server connections to
+  desktop-only OS and SSH actions; `open_remote_repo` is a desktop
+  affordance and the server reviews repositories on their own disks);
+  the module doc is the classification
   of record. Route bodies are JSON objects in the
   webview's camelCase argument convention, results serialize exactly as
   IPC returns them, and command errors keep the IPC `{code, message}`
