@@ -4,8 +4,10 @@ WorktreeView is a review inbox over your Git worktrees, and this page
 walks through it the way you will actually use it: add a repository,
 read the overview, open reviews, leave comments, and let your coding
 agents work alongside you. Everything here is read-only: reviews explain
-your repositories, they never modify them, and the Fetch action's
-explicit fetch is the app's only network request.
+your repositories, they never modify them. Local projects stay entirely
+on this machine, and the Fetch action's explicit fetch is their only
+network request; a remote project reads over SSH from its own host
+instead.
 
 ## Add a repository
 
@@ -16,6 +18,37 @@ repository through the local API, and it shows up in the sidebar the
 same way. Find anything later with the search field (Ctrl+K). The
 sidebar collapses to an icon rail with fly-out labels (Ctrl+B toggles
 it); the active project stays marked while collapsed.
+
+## Add a remote project
+
+**Add remote project...** in the sidebar adds a repository that lives
+on another machine. The form asks for the host, an optional user and
+port, and the repository's path on the host (POSIX form, for example
+`/srv/git/project`); the project is stored as one identity,
+`user@host:path`. Adding validates on the host right away, and the
+typed failures (unreachable host, authentication refused, the path is
+not a Git work tree) render in the form with what to do next. Your own
+`ssh` makes the connection, so the host aliases, keys, and
+`known_hosts` state your terminal already has are exactly what the app
+uses.
+
+## Review a remote project
+
+A remote project reads like a local one: the overview, reviews, commit
+history, comments, and agent collaboration all work, except the Git
+content is read on the host through read-only Git invocations run there,
+batched so remote loads stay quick. The project row and overview heading
+carry a **remote** badge next to the identity, and health renders from
+each load's payload: **offline** marks a project the app cannot reach
+right now, **stale** one whose last successful read is a while back,
+each shown with an actionable message instead of a raw error. When the
+host is unreachable you still see what the app already knows, and the
+next read picks the project back up.
+
+One action is local by nature: opening a reviewed file in your editor
+first copies it from the host to a temporary file. If that copy fails,
+the open and reveal controls hide for that project rather than leaving
+buttons that cannot succeed.
 
 ## Read the project overview
 
@@ -380,7 +413,9 @@ network.
 
 The **Fetch** action runs `git fetch --all --prune` (remote-tracking
 refs only) and then re-reads local state, so ahead/behind chips and the
-Remote tab reflect the server. Fetching is always an explicit action;
+Remote tab reflect the server. A remote project's fetch runs on its own
+host instead, against the host's configured remotes, through your ssh.
+Fetching is always an explicit action;
 focus and the interval never fetch. Nothing else in WorktreeView ever
 touches your Git state.
 

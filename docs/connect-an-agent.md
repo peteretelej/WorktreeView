@@ -58,6 +58,18 @@ authored remain visible as history and can no longer be mutated by any
 agent. The protocol details for both faces, including error semantics
 and size caps, are in [agent-submissions.md](agent-submissions.md).
 
+## Agents on a remote project's host
+
+Agents working in repositories added as remote projects need nothing
+new: they post over MCP directly, exactly as agents on this machine do.
+Point the client at the app's listener and give it a named token of its
+own. One boundary moves, though: an agent on another host reaches the
+listener over the network, so the listen address must be bound beyond
+loopback for it to connect at all. Beyond loopback the per-agent bearer
+token is the authentication boundary; anything holding a token reads
+reviews and comments as that agent, so issue one token per agent and
+delete the tokens of machines that leave.
+
 ## The agent skill
 
 The repo ships an installable skill that teaches agents all of the above

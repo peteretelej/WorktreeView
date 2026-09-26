@@ -1871,6 +1871,55 @@ button:disabled {
   gap: 8px;
 }
 
+.remote-form {
+  width: min(480px, calc(100vw - 48px));
+}
+
+.remote-form p {
+  margin-bottom: 12px;
+}
+
+.remote-form-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr 0.8fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.remote-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.remote-form label input {
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--foreground);
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+}
+
+.remote-form-path {
+  margin-bottom: 8px;
+}
+
+.remote-form-error {
+  margin: 0 0 12px;
+  color: var(--danger);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
 .danger-button {
   padding: 7px 10px;
   border: 1px solid var(--danger);
@@ -2365,10 +2414,13 @@ button:disabled {
 
 .project-row-wrap .sidebar-worktree-row,
 .project-row-wrap .sidebar-branch-row { padding-right: 26px; }
-.gone-badge, .main-badge, .detached-badge, .stale-badge, .in-worktree-badge { flex: none; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 9px; text-transform: uppercase; }
+.gone-badge, .main-badge, .detached-badge, .stale-badge, .in-worktree-badge, .remote-badge, .remote-state-badge { flex: none; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 9px; text-transform: uppercase; }
 .main-badge { color: var(--primary); border-color: var(--primary); }
 .detached-badge { color: var(--info); }
 .stale-badge { color: var(--warn); border-color: var(--warn); }
+.remote-badge { margin-left: 5px; color: var(--info); }
+.remote-state-badge { margin-left: 4px; }
+.remote-state-badge.offline, .remote-state-badge.stale { color: var(--warn); border-color: var(--warn); }
 .commits-bar { display: flex; min-height: 0; flex: 1; flex-direction: column; border-top: 1px solid var(--border); }
 .commits-bar-heading { display: flex; height: 30px; flex: none; align-items: center; justify-content: space-between; padding: 0 6px 0 10px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
 .commits-bar-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

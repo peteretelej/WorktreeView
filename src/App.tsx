@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { ChevronsLeft, Clock, Download, FileCheck, FolderGit2, MessageSquare, ChevronDown, ChevronRight, CircleDot, Copy, CornerUpLeft, GitBranch, GitCommitHorizontal, HardDrive, Inbox, LoaderCircle, MessagesSquare, MoreVertical, Pin, PinOff, Search, Settings as SettingsIcon, Trash2, X } from "lucide-react";
+import { ChevronsLeft, Clock, Download, FileCheck, FolderGit2, MessageSquare, ChevronDown, ChevronRight, CircleDot, Copy, CornerUpLeft, GitBranch, GitCommitHorizontal, HardDrive, Inbox, LoaderCircle, MessagesSquare, MoreVertical, Pin, PinOff, Search, Server, Settings as SettingsIcon, Trash2, X } from "lucide-react";
 import { createNavigationHistory, DEFAULT_PORTAL_FILTERS, sameReviewTarget, type AppLocation, type BranchInventory, type BranchSummary, type ChangedFile, type CommitInfo, type GoneSurface, type RecordedKey, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type ReviewsStateFilter, type SurfaceListing, type ThreadsStateFilter, type ThreadsVoiceFilter, type Worktree } from "./navigation";
 import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
 import { arrivalChangeLabel, arrivalProjectLabel, arrivalSentenceBody, olderArrivalsSuffix } from "./arrivals";
@@ -23,8 +23,12 @@ import { HistoryView, type CommitPage, type HistoryEntry, type HistoryState } fr
 import "./App.css";
 
 import { authorInitials, changesLabel, compactAge, errorCodeOf, errorMessage, originSlug, relativeTime, shortToken, STALE_AFTER_SECONDS, type CommandError } from "./format";
+import { unwrapLoad, type RemoteLoad, type RemoteLoadState } from "./remoteLoads";
 type Repo = { path: string; name: string; worktrees: Worktree[]; pinned_at: number | null };
 type SearchResult = { repo: Repo; worktree?: Worktree };
+// One remote project's health, from the phase-2 load envelope: badges
+// render from this recorded state and never from inferred errors.
+type RemoteHealth = { state: RemoteLoadState; message: string | null };
 // One palette row: the in-memory repo/worktree search or a store-search
 // match; sections render as labels between the rows of one paged list.
 type PaletteRow = { section: "repos"; result: SearchResult } | { section: "comments"; match: PortalSearchMatches["comments"][number] } | { section: "requests"; match: PortalSearchMatches["requests"][number] } | { section: "commits"; match: PortalSearchMatches["commits"][number] };
@@ -106,6 +110,11 @@ function App() {
   }
   const isImageFile = (file: ChangedFile) => imageMimeForPath(file.path) !== null;
   const [expandedRepos, setExpandedRepos] = useState<Record<string, boolean>>({}); const [surfaces, setSurfaces] = useState<Record<string, SurfaceListing>>({}); const [overviewTab, setOverviewTab] = useState<OverviewTab>("worktrees"); const [overviewQuery, setOverviewQuery] = useState(""); const [overviewPage, setOverviewPage] = useState(0); const [fetchingRepos, setFetchingRepos] = useState<Record<string, boolean>>({});
+  // Remote projects' health keyed by their stored identity string, and the
+  // projects whose OS-open action hid after a typed copy-to-temp failure.
+  const [remoteHealth, setRemoteHealth] = useState<Record<string, RemoteHealth>>({}); const [osOpenUnavailable, setOsOpenUnavailable] = useState<Record<string, boolean>>({});
+  // The add-project remote form: host, optional user and port, POSIX path.
+  const [addRemoteOpen, setAddRemoteOpen] = useState(false); const [addingRemote, setAddingRemote] = useState(false); const [addRemoteError, setAddRemoteError] = useState(""); const [addRemoteForm, setAddRemoteForm] = useState({ host: "", user: "", port: "", path: "" }); const addRemoteRef = useRef<HTMLDialogElement>(null);
   const [history, setHistory] = useState<HistoryState | null>(null); const [historyRefs, setHistoryRefs] = useState<RefInventory>({ heads: [], remotes: [], tags: [], default_base: null }); const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, WorktreeStatus[] | null>>({}); const [statusNonce, setStatusNonce] = useState(0);
   const [inventories, setInventories] = useState<Record<string, BranchInventory | null>>({}); const [menuOpen, setMenuOpen] = useState(false); const [removeTarget, setRemoveTarget] = useState<Repo | null>(null); const [removing, setRemoving] = useState(false);
   const [settings, setSettings] = useState<Settings>(defaultSettings); const [settingsSaveError, setSettingsSaveError] = useState("");
@@ -170,7 +179,7 @@ function App() {
   // through refs, so they subscribe once and never hold stale closures.
   const commentsRef = useRef(comments); const activeRepoPathRef = useRef(activeRepoPath); const reposRef = useRef(repos); const settingsRef = useRef(settings);
 
-  useEffect(() => { let mounted = true; async function load() { try { const loaded = await invoke<Repo[]>("list_repos"); if (!mounted) return; setRepos(loaded); setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? ""); setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1]))); let nextSettings = defaultSettings; try { nextSettings = await getSettings(); } catch (error) { if (mounted) setOperationError(errorMessage(error)); } if (!mounted) return; nextSettings.zoom = snapZoom(nextSettings.zoom); applyTheme(nextSettings.theme); setSettings(nextSettings); setLoading(false); for (let start = 0; start < loaded.length; start += 4) await Promise.all(loaded.slice(start, start + 4).map(async (repo) => { try { const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path }); if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item)); let listing: SurfaceListing = { gone: [], pinned: [] }; try { listing = await invoke<SurfaceListing>("list_surfaces", { path: repo.path }); } catch { listing = { gone: [], pinned: [] }; } if (mounted) setSurfaces((current) => ({ ...current, [repo.path]: listing })); } catch (error) { if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); } finally { if (mounted) setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } })); } catch (error) { if (mounted) { setLoadError(errorMessage(error)); setLoading(false); } } } void load(); return () => { mounted = false; }; }, []);
+  useEffect(() => { let mounted = true; async function load() { try { const loaded = await invoke<Repo[]>("list_repos"); if (!mounted) return; setRepos(loaded); setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? ""); setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1]))); let nextSettings = defaultSettings; try { nextSettings = await getSettings(); } catch (error) { if (mounted) setOperationError(errorMessage(error)); } if (!mounted) return; nextSettings.zoom = snapZoom(nextSettings.zoom); applyTheme(nextSettings.theme); setSettings(nextSettings); setLoading(false); for (let start = 0; start < loaded.length; start += 4) await Promise.all(loaded.slice(start, start + 4).map(async (repo) => { try { const load = adoptLoad(repo.path, await invoke<Worktree[] | RemoteLoad<Worktree[]>>("list_worktrees", { path: repo.path })); if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees: load.data ?? [] } : item)); let listing: SurfaceListing = { gone: [], pinned: [] }; try { listing = adoptLoad(repo.path, await invoke<SurfaceListing | RemoteLoad<SurfaceListing>>("list_surfaces", { path: repo.path })).data ?? listing; } catch { listing = { gone: [], pinned: [] }; } if (mounted) setSurfaces((current) => ({ ...current, [repo.path]: listing })); } catch (error) { if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); } finally { if (mounted) setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } })); } catch (error) { if (mounted) { setLoadError(errorMessage(error)); setLoading(false); } } } void load(); return () => { mounted = false; }; }, []);
   useEffect(() => { if (!activeRepo) { setSelectedWorktreePath(""); return; } setSelectedWorktreePath((current) => activeRepo.worktrees.some((worktree) => worktree.path === current) ? current : activeRepo.worktrees[0]?.path ?? ""); }, [activeRepo]);
   // The overview's change badges come from one bounded status probe per
   // worktree; they refresh when the repo activates, its worktree count
@@ -185,10 +194,12 @@ function App() {
     let cancelled = false;
     void (async () => {
       try {
-        const statuses = await invoke<WorktreeStatus[]>("list_worktree_status", { path: repoPath });
+        const load = adoptLoad(repoPath, await invoke<WorktreeStatus[] | RemoteLoad<WorktreeStatus[]>>("list_worktree_status", { path: repoPath }));
         if (!cancelled) {
-          setWorktreeStatuses((current) => ({ ...current, [repoPath]: statuses }));
-          setRefreshedAt((current) => ({ ...current, [repoPath]: Date.now() }));
+          setWorktreeStatuses((current) => ({ ...current, [repoPath]: load.data }));
+          // The freshness stamp marks the last local read; an offline remote
+          // load carries no data and never counts as one.
+          if (load.data) setRefreshedAt((current) => ({ ...current, [repoPath]: Date.now() }));
         }
       } catch {
         if (!cancelled) setWorktreeStatuses((current) => ({ ...current, [repoPath]: null }));
@@ -204,8 +215,8 @@ function App() {
     let cancelled = false;
     void (async () => {
       try {
-        const fetched = await invoke<BranchInventory>("get_branch_inventory", { path: repoPath });
-        if (!cancelled) setInventories((current) => ({ ...current, [repoPath]: fetched }));
+        const load = adoptLoad(repoPath, await invoke<BranchInventory | RemoteLoad<BranchInventory>>("get_branch_inventory", { path: repoPath }));
+        if (!cancelled) setInventories((current) => ({ ...current, [repoPath]: load.data }));
       } catch {
         if (!cancelled) setInventories((current) => ({ ...current, [repoPath]: null }));
       }
@@ -250,6 +261,7 @@ function App() {
     return () => { document.removeEventListener("mousedown", handleDismiss); document.removeEventListener("keydown", handleKeyDown); };
   }, [menuOpen]);
   useEffect(() => { const dialog = confirmRef.current; if (removeTarget && dialog && !dialog.open) dialog.showModal(); }, [removeTarget]);
+  useEffect(() => { const dialog = addRemoteRef.current; if (addRemoteOpen && dialog && !dialog.open) dialog.showModal(); }, [addRemoteOpen]);
   useEffect(() => { navigateRef.current = navigate; zoomActionsRef.current = { step: (direction) => void changeZoom(stepZoom(zoomLiveRef.current, direction)), reset: () => void changeZoom(DEFAULT_ZOOM) }; });
   // Applies the zoom whenever the persisted preference changes and keeps
   // the live level in sync; startup application happens when the loaded
@@ -437,8 +449,8 @@ function App() {
         try {
           const repo = await invoke<Repo>("open_repo", { path: event.payload.repo_path });
           setRepos((current) => current.some((item) => item.path === repo.path) ? current : [repo, ...current]);
-          const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path });
-          setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item));
+          const load = adoptLoad(repo.path, await invoke<Worktree[] | RemoteLoad<Worktree[]>>("list_worktrees", { path: repo.path }));
+          setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees: load.data ?? [] } : item));
         } catch { /* best-effort follow: the store row exists, so the repo
         // appears on the next app start even if this re-read fails */ }
       })();
@@ -490,7 +502,53 @@ function App() {
   function closePalette() { if (paletteRef.current?.open) paletteRef.current.close(); else handlePaletteClosed(); }
   function handlePaletteClosed() { setPaletteOpen(false); setQuery(""); setSearchPage(0); paletteOpenerRef.current?.focus(); paletteOpenerRef.current = null; }
   function handlePaletteKeyDown(event: ReactKeyboardEvent<HTMLDialogElement>) { if (event.key !== "Tab") return; const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])')); const first = focusable[0], last = focusable[focusable.length - 1]; if (!first || !last) return; if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); } }
-  async function openRepository() { if (opening) return; let selected: string | null; try { selected = import.meta.env.MODE === "e2e" && import.meta.env.VITE_E2E_PICKER_PATH === "/tmp/worktreeview-e2e-selection" ? "/tmp/worktreeview-e2e-selection" : await open({ directory: true, multiple: false }); } catch (error) { setOperationError(errorMessage(error)); return; } if (!selected || Array.isArray(selected)) return; setOpening(true); setOperationError(""); try { const repo = await invoke<Repo>("open_repo", { path: selected }); goInbox(); setRepos((current) => [repo, ...current.filter((item) => item.path !== repo.path)]); setActiveRepoPath(repo.path); setSelectedWorktreePath(""); setRepoErrors((current) => { const next = { ...current }; delete next[repo.path]; return next; }); setHydratingRepos((current) => ({ ...current, [repo.path]: (current[repo.path] ?? 0) + 1 })); try { const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repo.path }); setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees } : item)); } catch (error) { setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); } finally { setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } } catch (error) { setOperationError(errorMessage(error)); } finally { setOpening(false); } }
+  // Remote loads arrive wrapped in the phase-2 health envelope; local loads
+  // stay bare JSON. Unwrapping records the project's health so rows and
+  // badges render from payload states, never from inferred errors. The
+  // failure string is the envelope's actionable message when the data rode
+  // back empty.
+  function adoptLoad<T>(repoPath: string, payload: T | RemoteLoad<T>): { data: T | null; failure: string } {
+    const load = unwrapLoad(payload);
+    if (!load.remote) return { data: load.data, failure: "" };
+    setRemoteHealth((current) => ({ ...current, [repoPath]: { state: load.state, message: load.message } }));
+    return { data: load.data, failure: load.data === null ? load.message ?? "The remote project is currently unreachable." : "" };
+  }
+
+  async function openRepository() { if (opening) return; let selected: string | null; try { selected = import.meta.env.MODE === "e2e" && import.meta.env.VITE_E2E_PICKER_PATH === "/tmp/worktreeview-e2e-selection" ? "/tmp/worktreeview-e2e-selection" : await open({ directory: true, multiple: false }); } catch (error) { setOperationError(errorMessage(error)); return; } if (!selected || Array.isArray(selected)) return; setOpening(true); setOperationError(""); try { const repo = await invoke<Repo>("open_repo", { path: selected }); goInbox(); setRepos((current) => [repo, ...current.filter((item) => item.path !== repo.path)]); setActiveRepoPath(repo.path); setSelectedWorktreePath(""); setRepoErrors((current) => { const next = { ...current }; delete next[repo.path]; return next; }); setHydratingRepos((current) => ({ ...current, [repo.path]: (current[repo.path] ?? 0) + 1 })); try { const load = adoptLoad(repo.path, await invoke<Worktree[] | RemoteLoad<Worktree[]>>("list_worktrees", { path: repo.path })); setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees: load.data ?? [] } : item)); } catch (error) { setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); } finally { setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } } catch (error) { setOperationError(errorMessage(error)); } finally { setOpening(false); } }
+
+  // The remote half of the add-project flow: typed fields in, the backend
+  // owns identity normalization and host-side validation, and the stored
+  // repo joins the sidebar exactly like a locally opened one.
+  async function openRemoteProject() {
+    if (addingRemote) return;
+    const host = addRemoteForm.host.trim();
+    const targetPath = addRemoteForm.path.trim();
+    const port = addRemoteForm.port.trim();
+    if (!host || !targetPath) { setAddRemoteError("Enter the host and the repository's path on it."); return; }
+    if (port && (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535)) { setAddRemoteError("The port must be a number between 1 and 65535."); return; }
+    setAddingRemote(true);
+    setAddRemoteError("");
+    try {
+      const repo = await invoke<Repo>("open_remote_repo", { host, user: addRemoteForm.user.trim() || null, port: port ? Number(port) : null, path: targetPath });
+      setAddRemoteOpen(false);
+      setAddRemoteForm({ host: "", user: "", port: "", path: "" });
+      goInbox();
+      setRepos((current) => [repo, ...current.filter((item) => item.path !== repo.path)]);
+      setActiveRepoPath(repo.path);
+      setSelectedWorktreePath("");
+      setHydratingRepos((current) => ({ ...current, [repo.path]: (current[repo.path] ?? 0) + 1 }));
+      try {
+        const load = adoptLoad(repo.path, await invoke<Worktree[] | RemoteLoad<Worktree[]>>("list_worktrees", { path: repo.path }));
+        setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees: load.data ?? [] } : item));
+      } finally {
+        setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; });
+      }
+    } catch (error) {
+      setAddRemoteError(errorMessage(error));
+    } finally {
+      setAddingRemote(false);
+    }
+  }
 
   function reviewLoadsMatch(identity: ReviewIdentity) {
     const live = nav.current();
@@ -522,11 +580,17 @@ function App() {
     if (current.kind === "review" && current.identity.repoPath === repoPath && sameReviewTarget(current.identity.target, target)) nav.replace(entry); else nav.push(entry);
     setRefs({ heads: [], remotes: [], tags: [], default_base: null }); setReviewIndex(null); setPatch(null); setPatchError(""); setOperationError(""); setReviewLoading(true); setPatchLoading(false); setFileContent(null); setFileContentError(""); setFileContentLoading(false); setFileImage(null); setFileImageError(""); setFileImageLoading(false);
     try {
-      const inventory = await invoke<RefInventory>("list_refs", { path: repoPath, worktreeBranch: target.kind === "worktree" ? target.worktree.branch : null, targetRef: target.kind === "ref" ? target.name : null });
+      const load = adoptLoad(repoPath, await invoke<RefInventory | RemoteLoad<RefInventory>>("list_refs", { path: repoPath, worktreeBranch: target.kind === "worktree" ? target.worktree.branch : null, targetRef: target.kind === "ref" ? target.name : null }));
       if (generation !== indexGenerationRef.current || !reviewLoadsMatch(identity)) return;
-      setRefs(inventory);
+      // An offline remote load carries no inventory; the review surface
+      // degrades to the envelope's actionable message.
+      if (!load.data) {
+        setReviewIndex({ files: [], additions: 0, deletions: 0, base_sha: "", target_sha: "", error: load.failure, error_code: "" });
+        return;
+      }
+      setRefs(load.data);
       refsIdentityRef.current = identity;
-      const nextBase = preset?.base ?? autoReviewBase(target, inventory);
+      const nextBase = preset?.base ?? autoReviewBase(target, load.data);
       if (!nextBase) return;
       nav.replace({ kind: "review", identity: { ...identity, base: nextBase }, selectedFile: null, focusedCommentId });
       await fetchIndex(target, nextBase, nextScope, nextReversed, repoPath, nextOriginRef);
@@ -550,8 +614,8 @@ function App() {
     // meanwhile leaves list-order children in place.
     if (!expanded || inventories[repo.path]) return;
     try {
-      const inventory = await invoke<BranchInventory>("get_branch_inventory", { path: repo.path });
-      setInventories((current) => ({ ...current, [repo.path]: inventory }));
+      const load = adoptLoad(repo.path, await invoke<BranchInventory | RemoteLoad<BranchInventory>>("get_branch_inventory", { path: repo.path }));
+      setInventories((current) => ({ ...current, [repo.path]: load.data }));
     } catch {
       setInventories((current) => ({ ...current, [repo.path]: null }));
     }
@@ -574,6 +638,8 @@ function App() {
       setWorktreeStatuses((current) => { const next = { ...current }; delete next[repo.path]; return next; });
       setInventories((current) => { const next = { ...current }; delete next[repo.path]; return next; });
       setRepoErrors((current) => { const next = { ...current }; delete next[repo.path]; return next; });
+      setRemoteHealth((current) => { const next = { ...current }; delete next[repo.path]; return next; });
+      setOsOpenUnavailable((current) => { const next = { ...current }; delete next[repo.path]; return next; });
       setExpandedRepos((current) => { const next = { ...current }; delete next[repo.path]; return next; });
       if (activeRepoPath === repo.path) {
         setActiveRepoPath(remaining[0]?.path ?? "");
@@ -589,8 +655,8 @@ function App() {
   }
   async function refreshSurfaces(repoPath: string) {
     try {
-      const listing = await invoke<SurfaceListing>("list_surfaces", { path: repoPath });
-      setSurfaces((current) => ({ ...current, [repoPath]: listing }));
+      const load = adoptLoad(repoPath, await invoke<SurfaceListing | RemoteLoad<SurfaceListing>>("list_surfaces", { path: repoPath }));
+      setSurfaces((current) => ({ ...current, [repoPath]: load.data ?? { gone: [], pinned: [] } }));
     } catch (error) { setOperationError(errorMessage(error)); }
   }
   async function toggleSurfacePin(repoPath: string, kind: SurfaceRow["kind"], identityKey: string, pinned: boolean) {
@@ -610,8 +676,11 @@ function App() {
     contentCacheRef.current.clear();
     setReviewLoading(true); setReviewIndex(null); setPatch(null); setPatchError(""); setPatchLoading(false); setFileContent(null); setFileContentError(""); setFileContentLoading(false); setFileImage(null); setFileImageError(""); setFileImageLoading(false);
     try {
-      const index = await invoke<ReviewIndex>("list_review_changes", { path: target.kind === "worktree" ? target.worktree.path : nextRepoPath, repoPath: nextRepoPath, base: nextBase, headRef: target.kind === "ref" ? target.name : target.kind === "commit" ? target.sha : null, committedOnly: nextScope === "committed", reversed: nextReversed });
-      if (generation === indexGenerationRef.current && reviewLoadsMatch(identity)) setReviewIndex(index);
+      const load = adoptLoad(nextRepoPath, await invoke<ReviewIndex | RemoteLoad<ReviewIndex>>("list_review_changes", { path: target.kind === "worktree" ? target.worktree.path : nextRepoPath, repoPath: nextRepoPath, base: nextBase, headRef: target.kind === "ref" ? target.name : target.kind === "commit" ? target.sha : null, committedOnly: nextScope === "committed", reversed: nextReversed }));
+      if (generation === indexGenerationRef.current && reviewLoadsMatch(identity)) {
+        if (load.data) setReviewIndex(load.data);
+        else setReviewIndex({ files: [], additions: 0, deletions: 0, base_sha: "", target_sha: "", error: load.failure, error_code: "" });
+      }
     } catch (error) {
       if (generation === indexGenerationRef.current && reviewLoadsMatch(identity)) {
         setReviewIndex({ files: [], additions: 0, deletions: 0, base_sha: "", target_sha: "", error: errorMessage(error), error_code: errorCodeOf(error) });
@@ -672,14 +741,17 @@ function App() {
     }
     setPatch(null); setPatchError(""); setPatchLoading(true);
     try {
-      const nextPatch = await invoke<FilePatch>("read_review_patch", { path: identity.target.kind === "worktree" ? identity.target.worktree.path : identity.repoPath, base: identity.base, headRef: identity.target.kind === "ref" ? identity.target.name : identity.target.kind === "commit" ? identity.target.sha : null, committedOnly: identity.scope === "committed", reversed: identity.reversed, file: file.path, untracked: file.untracked });
+      // repoPath keys the review's owning project: remote worktree targets
+      // resolve through it, and it is a no-op for local ones.
+      const load = adoptLoad(identity.repoPath, await invoke<FilePatch | RemoteLoad<FilePatch>>("read_review_patch", { path: identity.target.kind === "worktree" ? identity.target.worktree.path : identity.repoPath, repoPath: identity.repoPath, base: identity.base, headRef: identity.target.kind === "ref" ? identity.target.name : identity.target.kind === "commit" ? identity.target.sha : null, committedOnly: identity.scope === "committed", reversed: identity.reversed, file: file.path, untracked: file.untracked }));
       if (generation === patchGenerationRef.current && patchIdentityRef.current === patchIdentity && sameReview(reviewIdentityRef.current, identity)) {
-        patchCacheRef.current.set(patchIdentity, nextPatch);
+        if (!load.data) { setPatchError(load.failure); setPatchLoading(false); return; }
+        patchCacheRef.current.set(patchIdentity, load.data);
         if (patchCacheRef.current.size > PATCH_CACHE_LIMIT) {
           const oldest = patchCacheRef.current.keys().next().value;
           if (oldest !== undefined) patchCacheRef.current.delete(oldest);
         }
-        setPatch(nextPatch);
+        setPatch(load.data);
       }
     } catch (error) {
       if (generation !== patchGenerationRef.current || patchIdentityRef.current !== patchIdentity || !sameReview(reviewIdentityRef.current, identity)) return;
@@ -710,14 +782,15 @@ function App() {
     contentInFlightRef.current = true;
     setFileContentLoading(true); setFileContentError("");
     try {
-      const content = await invoke<FileContent>("read_review_file", { path: identity.target.kind === "worktree" ? identity.target.worktree.path : identity.repoPath, base: identity.base, headRef: identity.target.kind === "ref" ? identity.target.name : identity.target.kind === "commit" ? identity.target.sha : null, committedOnly: identity.scope === "committed", reversed: identity.reversed, file: file.path, untracked: file.untracked });
+      const load = adoptLoad(identity.repoPath, await invoke<FileContent | RemoteLoad<FileContent>>("read_review_file", { path: identity.target.kind === "worktree" ? identity.target.worktree.path : identity.repoPath, repoPath: identity.repoPath, base: identity.base, headRef: identity.target.kind === "ref" ? identity.target.name : identity.target.kind === "commit" ? identity.target.sha : null, committedOnly: identity.scope === "committed", reversed: identity.reversed, file: file.path, untracked: file.untracked }));
       if (generation === contentGenerationRef.current && contentIdentityRef.current === contentIdentity && sameReview(reviewIdentityRef.current, identity)) {
-        contentCacheRef.current.set(contentIdentity, content);
+        if (!load.data) { setFileContentError(load.failure); return; }
+        contentCacheRef.current.set(contentIdentity, load.data);
         if (contentCacheRef.current.size > FILE_CONTENT_CACHE_LIMIT) {
           const oldest = contentCacheRef.current.keys().next().value;
           if (oldest !== undefined) contentCacheRef.current.delete(oldest);
         }
-        setFileContent(content);
+        setFileContent(load.data);
       }
     } catch (error) {
       if (generation !== contentGenerationRef.current || contentIdentityRef.current !== contentIdentity || !sameReview(reviewIdentityRef.current, identity)) return;
@@ -736,7 +809,9 @@ function App() {
     imageInFlightRef.current = true;
     setFileImageLoading(true); setFileImageError("");
     try {
-      const bytes = await invoke<ArrayBuffer>("read_review_file_bytes", { path: identity.target.kind === "worktree" ? identity.target.worktree.path : identity.repoPath, base: identity.base, headRef: identity.target.kind === "ref" ? identity.target.name : identity.target.kind === "commit" ? identity.target.sha : null, committedOnly: identity.scope === "committed", reversed: identity.reversed, file: file.path, untracked: file.untracked });
+      // Raw bytes carry no health envelope; connection failures surface as
+      // their typed error below.
+      const bytes = await invoke<ArrayBuffer>("read_review_file_bytes", { path: identity.target.kind === "worktree" ? identity.target.worktree.path : identity.repoPath, repoPath: identity.repoPath, base: identity.base, headRef: identity.target.kind === "ref" ? identity.target.name : identity.target.kind === "commit" ? identity.target.sha : null, committedOnly: identity.scope === "committed", reversed: identity.reversed, file: file.path, untracked: file.untracked });
       if (generation !== imageGenerationRef.current || imageIdentityRef.current !== imageIdentity || !sameReview(reviewIdentityRef.current, identity)) return;
       // Empty bytes mean the file does not exist on this side (deleted
       // images), not a renderable asset.
@@ -805,8 +880,8 @@ function App() {
   // already performed the fetch.
   async function relistProject(repoPath: string) {
     try {
-      const worktrees = await invoke<Worktree[]>("list_worktrees", { path: repoPath });
-      setRepos((current) => current.map((item) => item.path === repoPath ? { ...item, worktrees } : item));
+      const load = adoptLoad(repoPath, await invoke<Worktree[] | RemoteLoad<Worktree[]>>("list_worktrees", { path: repoPath }));
+      setRepos((current) => current.map((item) => item.path === repoPath ? { ...item, worktrees: load.data ?? [] } : item));
       // Success clears a prior failure: the unattended reloads must self-heal.
       setRepoErrors((current) => { if (!(repoPath in current)) return current; const next = { ...current }; delete next[repoPath]; return next; });
     } catch (error) { setRepoErrors((current) => ({ ...current, [repoPath]: errorMessage(error) })); }
@@ -971,10 +1046,14 @@ function App() {
     setHistoryRefs({ heads: [], remotes: [], tags: [], default_base: null });
     let against: string | null = null;
     try {
-      const inventory = await invoke<RefInventory>("list_refs", { path: entry.repoPath, worktreeBranch: null, targetRef: entry.startRef ?? null });
+      const load = adoptLoad(entry.repoPath, await invoke<RefInventory | RemoteLoad<RefInventory>>("list_refs", { path: entry.repoPath, worktreeBranch: null, targetRef: entry.startRef ?? null }));
       if (generation !== historyGenerationRef.current) return;
-      setHistoryRefs(inventory);
-      against = inventory.default_base;
+      if (!load.data) {
+        setHistory((current) => current && current.repoPath === entry.repoPath && current.startPointLabel === entry.startPointLabel ? { ...current, loading: false, error: load.failure } : current);
+        return;
+      }
+      setHistoryRefs(load.data);
+      against = load.data.default_base;
     } catch (error) {
       if (generation !== historyGenerationRef.current) return;
       setHistory((current) => current && current.repoPath === entry.repoPath && current.startPointLabel === entry.startPointLabel ? { ...current, loading: false, error: errorMessage(error) } : current);
@@ -984,8 +1063,13 @@ function App() {
   }
   async function loadHistoryPage(entry: HistoryEntry, generation: number, skip: number, against: string | null, append: boolean) {
     try {
-      const page = await invoke<CommitPage>("list_commits", { path: entry.worktreePath ?? entry.repoPath, repoPath: entry.repoPath, startRef: entry.startRef ?? null, against, skip, limit: COMMIT_PAGE_SIZE });
+      const load = adoptLoad(entry.repoPath, await invoke<CommitPage | RemoteLoad<CommitPage>>("list_commits", { path: entry.worktreePath ?? entry.repoPath, repoPath: entry.repoPath, startRef: entry.startRef ?? null, against, skip, limit: COMMIT_PAGE_SIZE }));
       if (generation !== historyGenerationRef.current) return;
+      if (!load.data) {
+        setHistory((current) => current && current.repoPath === entry.repoPath && current.startPointLabel === entry.startPointLabel ? { ...current, loading: false, error: load.failure } : current);
+        return;
+      }
+      const page = load.data;
       setHistory((current) => current && current.repoPath === entry.repoPath && current.startPointLabel === entry.startPointLabel ? { ...current, commits: append ? [...current.commits, ...page.commits] : page.commits, hasMore: page.has_more, loading: false, error: "" } : current);
     } catch (error) {
       if (generation !== historyGenerationRef.current) return;
@@ -1051,6 +1135,9 @@ function App() {
   const statusByPath: Record<string, number | null> = {};
   for (const status of worktreeStatuses[activeRepoPath] ?? []) statusByPath[status.path] = status.changes;
   const activeInventory = inventories[activeRepoPath] ?? null;
+  // The active project's remote health: badges render from this payload
+  // state; "live" stays quiet beyond the remote marker itself.
+  const activeRemoteHealth = remoteHealth[activeRepoPath] ?? null;
   const branchByRef = new Map<string, BranchSummary>((activeInventory?.branches ?? []).map((branch) => [branch.ref_name, branch]));
   // The overview's filter row scopes one tab at a time: worktrees, local
   // branches, remote branches, or archived surfaces, all client-side over
@@ -1134,6 +1221,10 @@ function App() {
 <FolderGit2 size={14} />
 <span>Open repository...</span>
 </button>
+<button className="open-repository-button" type="button" aria-label="Add remote project" title={collapsed ? undefined : "Add remote project"} data-tip="Add remote project..." onClick={() => { setAddRemoteError(""); setAddRemoteOpen(true); }}>
+<Server size={14} />
+<span>Add remote project...</span>
+</button>
 <div className="nav-tabs" aria-label="Workspace views">
 <button className={`nav-tab ${portalLocation ? "" : "active"}`} type="button" aria-label="Projects" aria-current={portalLocation ? undefined : "page"} data-tip="Projects" onClick={goInbox}>
 <FolderGit2 size={15} />
@@ -1149,7 +1240,7 @@ function App() {
 <kbd>Ctrl K</kbd>
 </button>
 <nav className="project-list" aria-label="Repositories">
-<div className="nav-section-label">Pinned</div>{pinnedRepos.length === 0 && <div className="sidebar-empty">No pinned repositories</div>}{pinnedRepos.map((repo) => <RepoNavGroup key={repo.path} repo={repo} active={repo.path === activeRepoPath} expanded={Boolean(expandedRepos[repo.path])} collapsed={collapsed} onToggle={() => { activateRepo(repo); void toggleRepo(repo); }} onPin={() => void togglePin(repo)} rows={sidebarRows(repo)} />)}<div className="nav-section-label">Recent</div>{recentRepos.length === 0 && <div className="sidebar-empty">No recent repositories</div>}{recentRepos.map((repo) => <RepoNavGroup key={repo.path} repo={repo} active={repo.path === activeRepoPath} expanded={Boolean(expandedRepos[repo.path])} collapsed={collapsed} onToggle={() => { activateRepo(repo); void toggleRepo(repo); }} onPin={() => void togglePin(repo)} rows={sidebarRows(repo)} />)}</nav>{showCommitsBar && history && <section className="commits-bar" aria-label="Commit history">
+<div className="nav-section-label">Pinned</div>{pinnedRepos.length === 0 && <div className="sidebar-empty">No pinned repositories</div>}{pinnedRepos.map((repo) => <RepoNavGroup key={repo.path} repo={repo} active={repo.path === activeRepoPath} expanded={Boolean(expandedRepos[repo.path])} collapsed={collapsed} onToggle={() => { activateRepo(repo); void toggleRepo(repo); }} onPin={() => void togglePin(repo)} rows={sidebarRows(repo)} health={remoteHealth[repo.path] ?? null} />)}<div className="nav-section-label">Recent</div>{recentRepos.length === 0 && <div className="sidebar-empty">No recent repositories</div>}{recentRepos.map((repo) => <RepoNavGroup key={repo.path} repo={repo} active={repo.path === activeRepoPath} expanded={Boolean(expandedRepos[repo.path])} collapsed={collapsed} onToggle={() => { activateRepo(repo); void toggleRepo(repo); }} onPin={() => void togglePin(repo)} rows={sidebarRows(repo)} health={remoteHealth[repo.path] ?? null} />)}</nav>{showCommitsBar && history && <section className="commits-bar" aria-label="Commit history">
 <div className="commits-bar-heading">
 <strong>{history.startPointLabel}</strong>
 <span className="commits-bar-actions">
@@ -1200,13 +1291,13 @@ function App() {
       <PortalThreadDetail payload={portalThread} groups={portalThreads?.groups ?? []} repoNames={repoNames} onOpenThread={openPortalThread} onOpenReview={openThreadInReview} onChanged={() => setThreadsNonce((nonce) => nonce + 1)} />
       : reviewLocation ?
       goneReview && !comments.key ?
-      <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} repoName={reviewRepo?.name ?? reviewLocation.identity.repoPath} liveWorktree={reviewRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={reviewRepo?.worktrees} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}focusedCommentId={reviewLocation.focusedCommentId}reviewRefreshTick={reviewRefreshTick}commentsWide={settings.comments_pane_wide}onCommentsWide={changeCommentsWide}onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file }); void selectFile(file, reviewLocation.identity); }} branchAction={branchFetchAction} />
+      <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} repoName={reviewRepo?.name ?? reviewLocation.identity.repoPath} liveWorktree={reviewRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={reviewRepo?.worktrees} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}focusedCommentId={reviewLocation.focusedCommentId}reviewRefreshTick={reviewRefreshTick}commentsWide={settings.comments_pane_wide}onCommentsWide={changeCommentsWide}onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file }); void selectFile(file, reviewLocation.identity); }} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[reviewLocation.identity.repoPath] ? reviewLocation.identity.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[reviewLocation.identity.repoPath])} onOsOpenFailure={() => setOsOpenUnavailable((current) => ({ ...current, [reviewLocation.identity.repoPath]: true }))} />
       : historyLocation ?
-      <HistoryView history={history ?? { repoPath: historyLocation.repoPath, startPointLabel: historyLocation.startPointLabel, worktreePath: historyLocation.worktreePath ?? undefined, startRef: historyLocation.startRef ?? undefined, commits: [], hasMore: false, loading: true, error: "" }} historyRefs={historyRefs} index={reviewIndex} loading={reviewLoading} selectedCommit={historyLocation.selectedCommit} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { const selected = historyLocation.selectedCommit; if (selectedFile && selected) void ensureFileContent(selectedFile, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false }); }} onBack={goInbox} onBasePick={(value) => { const selected = historyLocation.selectedCommit; if (selected) void openReview(commitTargetOf(selected), historyLocation.repoPath, { base: value }, historyLocation.startRef ?? undefined); }} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}commentsWide={settings.comments_pane_wide}onCommentsWide={changeCommentsWide}onFile={(file) => { const selected = historyLocation.selectedCommit; if (selected) { nav.replace({ ...historyLocation, selectedFile: file }); void selectFile(file, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false, originRef: historyLocation.startRef ?? undefined }); } }} branchAction={branchFetchAction} />
+      <HistoryView history={history ?? { repoPath: historyLocation.repoPath, startPointLabel: historyLocation.startPointLabel, worktreePath: historyLocation.worktreePath ?? undefined, startRef: historyLocation.startRef ?? undefined, commits: [], hasMore: false, loading: true, error: "" }} historyRefs={historyRefs} index={reviewIndex} loading={reviewLoading} selectedCommit={historyLocation.selectedCommit} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { const selected = historyLocation.selectedCommit; if (selectedFile && selected) void ensureFileContent(selectedFile, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false }); }} onBack={goInbox} onBasePick={(value) => { const selected = historyLocation.selectedCommit; if (selected) void openReview(commitTargetOf(selected), historyLocation.repoPath, { base: value }, historyLocation.startRef ?? undefined); }} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}commentsWide={settings.comments_pane_wide}onCommentsWide={changeCommentsWide}onFile={(file) => { const selected = historyLocation.selectedCommit; if (selected) { nav.replace({ ...historyLocation, selectedFile: file }); void selectFile(file, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false, originRef: historyLocation.startRef ?? undefined }); } }} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[historyLocation.repoPath] ? historyLocation.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[historyLocation.repoPath])} onOsOpenFailure={() => setOsOpenUnavailable((current) => ({ ...current, [historyLocation.repoPath]: true }))} />
       : <section className="inbox-pane" aria-labelledby="inbox-heading" aria-busy={loading || activeRepoHydrating}>
 <div className="section-heading">
 <div className="project-heading">
-<h1 id="inbox-heading">{activeRepo?.name ?? "Worktrees"}</h1>{activeRepo && !activeRepoHydrating && <div className="project-meta">
+<h1 id="inbox-heading">{activeRepo?.name ?? "Worktrees"}{activeRemoteHealth && <> <span className="remote-badge" title={`Remote project ${activeRepoPath}`}>remote</span>{activeRemoteHealth.state !== "live" && <span className={`remote-state-badge ${activeRemoteHealth.state}`} title={activeRemoteHealth.message ?? undefined}>{activeRemoteHealth.state}</span>}</>}</h1>{activeRepo && !activeRepoHydrating && <div className="project-meta">
 <span className="meta-chip" title={activeRepo.path}>
 <span className="meta-chip-label">{activeRepo.path}</span>
 <CopyButton value={activeRepo.path} label="Copy project path" />
@@ -1263,11 +1354,22 @@ function App() {
           if (row.section === "comments") { const match = row.match; return <Fragment key={`comments:${match.comment_id}`}>{sectionLabel}<button type="button" title={match.excerpt} onClick={() => { closePalette(); openPortalThread(match.root_comment_id); }}><MessageSquare size={16} /><span><strong>{match.excerpt}</strong><small>{match.change_label} · {repoNames.get(match.repo_path) ?? match.repo_path}</small></span></button></Fragment>; }
           if (row.section === "requests") { const match = row.match; return <Fragment key={`requests:${match.repo_path}:${match.base_sha}:${match.target_key}`}>{sectionLabel}<button type="button" title={match.note || match.change_label} onClick={() => { closePalette(); openReviewIdentity(match); }}><MessagesSquare size={16} /><span><strong>{match.change_label}</strong><small>{requestStatusLabel(match.status)} · {repoNames.get(match.repo_path) ?? match.repo_path}</small></span></button></Fragment>; }
           const match = row.match; return <Fragment key={`commits:${match.repo_path}:${match.sha}`}>{sectionLabel}<button type="button" title={match.subject} onClick={() => { closePalette(); void openReview({ kind: "commit", sha: match.sha, parents: match.parents, defaultBaseAncestor: false }, match.repo_path); }}><GitCommitHorizontal size={16} /><span><strong>{match.subject}</strong><small><code>{shortToken(match.sha)}</code> · {repoNames.get(match.repo_path) ?? match.repo_path}</small></span></button></Fragment>;
-        })}{paletteRows.length === 0 && <p>No repositories, worktrees, or conversations match "{query}".</p>}{palettePageCount > 1 && <Pager label="Search result pages" page={visiblePalettePage} pages={palettePageCount} total={paletteRows.length} size={SEARCH_PAGE_SIZE} onPage={setSearchPage} />}</div></div></dialog>}{removeTarget && <dialog className="palette-backdrop" ref={confirmRef} aria-label="Remove project" onClose={() => setRemoveTarget(null)} onMouseDown={(event) => { if (event.target === event.currentTarget) setRemoveTarget(null); }}><div className="confirm-dialog" onMouseDown={(event) => event.stopPropagation()}><h2>Remove {removeTarget.name}?</h2><p>Removes the project from WorktreeView only. Your repository, worktrees, and history on disk are never touched.</p><div className="confirm-actions"><button className="secondary-button" type="button" onClick={() => setRemoveTarget(null)}>Cancel</button><button className="danger-button" type="button" disabled={removing} onClick={() => void removeProject(removeTarget)}>{removing ? "Removing..." : "Remove project"}</button></div></div></dialog>}</div>;
+        })}{paletteRows.length === 0 && <p>No repositories, worktrees, or conversations match "{query}".</p>}{palettePageCount > 1 && <Pager label="Search result pages" page={visiblePalettePage} pages={palettePageCount} total={paletteRows.length} size={SEARCH_PAGE_SIZE} onPage={setSearchPage} />}</div></div></dialog>}{removeTarget && <dialog className="palette-backdrop" ref={confirmRef} aria-label="Remove project" onClose={() => setRemoveTarget(null)} onMouseDown={(event) => { if (event.target === event.currentTarget) setRemoveTarget(null); }}><div className="confirm-dialog" onMouseDown={(event) => event.stopPropagation()}><h2>Remove {removeTarget.name}?</h2><p>Removes the project from WorktreeView only. Your repository, worktrees, and history on disk are never touched.</p><div className="confirm-actions"><button className="secondary-button" type="button" onClick={() => setRemoveTarget(null)}>Cancel</button><button className="danger-button" type="button" disabled={removing} onClick={() => void removeProject(removeTarget)}>{removing ? "Removing..." : "Remove project"}</button></div></div></dialog>}{addRemoteOpen && <dialog className="palette-backdrop" ref={addRemoteRef} aria-label="Add remote project" onClose={() => setAddRemoteOpen(false)} onMouseDown={(event) => { if (event.target === event.currentTarget) setAddRemoteOpen(false); }}><form className="confirm-dialog remote-form" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); void openRemoteProject(); }}>
+<h2>Add remote project</h2>
+<p>Review a repository that lives on an SSH host. WorktreeView runs read-only Git through your ssh; the fetch action is the only write, and it touches remote-tracking refs on the host.</p>
+<div className="remote-form-grid">
+<label>Host<input autoFocus value={addRemoteForm.host} placeholder="host.example" onChange={(event) => setAddRemoteForm((form) => ({ ...form, host: event.currentTarget.value }))} /></label>
+<label>User<input value={addRemoteForm.user} placeholder="optional" onChange={(event) => setAddRemoteForm((form) => ({ ...form, user: event.currentTarget.value }))} /></label>
+<label>Port<input value={addRemoteForm.port} placeholder="22" inputMode="numeric" onChange={(event) => setAddRemoteForm((form) => ({ ...form, port: event.currentTarget.value }))} /></label>
+</div>
+<label className="remote-form-path">Path on the host<input value={addRemoteForm.path} placeholder="/srv/git/project" onChange={(event) => setAddRemoteForm((form) => ({ ...form, path: event.currentTarget.value }))} /></label>
+{addRemoteError && <p className="remote-form-error" role="status">{addRemoteError}</p>}
+<div className="confirm-actions"><button className="secondary-button" type="button" onClick={() => setAddRemoteOpen(false)}>Cancel</button><button className="secondary-button" type="submit" disabled={addingRemote}>{addingRemote ? "Adding..." : "Add project"}</button></div>
+</form></dialog>}</div>;
 }
 
-function RepoNavGroup({ repo, active, expanded, collapsed, onToggle, onPin, rows }: { repo: Repo; active: boolean; expanded: boolean; collapsed: boolean; onToggle: () => void; onPin: () => void; rows: React.ReactNode }) {
-  return <div className="project-group"><div className="project-row-wrap"><button className={`project-row ${active ? "active" : ""}`} type="button" title={collapsed ? undefined : repo.path} data-tip={repo.name} aria-current={active ? "true" : undefined} onClick={onToggle}>{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<span className="project-avatar">{repo.name.slice(0, 2)}</span><span className="project-copy"><strong>{repo.name}</strong></span></button><button className="pin-button" type="button" aria-label={repo.pinned_at === null ? "Pin repository" : "Unpin repository"} title={repo.pinned_at === null ? "Pin repository" : "Unpin repository"} onClick={onPin}>{repo.pinned_at === null ? <Pin size={12} /> : <PinOff size={12} />}</button></div>{expanded && <div className="sidebar-children">{rows}</div>}</div>;
+function RepoNavGroup({ repo, active, expanded, collapsed, onToggle, onPin, rows, health }: { repo: Repo; active: boolean; expanded: boolean; collapsed: boolean; onToggle: () => void; onPin: () => void; rows: React.ReactNode; health: RemoteHealth | null }) {
+  return <div className="project-group"><div className="project-row-wrap"><button className={`project-row ${active ? "active" : ""}`} type="button" title={collapsed ? undefined : repo.path} data-tip={repo.name} aria-current={active ? "true" : undefined} onClick={onToggle}>{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<span className="project-avatar">{repo.name.slice(0, 2)}</span><span className="project-copy"><strong>{repo.name}</strong>{health && <span className="remote-badge" title={`Remote project ${repo.path}`}>remote</span>}{health && health.state !== "live" && <span className={`remote-state-badge ${health.state}`} title={health.message ?? undefined}>{health.state}</span>}</span></button><button className="pin-button" type="button" aria-label={repo.pinned_at === null ? "Pin repository" : "Unpin repository"} title={repo.pinned_at === null ? "Pin repository" : "Unpin repository"} onClick={onPin}>{repo.pinned_at === null ? <Pin size={12} /> : <PinOff size={12} />}</button></div>{expanded && <div className="sidebar-children">{rows}</div>}</div>;
 }
 
 
