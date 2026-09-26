@@ -2,12 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   activityDividerIndexForSources,
+  call,
   connectionLabel,
   connectionSources,
   mergeAttention,
   mergePortalActivity,
   mergePortalReviews,
   normalizeServerUrl,
+  probeConnection,
   remoteErrorFrom,
   repoNameFromPath,
   resolveSource,
@@ -91,6 +93,27 @@ test("normalizeServerUrl trims trailing slashes and refuses non-http targets", (
   assert.equal(normalizeServerUrl("host:9887"), null);
   assert.equal(normalizeServerUrl("http://"), null);
   assert.equal(normalizeServerUrl("   "), null);
+});
+
+// The backend stores connection URLs without trailing slashes; the probe
+// strips them from raw input before saving. Either way the joined fetch
+// target keeps a single `/api/` segment, which the command route requires.
+test("call and the probe hit /api/<command> with no doubled slash", async () => {
+  const urls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    urls.push(String(input));
+    return { ok: true, status: 200, text: async () => "{}" } as Response;
+  };
+  try {
+    // The save-time probe normalizes the raw input's trailing slash.
+    await probeConnection(" http://host:9887/ ", "tok-1");
+    // A stored row reaches the same single-segment path.
+    await call("list_repos", undefined, { kind: "server", connectionId: 2, url: "http://host:9887", token: "tok-1" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(urls, ["http://host:9887/api/list_repos", "http://host:9887/api/list_repos"]);
 });
 
 test("remoteErrorFrom accepts the IPC shape and tolerates other shapes", () => {

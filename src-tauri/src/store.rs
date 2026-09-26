@@ -622,7 +622,8 @@ pub struct ServerProject {
 }
 
 // The webview fetches `<url>/api/<command>`, so the stored value must name
-// a scheme and host up front; anything else is refused before a row lands.
+// a scheme and host up front; anything else is refused, and trailing
+// slashes are stripped so the joined path stays a single `/api/` segment.
 fn normalized_connection_url(url: &str) -> Result<String, CommandError> {
     let invalid = || {
         CommandError::new(
@@ -639,7 +640,7 @@ fn normalized_connection_url(url: &str) -> Result<String, CommandError> {
     if host.is_empty() {
         return Err(invalid());
     }
-    Ok(trimmed.to_string())
+    Ok(trimmed.trim_end_matches('/').to_string())
 }
 
 fn server_project_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ServerProject, sqlx::Error> {
@@ -1516,7 +1517,7 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(updated.id, created.id);
-        assert_eq!(updated.url, "https://lab.example.com/");
+        assert_eq!(updated.url, "https://lab.example.com");
         assert_eq!(updated.label, None);
         assert_eq!(updated.token, "tok-2");
         assert_eq!(updated.projects, [project]);
@@ -1529,6 +1530,23 @@ mod tests {
         let projects: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM server_projects").fetch_one(&pool).await.unwrap();
         assert_eq!(projects, 0);
+    }
+
+    // The webview joins `<url>/api/<command>`, so a trailing slash would
+    // double the separator and miss the command route; rows store the base.
+    #[tokio::test]
+    async fn connection_urls_persist_without_trailing_slashes() {
+        let pool = test_pool().await;
+        let created =
+            save_server_connection_in_pool(&pool, None, " http://10.0.0.8:9887/ ", None, "tok-1")
+                .await
+                .unwrap();
+        assert_eq!(created.url, "http://10.0.0.8:9887");
+        let updated =
+            save_server_connection_in_pool(&pool, Some(created.id), "https://lab.example.com///", None, "tok-2")
+                .await
+                .unwrap();
+        assert_eq!(updated.url, "https://lab.example.com");
     }
 
     #[tokio::test]
