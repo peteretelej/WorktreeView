@@ -347,7 +347,7 @@ fn allowlisted(args: &[String]) -> Result<(), CommandError> {
         ),
         "log" => flags(
             rest,
-            &["--decorate=full"],
+            &["-1", "--decorate=full"],
             &["--skip=", "--max-count=", "--format="],
         ),
         "diff" => {
@@ -1077,6 +1077,13 @@ mod tests {
                 "--max-count=51",
                 "--decorate=full",
                 "--format=%H%x1f%s",
+                "abc123",
+            ],
+            // The exact shape `commit_detail` spawns for the history quick look.
+            &[
+                "log",
+                "-1",
+                "--format=%H%x00%an%x00%cd%x00%P%x00%s%x00%b",
                 "abc123",
             ],
             &[
