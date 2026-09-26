@@ -31,8 +31,13 @@ const CONNECTION_STALL_LIMIT: Duration = Duration::from_secs(30);
 // breaks the loop within this window.
 const ACCEPT_POLL: Duration = Duration::from_millis(200);
 
-// Our responses are small JSON or plain text; anything larger is a bug.
+// The agent faces answer small JSON or plain text; anything larger is a bug.
 const RESPONSE_BODY_LIMIT: usize = 1024 * 1024;
+// The command API is the human face over the same Git-backed reads local
+// projects take through IPC without a cap, so its answers follow the Git
+// layer's 16 MiB output ceiling (docs/performance.md), doubled to admit
+// JSON escaping's worst case (every byte escaped).
+const COMMAND_BODY_LIMIT: usize = 2 * crate::git::MAX_OUTPUT;
 // A request head beyond this is refused before parsing continues.
 const REQUEST_HEAD_LIMIT: usize = 64 * 1024;
 
@@ -844,7 +849,7 @@ async fn serve_connection(mut stream: tokio::net::TcpStream, state: TransportSta
             // the plain answers below.
             if let Some(origin) = cors_origin {
                 let face_method = if path == "/events" { "GET" } else { "POST" };
-                write_response(&mut stream, preflight_response(origin, face_method))
+                write_response(&mut stream, preflight_response(origin, face_method), RESPONSE_BODY_LIMIT)
                     .await
                     .map_err(|_| "write failed")?;
                 return Ok(());
@@ -862,7 +867,9 @@ async fn serve_connection(mut stream: tokio::net::TcpStream, state: TransportSta
                     "POST /, POST /mcp, and POST /api/<command> are the endpoints",
                 )
             };
-            write_response(&mut stream, response).await.map_err(|_| "write failed")?;
+            write_response(&mut stream, response, RESPONSE_BODY_LIMIT)
+                .await
+                .map_err(|_| "write failed")?;
             return Ok(());
         }
         if path != "/" && path != "/mcp" && !path.starts_with("/api/") {
@@ -870,7 +877,9 @@ async fn serve_connection(mut stream: tokio::net::TcpStream, state: TransportSta
                 StatusCode::NOT_FOUND,
                 "POST /, POST /mcp, and POST /api/<command> are the endpoints",
             );
-            write_response(&mut stream, response).await.map_err(|_| "write failed")?;
+            write_response(&mut stream, response, RESPONSE_BODY_LIMIT)
+                .await
+                .map_err(|_| "write failed")?;
             return Ok(());
         }
         if head.content_length > TRANSPORT_BODY_GUARD_BYTES {
@@ -883,7 +892,9 @@ async fn serve_connection(mut stream: tokio::net::TcpStream, state: TransportSta
                 ),
                 cors_origin,
             );
-            write_response(&mut stream, response).await.map_err(|_| "write failed")?;
+            write_response(&mut stream, response, RESPONSE_BODY_LIMIT)
+                .await
+                .map_err(|_| "write failed")?;
             return Ok(());
         }
         while head.buffer.len() - head.head_len < head.content_length {
@@ -904,9 +915,13 @@ async fn serve_connection(mut stream: tokio::net::TcpStream, state: TransportSta
             .body(axum::body::Body::from(body))
             .map_err(|_| "unrepresentable request")?;
         let response = handle(State(state), request).await;
-        write_response(&mut stream, with_webview_cors(response, cors_origin))
-            .await
-            .map_err(|_| "write failed")
+        write_response(
+            &mut stream,
+            with_webview_cors(response, cors_origin),
+            response_body_limit(&path),
+        )
+        .await
+        .map_err(|_| "write failed")
     };
     let _ = tokio::time::timeout(CONNECTION_STALL_LIMIT, handled).await;
 }
@@ -943,7 +958,7 @@ async fn stream_events(
     if sse_identity(state, buffer, head_len).await.is_none() {
         // The presented secret is never logged, only the miss.
         log::warn!("agent endpoint rejected an unauthorized request to /events");
-        let _ = write_response(stream, unauthorized_response()).await;
+        let _ = write_response(stream, unauthorized_response(), RESPONSE_BODY_LIMIT).await;
         return;
     }
     let Some(events) = &state.events else { return };
@@ -1012,10 +1027,24 @@ fn status_line(status: StatusCode) -> String {
     format!("HTTP/1.1 {} {}\r\n", status.as_u16(), status_reason(status.as_u16()))
 }
 
-async fn write_response(stream: &mut tokio::net::TcpStream, response: Response) -> Result<(), ()> {
+// The body limit rides with the route: the command API serves Git-derived
+// reads, the other faces small answers.
+fn response_body_limit(path: &str) -> usize {
+    if path.starts_with("/api/") {
+        COMMAND_BODY_LIMIT
+    } else {
+        RESPONSE_BODY_LIMIT
+    }
+}
+
+async fn write_response(
+    stream: &mut tokio::net::TcpStream,
+    response: Response,
+    body_limit: usize,
+) -> Result<(), ()> {
     use tokio::io::AsyncWriteExt;
     let (parts, body) = response.into_parts();
-    let body = to_bytes(body, RESPONSE_BODY_LIMIT).await.map_err(|_| ())?;
+    let body = to_bytes(body, body_limit).await.map_err(|_| ())?;
     let mut head = status_line(parts.status);
     for (name, value) in &parts.headers {
         let name = name.as_str();
@@ -2035,6 +2064,63 @@ mod tests {
             announced.lock().unwrap().as_slice(),
             [repo.to_string_lossy().as_ref()]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    // The command API carries Git-backed reads local projects render through
+    // IPC without a cap: a read over the agent faces' small response limit
+    // must reach the webview whole, not die in the writer and close the
+    // socket, or server-backed projects would lose files local ones render.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn command_api_serves_file_reads_beyond_the_small_response_cap() {
+        let pool = test_pool().await;
+        let repo = crate::testutil::test_repo("transport-large-read");
+        let base_sha = crate::testutil::test_rev_parse(&repo, "HEAD");
+        // A working-changes read takes the worktree file, so the payload
+        // needs no commit; the size sits between the small cap and the 16
+        // MiB read ceiling the command answers follow.
+        let payload = vec![b'x'; 1024 * 1024 + 4096];
+        std::fs::write(repo.join("big.txt"), &payload).unwrap();
+        let dir = crate::testutil::test_path("transport-large-read-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let handle = start(
+            pool.clone(),
+            test_deps(&dir, Arc::new(|_| {}), noop_refreshes(), noop_comment_changes()),
+            test_config(0),
+            McpStatusHandle::for_config(&test_config(0)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let discovery: EndpointDiscovery =
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(&dir)).unwrap()).unwrap();
+        let admin = crate::identity::create_first_admin_in_pool(&pool, "ops").await.unwrap();
+
+        let args = json!({
+            "path": repo.to_str().unwrap(),
+            "base": base_sha,
+            "headRef": null,
+            "committedOnly": false,
+            "reversed": false,
+            "file": "big.txt",
+            "untracked": false,
+        })
+        .to_string();
+        let response = send_raw_over_socket(
+            discovery.port,
+            format!(
+                "POST /api/read_review_file_bytes HTTP/1.1\r\nhost: 127.0.0.1\r\nauthorization: Bearer {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{args}",
+                admin.secret,
+                args.len(),
+            ),
+        )
+        .join()
+        .unwrap();
+        handle.stop();
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "unexpected response head");
+        let body = response.split("\r\n\r\n").nth(1).unwrap();
+        assert_eq!(body.as_bytes(), payload.as_slice(), "the read must arrive whole");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&repo);
     }
