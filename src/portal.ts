@@ -115,8 +115,12 @@ export type ThreadsVoiceFilter = "all" | "human" | "agents";
 
 export type PortalParticipant = { author_kind: "human" | "agent"; author_name: string };
 
+// connection_id tags a row that came from a merged server source (the
+// owning connection); absent or null means the local backend. The desktop
+// client's merge sets it; the backend never sends it.
 export type PortalThreadRow = {
   root_comment_id: number;
+  connection_id?: number | null;
   repo_path: string;
   base_sha: string;
   target_key: string;
@@ -213,6 +217,7 @@ export type PortalSearchComment = {
   excerpt: string;
   repo_path: string;
   change_label: string;
+  connection_id?: number | null;
 };
 
 export type PortalSearchRequest = {
@@ -252,6 +257,9 @@ export function searchResultCount(matches: PortalSearchMatches | null): number {
 // append-only event log.
 export type PortalActivityEvent = {
   id: number;
+  // The owning connection when the row came from a merged server source;
+  // absent or null means the local backend's own event log.
+  connection_id?: number | null;
   repo_path: string;
   kind: string;
   base_sha: string | null;

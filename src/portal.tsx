@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { Bot, Check, Copy, ExternalLink, FolderGit2, GitBranch, Inbox, ListTree, MessageSquare, Search, User } from "lucide-react";
 import { attentionAge, isNarrowAttention } from "./requests.ts";
 import { copyText } from "./clipboard.ts";
+import { call } from "./remote.ts";
 import { CommentThreadView, type CommentsApi } from "./comments.tsx";
 import { anchorLabel } from "./comments.ts";
+import { activityDividerIndexForSources } from "./remote.ts";
 import {
   activityDayGroups,
-  activityDividerIndex,
   activityKindFamily,
   activityKindLabel,
   projectOptions,
@@ -224,13 +224,14 @@ function CopyRouteButton({ rootCommentId }: { rootCommentId: number }) {
 // The portal thread detail: the stored conversation, resolve/reopen and
 // reply through the same comment commands the review surface uses, the
 // anchored snippet as stored, and the change's other threads alongside.
-export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, onOpenReview, onChanged }: {
+export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, onOpenReview, onChanged, readOnly = false }: {
   payload: PortalThreadPayload;
   groups: PortalThreadGroup[];
   repoNames: Map<string, string>;
   onOpenThread: (rootCommentId: number) => void;
   onOpenReview: (row: ReviewIdentityRef, focusedCommentId: number) => void;
   onChanged: () => void;
+  readOnly?: boolean;
 }) {
   const { detail } = payload;
   const group = detail
@@ -245,6 +246,7 @@ export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, o
   // new mutation path.
   const commentsApi: CommentsApi = {
     key: null,
+    readOnly,
     threads: [{ comment: detail.root, replies: detail.replies }],
     visibleThreads: [],
     statuses: {},
@@ -257,19 +259,23 @@ export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, o
     async refresh() { onChanged(); },
     async create() { },
     async reply(parentId, body) {
-      await invoke("reply_comment", { parentId, body, severity: null });
+      if (readOnly) return;
+      await call("reply_comment", { parentId, body, severity: null }, { kind: "local" });
       onChanged();
     },
     async setResolved(commentId, resolvedValue) {
-      await invoke("set_comment_resolved", { commentId, resolved: resolvedValue });
+      if (readOnly) return;
+      await call("set_comment_resolved", { commentId, resolved: resolvedValue }, { kind: "local" });
       onChanged();
     },
     async edit(commentId, body) {
-      await invoke("edit_comment", { commentId, body });
+      if (readOnly) return;
+      await call("edit_comment", { commentId, body }, { kind: "local" });
       onChanged();
     },
     async remove(commentId) {
-      await invoke("delete_comment", { commentId });
+      if (readOnly) return;
+      await call("delete_comment", { commentId }, { kind: "local" });
       onChanged();
     },
   };
@@ -342,7 +348,7 @@ export function PortalActivityTab({ payload, repoNames, activityProject, onProje
   const projectEvents = rowsForProject(events, activityProject);
   const projects = projectOptions(events);
   const groups = activityDayGroups(projectEvents, Date.now());
-  const divider = payload ? activityDividerIndex(projectEvents, payload.seen_id) : -1;
+  const divider = payload ? activityDividerIndexForSources(projectEvents, payload.seen_id) : -1;
   const now = useNow(10000);
   let flatIndex = -1;
   return <section className="inbox-pane attention-pane activity-pane" aria-label="Activity">

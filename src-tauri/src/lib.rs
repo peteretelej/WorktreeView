@@ -20,16 +20,17 @@ mod testutil;
 mod transport;
 
 use commands::{
-    create_agent_token, create_comment, create_review_request, delete_agent_token,
-    delete_comment, describe_commit, edit_comment, fetch_project, fetch_review_objects,
-    get_branch_inventory, get_mcp_status, get_portal_thread, get_settings, list_agent_tokens,
-    list_attention, list_comments, list_commits, list_portal_activity, list_portal_reviews,
-    list_portal_threads, list_refs, list_repos, list_requests, list_review_changes,
-    list_submissions, list_surfaces, list_worktree_status, list_worktrees, mark_activity_seen,
-    match_comment_anchors, open_log_dir, open_remote_repo, open_repo, open_review_file,
-    read_review_file, read_review_file_bytes, read_review_patch, remove_repo, reply_comment,
-    restart_mcp, search_portal, update_review_request, set_comment_resolved, set_repo_pinned,
-    set_settings, set_surface_pinned,
+    add_server_project, create_agent_token, create_comment, create_review_request,
+    delete_agent_token, delete_comment, delete_server_connection, describe_commit, edit_comment,
+    fetch_project, fetch_review_objects, get_branch_inventory, get_mcp_status, get_portal_thread,
+    get_settings, list_agent_tokens, list_attention, list_comments, list_commits,
+    list_portal_activity, list_portal_reviews, list_portal_threads, list_refs, list_repos,
+    list_requests, list_review_changes, list_server_connections, list_submissions, list_surfaces,
+    list_worktree_status, list_worktrees, mark_activity_seen, match_comment_anchors, open_log_dir,
+    open_remote_repo, open_repo, open_review_file, read_review_file, read_review_file_bytes,
+    read_review_patch, remove_repo, remove_server_project, reply_comment, restart_mcp,
+    save_server_connection, search_portal, set_server_project_pinned, set_comment_resolved,
+    set_repo_pinned, set_settings, set_surface_pinned, update_review_request,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -309,6 +310,12 @@ pub fn run() {
             open_log_dir,
             get_settings,
             set_settings,
+            list_server_connections,
+            save_server_connection,
+            delete_server_connection,
+            add_server_project,
+            remove_server_project,
+            set_server_project_pinned,
             list_agent_tokens,
             create_agent_token,
             delete_agent_token,
@@ -596,8 +603,8 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        // The embedded set: the consolidated baseline plus 0002 through 0007.
-        assert_eq!(versions.len(), 7);
+        // The embedded set: the consolidated baseline plus 0002 through 0008.
+        assert_eq!(versions.len(), 8);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await
@@ -658,7 +665,7 @@ mod tests {
                 .unwrap();
         // The overwritten backup held the first rebuilt store: the full
         // embedded migration set.
-        assert_eq!(preserved.0, 7);
+        assert_eq!(preserved.0, 8);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -733,7 +740,7 @@ mod tests {
                 .await
                 .unwrap();
         // The rebuilt store carries the full embedded migration set.
-        assert_eq!(versions.len(), 7);
+        assert_eq!(versions.len(), 8);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await

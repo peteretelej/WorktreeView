@@ -61,8 +61,10 @@ export type AppLocation =
   | { kind: "inbox" }
   | { kind: "settings" }
   | { kind: "portal"; tab: PortalTab; filters: PortalFilters }
-  // A portal thread detail keyed on its root comment id.
-  | { kind: "thread"; commentId: number }
+  // A portal thread detail keyed on its root comment id. connectionId
+  // names the owning backend for a merged (server-tagged) thread; absent
+  // or null reads the local store.
+  | { kind: "thread"; commentId: number; connectionId?: number | null }
   // focusedCommentId opens a review with one comment thread scrolled into
   // view and highlighted; null keeps the plain open.
   | { kind: "review"; identity: ReviewIdentity; selectedFile: ChangedFile | null; focusedCommentId: number | null }
@@ -98,7 +100,8 @@ export function sameAppLocation(left: AppLocation, right: AppLocation): boolean 
       && left.filters.activityProject === right.filters.activityProject;
   }
   if (left.kind === "thread" && right.kind === "thread") {
-    return left.commentId === right.commentId;
+    return left.commentId === right.commentId
+      && (left.connectionId ?? null) === (right.connectionId ?? null);
   }
   if (left.kind === "review" && right.kind === "review") {
     return left.identity.repoPath === right.identity.repoPath

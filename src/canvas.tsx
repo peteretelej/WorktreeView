@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useRef, useState } from "react";
+import { call, type SourceResolver } from "./remote.ts";
 import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
 import { CommentBody } from "./markdown.tsx";
 import { copyText } from "./clipboard.ts";
@@ -60,17 +60,20 @@ function SubmissionCard({ submission }: { submission: Submission }) {
 // The review's submission list: one expandable card per agent submission.
 // Finding comments render with severity badges in the comment stream; the
 // author filter already separates agent authors. A changed refreshTick
-// (a live arrival for this identity) reloads the listing in place.
-export function ReviewsStrip({ reviewKey, refreshTick }: { reviewKey: ReviewKey | null; refreshTick: number }) {
+// (a live arrival for this identity) reloads the listing in place. The
+// listing reads from the review identity's source (local or server).
+export function ReviewsStrip({ reviewKey, refreshTick, resolve = () => ({ kind: "local" }) }: { reviewKey: ReviewKey | null; refreshTick: number; resolve?: SourceResolver }) {
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const key = reviewKey ? `${reviewKey.repoPath}\0${reviewKey.baseSha}\0${reviewKey.targetKey}\0${reviewKey.targetKind}` : "";
+  const resolveRef = useRef(resolve);
+  useEffect(() => { resolveRef.current = resolve; });
   useEffect(() => {
     if (!reviewKey) {
       setSubmissions([]);
       return;
     }
     let cancelled = false;
-    void invoke<Submission[]>("list_submissions", { repoPath: reviewKey.repoPath, baseSha: reviewKey.baseSha, targetKey: reviewKey.targetKey, targetKind: reviewKey.targetKind })
+    void call<Submission[]>("list_submissions", { repoPath: reviewKey.repoPath, baseSha: reviewKey.baseSha, targetKey: reviewKey.targetKey, targetKind: reviewKey.targetKind }, resolveRef.current(reviewKey.repoPath))
       .then((loaded) => { if (!cancelled) setSubmissions(loaded); })
       .catch(() => { if (!cancelled) setSubmissions([]); });
     return () => { cancelled = true; };

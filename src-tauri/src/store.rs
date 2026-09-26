@@ -596,6 +596,262 @@ pub(crate) async fn mark_activity_seen_in_pool(pool: &SqlitePool) -> Result<i64,
     Ok(max_id)
 }
 
+// Desktop-client rows for the server tier: one row per configured server
+// connection (URL plus the account's bearer token, stored as sent under
+// the same local trust model as the rest of the store) and one row per
+// project added from that server by its host path. Server-backed review
+// state stays server-side; these rows only record what the webview needs
+// to reach the server and group the project tree.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ServerConnection {
+    pub id: i64,
+    pub url: String,
+    pub label: Option<String>,
+    pub token: String,
+    pub created_at: i64,
+    pub projects: Vec<ServerProject>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ServerProject {
+    pub id: i64,
+    pub connection_id: i64,
+    pub repo_path: String,
+    pub pinned: bool,
+    pub created_at: i64,
+}
+
+// The webview fetches `<url>/api/<command>`, so the stored value must name
+// a scheme and host up front; anything else is refused before a row lands.
+fn normalized_connection_url(url: &str) -> Result<String, CommandError> {
+    let invalid = || {
+        CommandError::new(
+            "invalid_connection",
+            "Enter an http:// or https:// URL with a host name.",
+        )
+    };
+    let trimmed = url.trim();
+    let (scheme, rest) = trimmed.split_once("://").ok_or_else(invalid)?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err(invalid());
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() {
+        return Err(invalid());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn server_project_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ServerProject, sqlx::Error> {
+    Ok(ServerProject {
+        id: row.try_get("id")?,
+        connection_id: row.try_get("connection_id")?,
+        repo_path: row.try_get("repo_path")?,
+        pinned: row.try_get::<i64, _>("pinned")? != 0,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+async fn connection_projects(
+    pool: &SqlitePool,
+    connection_id: i64,
+) -> Result<Vec<ServerProject>, CommandError> {
+    let rows = sqlx::query(
+        "SELECT id, connection_id, repo_path, pinned, created_at FROM server_projects \
+         WHERE connection_id = ? ORDER BY created_at ASC, id ASC",
+    )
+    .bind(connection_id)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(server_project_from_row)
+        .collect::<Result<_, _>>()
+        .map_err(Into::into)
+}
+
+pub(crate) async fn list_server_connections_in_pool(
+    pool: &SqlitePool,
+) -> Result<Vec<ServerConnection>, CommandError> {
+    let rows = sqlx::query(
+        "SELECT id, url, label, token, created_at FROM server_connections \
+         ORDER BY created_at ASC, id ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut connections = Vec::with_capacity(rows.len());
+    for row in rows.iter() {
+        let id: i64 = row.try_get("id")?;
+        connections.push(ServerConnection {
+            id,
+            url: row.try_get("url")?,
+            label: row.try_get("label")?,
+            token: row.try_get("token")?,
+            created_at: row.try_get("created_at")?,
+            projects: connection_projects(pool, id).await?,
+        });
+    }
+    Ok(connections)
+}
+
+// Insert for a fresh connection, full row update for an existing one: an
+// edited URL or rotated token keeps the row (and its projects) in place.
+pub(crate) async fn save_server_connection_in_pool(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    url: &str,
+    label: Option<&str>,
+    token: &str,
+) -> Result<ServerConnection, CommandError> {
+    let url = normalized_connection_url(url)?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(CommandError::new(
+            "invalid_connection",
+            "Paste the token the server issued for your account.",
+        ));
+    }
+    let label = label.map(str::trim).filter(|value| !value.is_empty());
+    let saved = match id {
+        Some(id) => {
+            let result =
+                sqlx::query("UPDATE server_connections SET url = ?, label = ?, token = ? WHERE id = ?")
+                    .bind(&url)
+                    .bind(label)
+                    .bind(token)
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+            if result.rows_affected() == 0 {
+                return Err(CommandError::new(
+                    "persistence",
+                    "That connection no longer exists.",
+                ));
+            }
+            id
+        }
+        None => sqlx::query(
+            "INSERT INTO server_connections (url, label, token, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&url)
+        .bind(label)
+        .bind(token)
+        .bind(now_millis())
+        .execute(pool)
+        .await?
+        .last_insert_rowid(),
+    };
+    let row = sqlx::query("SELECT id, url, label, token, created_at FROM server_connections WHERE id = ?")
+        .bind(saved)
+        .fetch_one(pool)
+        .await?;
+    Ok(ServerConnection {
+        id: row.try_get("id")?,
+        url: row.try_get("url")?,
+        label: row.try_get("label")?,
+        token: row.try_get("token")?,
+        created_at: row.try_get("created_at")?,
+        projects: connection_projects(pool, saved).await?,
+    })
+}
+
+// Registry-only removal: the row delete cascades the connection's project
+// references; the server's own store is never touched. Unknown ids are
+// already gone, so removal is idempotent.
+pub(crate) async fn delete_server_connection_in_pool(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<(), CommandError> {
+    sqlx::query("DELETE FROM server_connections WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn add_server_project_in_pool(
+    pool: &SqlitePool,
+    connection_id: i64,
+    repo_path: &str,
+) -> Result<ServerProject, CommandError> {
+    let repo_path = repo_path.trim();
+    if repo_path.is_empty() {
+        return Err(CommandError::new(
+            "invalid_project",
+            "Enter the project's path on the server host.",
+        ));
+    }
+    let known: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM server_connections WHERE id = ?")
+            .bind(connection_id)
+            .fetch_one(pool)
+            .await?;
+    if known == 0 {
+        return Err(CommandError::new(
+            "invalid_project",
+            "That connection no longer exists.",
+        ));
+    }
+    let duplicate: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM server_projects WHERE connection_id = ? AND repo_path = ?")
+            .bind(connection_id)
+            .bind(repo_path)
+            .fetch_optional(pool)
+            .await?;
+    if duplicate.is_some() {
+        return Err(CommandError::new(
+            "project_exists",
+            "That project is already in this server group.",
+        ));
+    }
+    let created_at = now_millis();
+    let id = sqlx::query(
+        "INSERT INTO server_projects (connection_id, repo_path, pinned, created_at) VALUES (?, ?, 0, ?)",
+    )
+    .bind(connection_id)
+    .bind(repo_path)
+    .bind(created_at)
+    .execute(pool)
+    .await?
+    .last_insert_rowid();
+    Ok(ServerProject {
+        id,
+        connection_id,
+        repo_path: repo_path.to_string(),
+        pinned: false,
+        created_at,
+    })
+}
+
+pub(crate) async fn remove_server_project_in_pool(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<(), CommandError> {
+    sqlx::query("DELETE FROM server_projects WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn set_server_project_pinned_in_pool(
+    pool: &SqlitePool,
+    id: i64,
+    pinned: bool,
+) -> Result<(), CommandError> {
+    let result = sqlx::query("UPDATE server_projects SET pinned = ? WHERE id = ?")
+        .bind(pinned)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(CommandError::new(
+            "persistence",
+            "The project is not stored and cannot be pinned.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1230,5 +1486,97 @@ mod tests {
             && row.target_key.is_none()
             && row.actor_kind == crate::events::ACTOR_HUMAN));
         std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    async fn seeded_connection(pool: &SqlitePool) -> ServerConnection {
+        save_server_connection_in_pool(pool, None, "http://10.0.0.8:9887", Some("lab"), "tok-1")
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn connections_save_list_update_and_cascade_on_delete() {
+        let pool = test_pool().await;
+        let created = seeded_connection(&pool).await;
+        let project = add_server_project_in_pool(&pool, created.id, "/srv/demo").await.unwrap();
+        assert_eq!(project.connection_id, created.id);
+        assert!(!project.pinned);
+
+        let listed = list_server_connections_in_pool(&pool).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].url, "http://10.0.0.8:9887");
+        assert_eq!(listed[0].label.as_deref(), Some("lab"));
+        assert_eq!(listed[0].token, "tok-1");
+        assert_eq!(listed[0].projects, [project.clone()]);
+
+        // An update rewrites URL, label, and token in place and keeps the
+        // project references.
+        let updated =
+            save_server_connection_in_pool(&pool, Some(created.id), "https://lab.example.com/", None, "tok-2")
+                .await
+                .unwrap();
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.url, "https://lab.example.com/");
+        assert_eq!(updated.label, None);
+        assert_eq!(updated.token, "tok-2");
+        assert_eq!(updated.projects, [project]);
+        assert_eq!(list_server_connections_in_pool(&pool).await.unwrap(), [updated]);
+
+        // Deleting the connection cascades its project rows.
+        delete_server_connection_in_pool(&pool, created.id).await.unwrap();
+        delete_server_connection_in_pool(&pool, created.id).await.unwrap();
+        assert!(list_server_connections_in_pool(&pool).await.unwrap().is_empty());
+        let projects: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM server_projects").fetch_one(&pool).await.unwrap();
+        assert_eq!(projects, 0);
+    }
+
+    #[tokio::test]
+    async fn server_projects_refuse_duplicates_and_remove_is_idempotent() {
+        let pool = test_pool().await;
+        let created = seeded_connection(&pool).await;
+        add_server_project_in_pool(&pool, created.id, "/srv/demo").await.unwrap();
+        let duplicate = add_server_project_in_pool(&pool, created.id, " /srv/demo ").await.unwrap_err();
+        assert_eq!(duplicate.code, "project_exists");
+        let unknown_connection = add_server_project_in_pool(&pool, 999, "/srv/x").await.unwrap_err();
+        assert_eq!(unknown_connection.code, "invalid_project");
+        let empty = add_server_project_in_pool(&pool, created.id, "   ").await.unwrap_err();
+        assert_eq!(empty.code, "invalid_project");
+
+        let listed = list_server_connections_in_pool(&pool).await.unwrap();
+        let row = listed[0].projects[0].clone();
+        remove_server_project_in_pool(&pool, row.id).await.unwrap();
+        remove_server_project_in_pool(&pool, row.id).await.unwrap();
+        assert!(list_server_connections_in_pool(&pool).await.unwrap()[0].projects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_project_pins_set_and_refuse_unknown_rows() {
+        let pool = test_pool().await;
+        let created = seeded_connection(&pool).await;
+        let project = add_server_project_in_pool(&pool, created.id, "/srv/demo").await.unwrap();
+        set_server_project_pinned_in_pool(&pool, project.id, true).await.unwrap();
+        assert!(list_server_connections_in_pool(&pool).await.unwrap()[0].projects[0].pinned);
+        set_server_project_pinned_in_pool(&pool, project.id, false).await.unwrap();
+        assert!(!list_server_connections_in_pool(&pool).await.unwrap()[0].projects[0].pinned);
+        let missing = set_server_project_pinned_in_pool(&pool, 424242, true).await.unwrap_err();
+        assert_eq!(missing.code, "persistence");
+    }
+
+    #[tokio::test]
+    async fn invalid_connection_input_is_refused_without_a_row() {
+        let pool = test_pool().await;
+        for (url, token) in [
+            ("ftp://host:9887", "tok"),
+            ("http://", "tok"),
+            ("host:9887", "tok"),
+            ("http://host:9887", "   "),
+        ] {
+            let error = save_server_connection_in_pool(&pool, None, url, None, token).await.unwrap_err();
+            assert_eq!(error.code, "invalid_connection");
+        }
+        let update = save_server_connection_in_pool(&pool, Some(7), "http://host:9887", None, "tok").await.unwrap_err();
+        assert_eq!(update.code, "persistence");
+        assert!(list_server_connections_in_pool(&pool).await.unwrap().is_empty());
     }
 }

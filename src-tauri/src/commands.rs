@@ -34,9 +34,11 @@ use crate::reviews::{
     Submission,
 };
 use crate::store::{
-    get_settings_in_pool, load_repos, mark_activity_seen_in_pool, now_millis,
-    open_remote_repo_path, open_repo_path, remove_repo_in_pool, set_repo_pinned_in_pool,
-    set_settings_in_pool, Repo, Settings,
+    add_server_project_in_pool, delete_server_connection_in_pool, get_settings_in_pool,
+    list_server_connections_in_pool, load_repos, mark_activity_seen_in_pool, now_millis,
+    open_remote_repo_path, open_repo_path, remove_repo_in_pool, remove_server_project_in_pool,
+    save_server_connection_in_pool, set_repo_pinned_in_pool, set_server_project_pinned_in_pool,
+    set_settings_in_pool, Repo, ServerConnection, ServerProject, Settings,
 };
 use crate::transport::{
     restart, ListenerConfig, ListenerOwner, ListenerStatus, McpStatusHandle, TransportDeps,
@@ -531,6 +533,62 @@ pub(crate) async fn set_settings(
     settings: Settings,
 ) -> Result<Settings, CommandError> {
     set_settings_in_pool(&state.pool, &settings).await
+}
+
+// The server-connection commands are purely local store operations: the
+// crate has no HTTP client, and every server call runs from the webview
+// through the remote seam before one of these persists the outcome.
+
+#[tauri::command]
+pub(crate) async fn list_server_connections(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ServerConnection>, CommandError> {
+    list_server_connections_in_pool(&state.pool).await
+}
+
+#[tauri::command]
+pub(crate) async fn save_server_connection(
+    id: Option<i64>,
+    url: String,
+    label: Option<String>,
+    token: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ServerConnection, CommandError> {
+    save_server_connection_in_pool(&state.pool, id, &url, label.as_deref(), &token).await
+}
+
+#[tauri::command]
+pub(crate) async fn delete_server_connection(
+    id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    delete_server_connection_in_pool(&state.pool, id).await
+}
+
+#[tauri::command]
+pub(crate) async fn add_server_project(
+    connection_id: i64,
+    repo_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ServerProject, CommandError> {
+    add_server_project_in_pool(&state.pool, connection_id, &repo_path).await
+}
+
+#[tauri::command]
+pub(crate) async fn remove_server_project(
+    id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    remove_server_project_in_pool(&state.pool, id).await
+}
+
+#[tauri::command]
+pub(crate) async fn set_server_project_pinned(
+    id: i64,
+    pinned: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    set_server_project_pinned_in_pool(&state.pool, id, pinned).await
 }
 
 // Marks everything currently in the event log seen and returns the new

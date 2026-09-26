@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { ArrowLeft } from "lucide-react";
 import { ZOOM_LEVELS, snapZoom } from "./zoom.ts";
+import { connectionLabel, probeConnection, type ServerConnectionRow } from "./remote.ts";
 
 export type Theme = "system" | "light" | "dark";
 export type DiffLayout = "unified" | "split";
@@ -25,6 +26,22 @@ export function createAgentToken(name: string) { return invoke<CreatedAgentToken
 export function deleteAgentToken(id: number) { return invoke<void>("delete_agent_token", { id }); }
 export function getMcpStatus() { return invoke<McpStatus>("get_mcp_status"); }
 export function restartMcp() { return invoke<McpStatus>("restart_mcp"); }
+
+// The server-connection commands are purely local store operations; every
+// server call itself runs from the webview through the remote seam (the
+// save flow probes first, then persists).
+export function listServerConnections() { return invoke<ServerConnectionRow[]>("list_server_connections"); }
+export function saveServerConnection(id: number | null, url: string, label: string, token: string) {
+  return invoke<ServerConnectionRow>("save_server_connection", { id, url, label: label.trim() || null, token });
+}
+export function deleteServerConnection(id: number) { return invoke<void>("delete_server_connection", { id }); }
+export function addServerProject(connectionId: number, repoPath: string) {
+  return invoke<ServerConnectionRow["projects"][number]>("add_server_project", { connectionId, repoPath });
+}
+export function removeServerProject(id: number) { return invoke<void>("remove_server_project", { id }); }
+export function setServerProjectPinned(id: number, pinned: boolean) {
+  return invoke<void>("set_server_project_pinned", { id, pinned });
+}
 
 const DARK_MEDIA_QUERY = "(prefers-color-scheme: dark)";
 
@@ -219,6 +236,114 @@ function errorMessageOf(error: unknown) {
   return "The agent API settings could not be loaded.";
 }
 
+// The Servers page is the control surface for the desktop client's server
+// connections: URL plus the account's token, stored in the local store.
+// Saving probes the server first (one authenticated list_repos through the
+// remote seam) so a wrong URL or token never lands as a row; deleting a
+// connection cascades this app's references to its projects and never
+// touches the server's own store.
+function ServerConnectionsSection({ onChanged }: { onChanged: () => void }) {
+  const [connections, setConnections] = useState<ServerConnectionRow[]>([]);
+  const [url, setUrl] = useState("");
+  const [label, setLabel] = useState("");
+  const [token, setToken] = useState("");
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [armed, setArmed] = useState<number | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    listServerConnections().then((loaded) => { if (mounted) setConnections(loaded); }).catch((caught) => { if (mounted) setError(errorMessageOf(caught)); });
+    return () => { mounted = false; };
+  }, []);
+
+  async function reload() {
+    setConnections(await listServerConnections());
+    onChanged();
+  }
+
+  function startEdit(connection: ServerConnectionRow) {
+    setEditingId(connection.id);
+    setUrl(connection.url);
+    setLabel(connection.label ?? "");
+    setToken(connection.token);
+    setError("");
+  }
+
+  function resetForm() {
+    setEditingId(null);
+    setUrl("");
+    setLabel("");
+    setToken("");
+    setError("");
+  }
+
+  async function save() {
+    if (saving) return;
+    setError("");
+    setSaving(true);
+    try {
+      await probeConnection(url, token);
+      await saveServerConnection(editingId, url, label, token);
+      resetForm();
+      await reload();
+    } catch (caught) {
+      setError(errorMessageOf(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function remove(connection: ServerConnectionRow) {
+    setError("");
+    try {
+      await deleteServerConnection(connection.id);
+      if (editingId === connection.id) resetForm();
+      await reload();
+    } catch (caught) {
+      setError(errorMessageOf(caught));
+    }
+  }
+
+  return <section id="settings-servers" className="settings-section" aria-labelledby="settings-servers-heading">
+    <h2 id="settings-servers-heading">Servers</h2>
+    <div className="settings-row settings-row-flush">
+      <div className="settings-row-copy"><strong>{editingId === null ? "Connect to a server" : "Edit connection"}</strong><span>WorktreeView server URL and your user token. The token is stored in this app's local store and sent as a bearer header on every server call.</span></div>
+      <span className="settings-row-actions">
+        <input className="settings-select settings-input-name" type="text" spellCheck={false} aria-label="Server URL" placeholder="http://host:9887" value={url} onChange={(event) => setUrl(event.currentTarget.value)} />
+        <input className="settings-select settings-input-name" type="text" spellCheck={false} aria-label="Label (optional)" placeholder="Label (optional)" value={label} onChange={(event) => setLabel(event.currentTarget.value)} />
+        <input className="settings-select settings-input-name" type="password" aria-label="User token" placeholder="User token" value={token} onChange={(event) => setToken(event.currentTarget.value)} />
+        <button className="settings-select settings-button" type="button" disabled={saving || !url.trim() || !token.trim()} onClick={() => void save()}>{saving ? "Checking..." : editingId === null ? "Connect" : "Save changes"}</button>
+        {editingId !== null && <button className="settings-select settings-button" type="button" onClick={resetForm}>Cancel</button>}
+      </span>
+    </div>
+    <p className="request-form-hint">Saving checks the server with one authenticated call; a wrong URL or token surfaces above without being stored.</p>
+    {connections.length > 0 && <div className="settings-token-list">
+      {connections.map((connection) => <div className="settings-token" key={connection.id}>
+        <div className="settings-token-copy">
+          <strong>{connectionLabel(connection)}</strong>
+          <span><code>{connection.url}</code> · {connection.projects.length} {connection.projects.length === 1 ? "project" : "projects"}</span>
+        </div>
+        <span className="settings-row-actions">
+          <button className="settings-select settings-button" type="button" onClick={() => startEdit(connection)}>Edit</button>
+          <button className={armed === connection.id ? "settings-select settings-button settings-button-danger" : "settings-select settings-button"} type="button" onClick={() => {
+            if (armed === connection.id) {
+              setArmed(null);
+              void remove(connection);
+            } else {
+              setArmed(connection.id);
+              window.setTimeout(() => setArmed((current) => (current === connection.id ? null : current)), 4000);
+            }
+          }}>{armed === connection.id ? "Confirm delete" : "Delete"}</button>
+        </span>
+      </div>)}
+    </div>}
+    {connections.length > 0 && <p className="request-form-hint">Deleting removes the connection and this app's references to its projects. The server's own store is never touched.</p>}
+    {error && <div className="settings-inline-error" role="status" aria-live="polite">{error}</div>}
+  </section>;
+}
+
 // Static app facts plus the release version; the version is the same value
 // the agent endpoint reports as its server version.
 function AboutSection() {
@@ -254,15 +379,16 @@ function AboutSection() {
   </section>;
 }
 
-type SettingsPageId = "general" | "agents" | "about";
+type SettingsPageId = "general" | "servers" | "agents" | "about";
 
 const SETTINGS_PAGES: { id: SettingsPageId; label: string }[] = [
   { id: "general", label: "General" },
+  { id: "servers", label: "Servers" },
   { id: "agents", label: "Agent API" },
   { id: "about", label: "About" },
 ];
 
-export function SettingsPage({ settings, saveError, onBack, onChange }: { settings: Settings; saveError: string; onBack: () => void; onChange: (next: Settings) => void }) {
+export function SettingsPage({ settings, saveError, onBack, onChange, onConnectionsChanged }: { settings: Settings; saveError: string; onBack: () => void; onChange: (next: Settings) => void; onConnectionsChanged: () => void }) {
   const [page, setPage] = useState<SettingsPageId>("general");
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -323,6 +449,7 @@ export function SettingsPage({ settings, saveError, onBack, onChange }: { settin
           </div>
         </section>
       </>}
+      {page === "servers" && <ServerConnectionsSection onChanged={onConnectionsChanged} />}
       {page === "agents" && <AgentApiSection settings={settings} onChange={onChange} />}
       {page === "about" && <AboutSection />}
       {saveError && <div className="settings-inline-error" role="status" aria-live="polite">{saveError}</div>}

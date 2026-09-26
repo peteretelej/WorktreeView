@@ -7,7 +7,7 @@ normalized domain data through narrow, typed Tauri commands.
 
 ## Backend (`src-tauri/src`)
 
-- `commands.rs`: thin typed IPC adapters. The full command surface is 46
+- `commands.rs`: thin typed IPC adapters. The full command surface is 52
   commands: `open_repo`, `open_remote_repo`, `list_repos`, `list_worktrees`,
   `list_worktree_status`, `remove_repo`, `get_branch_inventory`,
   `fetch_project`, `fetch_review_objects`, `set_repo_pinned`,
@@ -18,12 +18,18 @@ normalized domain data through narrow, typed Tauri commands.
   `list_requests`, `create_review_request`, `update_review_request`,
   `read_review_patch`, `read_review_file`, `read_review_file_bytes`,
   `open_review_file`, `open_log_dir`, `get_settings`, `set_settings`,
+  `list_server_connections`, `save_server_connection`,
+  `delete_server_connection`, `add_server_project`,
+  `remove_server_project`, `set_server_project_pinned`,
   `list_agent_tokens`, `create_agent_token`, `delete_agent_token`,
   `get_mcp_status`, `restart_mcp`, `create_comment`, `list_comments`,
   `list_submissions`, `reply_comment`, `set_comment_resolved`,
   `edit_comment`, `delete_comment`, `match_comment_anchors`. The shared
   implementations behind these adapters run without the app and are what
-  the command API dispatches to.
+  the command API dispatches to. The six server-connection commands are
+  purely local store operations (connection rows and project references
+  in the desktop's own store); no server call runs from Rust, and the
+  crate gains no HTTP client.
 - `agents.rs`: the token store: per-agent tokens as table rows with only
   their SHA-256 hex hash persisted. Secrets carry a `wv` prefix followed
   by 32 random bytes hex, generated once at creation and never stored or
@@ -229,11 +235,15 @@ normalized domain data through narrow, typed Tauri commands.
   per-surface pins: pinning a recorded surface updates its row in place,
   and pinning a never-reviewed surface resolves its identity with one
   bounded Git spawn before recording it with pin origin.
-- `store.rs`: SQLite persistence (sqlx) for repositories, pins, and
-  settings, plus path canonicalization and normalization of stored
-  Windows verbatim paths. Remote project rows carry the canonical
-  identity string plus a `remote` marker, and that POSIX identity is
-  never canonicalized locally. Migrations live in `src-tauri/migrations`.
+- `store.rs`: SQLite persistence (sqlx) for repositories, pins, settings,
+  remote project rows (the canonical identity string plus a `remote`
+  marker, that POSIX identity never canonicalized locally), and the
+  desktop's server connections (`server_connections` rows holding
+  the configured URL, optional label, and the account's bearer token;
+  `server_projects` rows holding one project reference per connection,
+  keyed on the path on the server host, with a local presentation pin),
+  plus path canonicalization and normalization of stored Windows verbatim
+  paths. Migrations live in `src-tauri/migrations`.
 
 ## Git as the semantic authority
 
@@ -251,6 +261,12 @@ effects, and the agent submission arrival cue and endpoint event listeners:
 `submission-received` queues the arrival cue, `comment-changed` refetches
 the loaded review's comments when the change names it, and
 `project-refreshed` re-lists the open repository's surfaces),
+`remote.ts` (the one dispatch seam: an invoke-shaped `call` that routes a
+command to the local backend or, for a server-backed repo path resolved
+from the local `server_projects` rows, to that server's command API with
+its bearer token; global Pulse listings fan out over every source and
+merge client-side, with thread and activity rows carrying the owning
+connection id so id-keyed detail opens land on the right backend), and
 `format.ts` (shared formatting and error-message helpers),
 `ui.tsx` (shared widgets: copy button, empty state, pager, brand mark,
 top bar), `review.tsx` (the review surface: review view, changed-file
@@ -301,8 +317,10 @@ then on. The schema is one consolidated `0001` migration plus
 append-only additive migrations (`0002` adds the `agent_tokens` table and
 comment ownership; `0003` adds review requests; `0004` adds the `events`
 table; `0005` rebuilds it with an extended kind vocabulary; `0006` marks
-remote project rows; `0007` adds the `users` and `user_tokens` tables);
-migration divergence handling is described at the end of this section.
+remote project rows; `0007` adds the `users` and `user_tokens` tables;
+`0008` adds the desktop's `server_connections` and `server_projects`
+tables); migration divergence handling is described at the end of this
+section.
 
 The `events` table is the append-only activity log: every review-relevant
 mutation (request lifecycle, submission delivery, comment posts and
