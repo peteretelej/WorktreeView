@@ -149,7 +149,12 @@ pub(crate) async fn read_worktree_target(
             ));
         }
         let mut target = RemoteTarget::parse_identity(repo_path)?;
-        target.path = worktree_path.to_string();
+        // Ref and commit reviews have no worktree of their own: their
+        // callers pass the repo identity as the worktree path, and the
+        // identity already carries the host-side repository path.
+        if worktree_path != repo_path {
+            target.path = worktree_path.to_string();
+        }
         return Ok(ReadTarget::Remote(target));
     }
     Ok(ReadTarget::Local(canonical_path(worktree_path)?))
@@ -195,6 +200,13 @@ mod tests {
         {
             ReadTarget::Remote(target) => assert_eq!(target.path, "/srv/re po wt"),
             ReadTarget::Local(_) => panic!("remote worktree reads must stay remote"),
+        }
+        // A ref or commit review passes the identity as its worktree path:
+        // the host-side path stays the identity's own repository path
+        // instead of being addressed by the identity string itself.
+        match read_worktree_target(&pool, identity, identity).await.unwrap() {
+            ReadTarget::Remote(target) => assert_eq!(target.path, "/srv/re po"),
+            ReadTarget::Local(_) => panic!("remote ref reads must stay remote"),
         }
         std::fs::remove_dir_all(repo).unwrap();
     }
