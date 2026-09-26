@@ -11,7 +11,7 @@
 //! that does not parse into the command's arguments answers 400
 //! `invalid_arguments`.
 //!
-//! Coverage mirrors the shipped 45-command IPC surface, classified once:
+//! Coverage mirrors the shipped 46-command IPC surface, classified once:
 //!
 //! 33 straight dispatch routes (the human review domain): `open_repo`,
 //! `list_repos`, `list_worktrees`, `list_worktree_status`, `remove_repo`,
@@ -42,7 +42,7 @@
 //! `create_user_token` (rotation; printed once), `delete_user_token`
 //! (revoke a leaked token without deleting the account).
 //!
-//! 9 IPC commands are excluded from HTTP, each with the reason it has no
+//! 10 IPC commands are excluded from HTTP, each with the reason it has no
 //! server meaning: `set_repo_pinned` and `set_surface_pinned`
 //! (presentation prefs stay client-local), `get_settings` and
 //! `set_settings` (desktop-local settings; server bind config is
@@ -51,14 +51,15 @@
 //! `open_review_file` and `open_log_dir` (act on the server host's OS,
 //! not the viewer's machine), `get_mcp_status` and `restart_mcp`
 //! (endpoint lifecycle is ops-level via systemd/Docker, documented in
-//! docs/server.md).
+//! docs/server.md), and `open_remote_repo` (a desktop-only SSH
+//! affordance; the server reviews repositories on their own disks).
 
 use crate::agents::{
     create_agent_token_in_pool, delete_agent_token_in_pool, list_agent_tokens_in_pool,
 };
 use crate::commands::{
-    create_request_as_human, fetch_review_objects, list_worktree_status, portal_activity_page,
-    refresh_repo, update_request_in_pool, RequestAction,
+    create_request_as_human, fetch_review_objects, list_worktree_status_in_pool,
+    portal_activity_page, refresh_repo, update_request_in_pool, RequestAction,
 };
 use crate::identity::{
     create_user_in_pool, create_user_token_in_pool, delete_user_in_pool,
@@ -72,7 +73,7 @@ use crate::reviews::{
 };
 use crate::store::{load_repos, open_repo_path, remove_repo_in_pool};
 use crate::transport::TransportState;
-use crate::{canonical_path, CommandError};
+use crate::CommandError;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use serde::de::DeserializeOwned;
@@ -98,10 +99,6 @@ fn json_result<R: Serialize>(result: Result<R, CommandError>) -> Result<Response
         Ok(value) => Ok((StatusCode::OK, Json(value)).into_response()),
         Err(error) => Err(error_response(StatusCode::BAD_REQUEST, &error.code, error.message)),
     }
-}
-
-fn command_error_response(error: CommandError) -> Response {
-    error_response(StatusCode::BAD_REQUEST, &error.code, error.message)
 }
 
 fn bytes_result(result: Result<Vec<u8>, CommandError>) -> Result<Response, Response> {
@@ -162,11 +159,11 @@ async fn route(
         }
         "list_worktrees" => {
             let args: PathArgs = parse_args(body)?;
-            json_result(crate::commands::list_worktrees(args.path).await)
+            json_result(crate::commands::list_worktrees_in_pool(&state.pool, &args.path).await)
         }
         "list_worktree_status" => {
             let args: PathArgs = parse_args(body)?;
-            json_result(list_worktree_status(args.path).await)
+            json_result(list_worktree_status_in_pool(&state.pool, &args.path).await)
         }
         "remove_repo" => {
             let args: PathArgs = parse_args(body)?;
@@ -174,12 +171,11 @@ async fn route(
         }
         "get_branch_inventory" => {
             let args: PathArgs = parse_args(body)?;
-            json_result(crate::commands::get_branch_inventory(args.path).await)
+            json_result(crate::overview::branch_inventory(&state.pool, args.path).await)
         }
         "fetch_project" => {
             let args: PathArgs = parse_args(body)?;
-            let path = canonical_path(&args.path).map_err(command_error_response)?;
-            json_result(refresh_repo(&path, &state.refreshes).await)
+            json_result(refresh_repo(&state.pool, &args.path, &state.refreshes).await)
         }
         "fetch_review_objects" => {
             let args: RefFetchArgs = parse_args(body)?;
@@ -187,7 +183,10 @@ async fn route(
         }
         "list_refs" => {
             let args: RefsArgs = parse_args(body)?;
-            json_result(crate::commands::list_refs(args.path, args.worktree_branch, args.target_ref).await)
+            json_result(
+                crate::review::refs_inventory(&state.pool, args.path, args.worktree_branch, args.target_ref)
+                    .await,
+            )
         }
         "list_commits" => {
             let args: CommitsArgs = parse_args(body)?;
@@ -206,7 +205,7 @@ async fn route(
         }
         "describe_commit" => {
             let args: RevArgs = parse_args(body)?;
-            json_result(crate::review::commit_detail(args.path, args.rev).await)
+            json_result(crate::review::commit_detail(&state.pool, args.path, args.rev).await)
         }
         "list_review_changes" => {
             let args: ReviewChangesArgs = parse_args(body)?;
@@ -324,7 +323,9 @@ async fn route(
             let args: ReviewReadArgs = parse_args(body)?;
             json_result(
                 crate::review::review_patch(
+                    &state.pool,
                     args.path,
+                    args.repo_path,
                     args.base,
                     args.head_ref,
                     args.committed_only,
@@ -339,7 +340,9 @@ async fn route(
             let args: ReviewReadArgs = parse_args(body)?;
             json_result(
                 crate::review::review_file_content(
+                    &state.pool,
                     args.path,
+                    args.repo_path,
                     args.base,
                     args.head_ref,
                     args.committed_only,
@@ -354,7 +357,9 @@ async fn route(
             let args: ReviewReadArgs = parse_args(body)?;
             bytes_result(
                 crate::review::review_file_bytes(
+                    &state.pool,
                     args.path,
+                    args.repo_path,
                     args.base,
                     args.head_ref,
                     args.committed_only,
@@ -653,6 +658,9 @@ struct UpdateRequestArgs {
 #[serde(rename_all = "camelCase")]
 struct ReviewReadArgs {
     path: String,
+    // The review identity's owning project; a remote worktree target
+    // resolves through it, exactly as the IPC command's argument does.
+    repo_path: Option<String>,
     base: String,
     head_ref: Option<String>,
     committed_only: bool,
