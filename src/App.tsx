@@ -1358,11 +1358,11 @@ function App() {
 <h2>Add remote project</h2>
 <p>Review a repository that lives on an SSH host. WorktreeView runs read-only Git through your ssh; the fetch action is the only write, and it touches remote-tracking refs on the host.</p>
 <div className="remote-form-grid">
-<label>Host<input autoFocus value={addRemoteForm.host} placeholder="host.example" onChange={(event) => setAddRemoteForm((form) => ({ ...form, host: event.currentTarget.value }))} /></label>
-<label>User<input value={addRemoteForm.user} placeholder="optional" onChange={(event) => setAddRemoteForm((form) => ({ ...form, user: event.currentTarget.value }))} /></label>
-<label>Port<input value={addRemoteForm.port} placeholder="22" inputMode="numeric" onChange={(event) => setAddRemoteForm((form) => ({ ...form, port: event.currentTarget.value }))} /></label>
+<label>Host<input autoFocus value={addRemoteForm.host} placeholder="host.example" onChange={(event) => { const value = event.currentTarget.value; setAddRemoteForm((form) => ({ ...form, host: value })); }} /></label>
+<label>User<input value={addRemoteForm.user} placeholder="optional" onChange={(event) => { const value = event.currentTarget.value; setAddRemoteForm((form) => ({ ...form, user: value })); }} /></label>
+<label>Port<input value={addRemoteForm.port} placeholder="22" inputMode="numeric" onChange={(event) => { const value = event.currentTarget.value; setAddRemoteForm((form) => ({ ...form, port: value })); }} /></label>
 </div>
-<label className="remote-form-path">Path on the host<input value={addRemoteForm.path} placeholder="/srv/git/project" onChange={(event) => setAddRemoteForm((form) => ({ ...form, path: event.currentTarget.value }))} /></label>
+<label className="remote-form-path">Path on the host<input value={addRemoteForm.path} placeholder="/srv/git/project" onChange={(event) => { const value = event.currentTarget.value; setAddRemoteForm((form) => ({ ...form, path: value })); }} /></label>
 {addRemoteError && <p className="remote-form-error" role="status">{addRemoteError}</p>}
 <div className="confirm-actions"><button className="secondary-button" type="button" onClick={() => setAddRemoteOpen(false)}>Cancel</button><button className="secondary-button" type="submit" disabled={addingRemote}>{addingRemote ? "Adding..." : "Add project"}</button></div>
 </form></dialog>}</div>;
