@@ -678,6 +678,59 @@ fn plain_error_response(status: StatusCode, message: &str) -> Response {
     (status, format!("{message}\n")).into_response()
 }
 
+// The only origins whose preflights the endpoint answers: the bundled
+// webview's engine origins. Every webview fetch carries an Authorization
+// header, so each one is preflighted, and without an answered preflight the
+// engine refuses to send the request at all. Agents and other API clients
+// send no Origin header and keep the header-free responses they see today.
+const WEBVIEW_ORIGINS: [&str; 3] =
+    ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"];
+
+// The reflected origin a response may carry for this request, or None when
+// the caller is not an allow-listed webview on a webview-consumed face: the
+// agent face and origin-less callers never get CORS headers.
+fn webview_cors_origin<'a>(path: &str, origin: Option<&'a str>) -> Option<&'a str> {
+    let origin = origin?;
+    if !WEBVIEW_ORIGINS.contains(&origin) {
+        return None;
+    }
+    if path == "/events" || path.starts_with("/api/") {
+        return Some(origin);
+    }
+    None
+}
+
+// The preflight answer for a webview-consumed face: an empty 200 with the
+// reflected origin, the one method the face needs, and the headers the
+// webview's fetches send. The token stays the authentication boundary; this
+// only lets the browser engine deliver the request at all.
+fn preflight_response(origin: &str, face_method: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin)
+        .header(header::ACCESS_CONTROL_ALLOW_METHODS, face_method)
+        .header(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            "Authorization, Content-Type",
+        )
+        .header(header::ACCESS_CONTROL_MAX_AGE, "600")
+        .body(axum::body::Body::empty())
+        .expect("static preflight response is representable")
+}
+
+// Attaches the reflected origin to a webview-consumed face's response: the
+// engine checks the actual response too, not just the preflight.
+fn with_webview_cors(response: Response, origin: Option<&str>) -> Response {
+    let Some(origin) = origin else { return response };
+    let (mut parts, body) = response.into_parts();
+    parts.headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        header::HeaderValue::from_str(origin)
+            .expect("an allow-listed origin is a valid header value"),
+    );
+    Response::from_parts(parts, body)
+}
+
 // Reads the socket until a complete HTTP/1.1 head is buffered; returns the
 // head's length inside the buffer. The parse is httparse, hyper's own
 // request parser: malformed heads and oversized heads are connection errors.
@@ -731,6 +784,7 @@ struct RequestHead {
     method: String,
     path: String,
     content_length: usize,
+    origin: Option<String>,
 }
 
 // Reads the socket until a complete HTTP/1.1 head is buffered and parsed;
@@ -757,7 +811,13 @@ async fn read_request_head_full(
         .and_then(|header| std::str::from_utf8(header.value).ok())
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(0);
-    Ok(RequestHead { buffer, head_len, method, path, content_length })
+    let origin = parsed
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("origin"))
+        .and_then(|header| std::str::from_utf8(header.value).ok())
+        .map(str::to_string);
+    Ok(RequestHead { buffer, head_len, method, path, content_length, origin })
 }
 
 // One connection: the head read is bounded by the stall limit for every
@@ -772,11 +832,24 @@ async fn serve_connection(mut stream: tokio::net::TcpStream, state: TransportSta
             _ => return,
         };
     let path = head.path.split('?').next().unwrap_or("/").to_string();
+    let cors_origin = webview_cors_origin(&path, head.origin.as_deref());
     if head.method == "GET" && path == "/events" && state.events.is_some() {
-        stream_events(&mut stream, &state, &head.buffer, head.head_len).await;
+        stream_events(&mut stream, &state, &head.buffer, head.head_len, cors_origin).await;
         return;
     }
     let handled = async {
+        if head.method == "OPTIONS" {
+            // A preflight for a webview-consumed face is answered here so
+            // the engine sends the real request; every other OPTIONS keeps
+            // the plain answers below.
+            if let Some(origin) = cors_origin {
+                let face_method = if path == "/events" { "GET" } else { "POST" };
+                write_response(&mut stream, preflight_response(origin, face_method))
+                    .await
+                    .map_err(|_| "write failed")?;
+                return Ok(());
+            }
+        }
         if head.method != "POST" {
             let response = if path == "/" || path == "/mcp" || path.starts_with("/api/") {
                 plain_error_response(
@@ -801,11 +874,14 @@ async fn serve_connection(mut stream: tokio::net::TcpStream, state: TransportSta
             return Ok(());
         }
         if head.content_length > TRANSPORT_BODY_GUARD_BYTES {
-            let response = rpc_error(
-                &Value::Null,
-                StatusCode::PAYLOAD_TOO_LARGE,
-                REQUEST_TOO_LARGE,
-                format!("The request body exceeds the {TRANSPORT_BODY_GUARD_BYTES} byte guard."),
+            let response = with_webview_cors(
+                rpc_error(
+                    &Value::Null,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    REQUEST_TOO_LARGE,
+                    format!("The request body exceeds the {TRANSPORT_BODY_GUARD_BYTES} byte guard."),
+                ),
+                cors_origin,
             );
             write_response(&mut stream, response).await.map_err(|_| "write failed")?;
             return Ok(());
@@ -828,7 +904,9 @@ async fn serve_connection(mut stream: tokio::net::TcpStream, state: TransportSta
             .body(axum::body::Body::from(body))
             .map_err(|_| "unrepresentable request")?;
         let response = handle(State(state), request).await;
-        write_response(&mut stream, response).await.map_err(|_| "write failed")
+        write_response(&mut stream, with_webview_cors(response, cors_origin))
+            .await
+            .map_err(|_| "write failed")
     };
     let _ = tokio::time::timeout(CONNECTION_STALL_LIMIT, handled).await;
 }
@@ -859,6 +937,7 @@ async fn stream_events(
     state: &TransportState,
     buffer: &[u8],
     head_len: usize,
+    cors_origin: Option<&str>,
 ) {
     use tokio::io::AsyncWriteExt;
     if sse_identity(state, buffer, head_len).await.is_none() {
@@ -869,7 +948,7 @@ async fn stream_events(
     }
     let Some(events) = &state.events else { return };
     let mut receiver = events.subscribe();
-    if write_event_stream_head(stream).await.is_err() {
+    if write_event_stream_head(stream, cors_origin).await.is_err() {
         return;
     }
     let mut last_write = tokio::time::Instant::now();
@@ -902,11 +981,19 @@ async fn stream_events(
 }
 
 // The SSE head is written once; the connection stays open while the
-// subscriber keeps up.
-async fn write_event_stream_head(stream: &mut tokio::net::TcpStream) -> Result<(), ()> {
+// subscriber keeps up. A webview's stream carries the reflected origin so
+// the engine hands the stream to the fetch reader; origin-less callers keep
+// the bare SSE head.
+async fn write_event_stream_head(
+    stream: &mut tokio::net::TcpStream,
+    cors_origin: Option<&str>,
+) -> Result<(), ()> {
     use tokio::io::AsyncWriteExt;
+    let cors = cors_origin
+        .map(|origin| format!("access-control-allow-origin: {origin}\r\n"))
+        .unwrap_or_default();
     let head = format!(
-        "{}content-type: text/event-stream\r\n\r\n",
+        "{}{cors}content-type: text/event-stream\r\n\r\n",
         status_line(StatusCode::OK)
     );
     stream.write_all(head.as_bytes()).await.map_err(|_| ())?;
@@ -1832,14 +1919,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Sends one POST over a real loopback socket and returns the raw
+    // Sends one raw request over a real loopback socket and returns the raw
     // response; the blocking std client runs on its own thread so no async
     // runtime is involved.
-    fn send_over_socket(port: u16, bearer: &str, body: String) -> std::thread::JoinHandle<String> {
-        let request = format!(
-            "POST / HTTP/1.1\r\nhost: 127.0.0.1\r\nauthorization: Bearer {bearer}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len(),
-        );
+    fn send_raw_over_socket(port: u16, request: String) -> std::thread::JoinHandle<String> {
         std::thread::spawn(move || {
             use std::io::{Read, Write};
             use std::net::TcpStream;
@@ -1860,6 +1943,17 @@ mod tests {
                 .expect("the endpoint did not answer within 10s");
             String::from_utf8(response).unwrap()
         })
+    }
+
+    // Sends one POST over a real loopback socket and returns the raw
+    // response; the blocking std client runs on its own thread so no async
+    // runtime is involved.
+    fn send_over_socket(port: u16, bearer: &str, body: String) -> std::thread::JoinHandle<String> {
+        let request = format!(
+            "POST / HTTP/1.1\r\nhost: 127.0.0.1\r\nauthorization: Bearer {bearer}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        send_raw_over_socket(port, request)
     }
 
     // End-to-end over a real loopback socket: start() binds, provisions the
@@ -1952,14 +2046,18 @@ mod tests {
     fn read_events_stream(
         port: u16,
         bearer: Option<&str>,
+        origin: Option<&str>,
         marker: &'static str,
         head_landed: std::sync::mpsc::Sender<()>,
     ) -> std::thread::JoinHandle<String> {
         let authorization = bearer
             .map(|secret| format!("authorization: Bearer {secret}\r\n"))
             .unwrap_or_default();
+        let origin_header = origin
+            .map(|value| format!("origin: {value}\r\n"))
+            .unwrap_or_default();
         let request = format!(
-            "GET /events HTTP/1.1\r\nhost: 127.0.0.1\r\naccept: text/event-stream\r\n{authorization}\r\n"
+            "GET /events HTTP/1.1\r\nhost: 127.0.0.1\r\naccept: text/event-stream\r\n{authorization}{origin_header}\r\n"
         );
         std::thread::spawn(move || {
             use std::io::{Read, Write};
@@ -2038,6 +2136,7 @@ mod tests {
         let streamed = read_events_stream(
             discovery.port,
             Some(&discovery.token),
+            None,
             "event: submission-received",
             head_landed,
         );
@@ -2093,14 +2192,14 @@ mod tests {
         // The body marker keeps the reader waiting until the refusal's
         // body has landed, not just its head.
         let (missing_head, _) = std::sync::mpsc::channel();
-        let missing = read_events_stream(discovery.port, None, "-32001", missing_head)
+        let missing = read_events_stream(discovery.port, None, None, "-32001", missing_head)
             .join()
             .unwrap();
         assert!(missing.contains("HTTP/1.1 401"), "unexpected response: {missing}");
         assert!(missing.contains("-32001"), "unexpected refusal: {missing}");
 
         let (wrong_head, _) = std::sync::mpsc::channel();
-        let wrong = read_events_stream(discovery.port, Some("wrong-token"), "-32001", wrong_head)
+        let wrong = read_events_stream(discovery.port, Some("wrong-token"), None, "-32001", wrong_head)
             .join()
             .unwrap();
         assert!(wrong.contains("HTTP/1.1 401"), "unexpected response: {wrong}");
@@ -2109,6 +2208,7 @@ mod tests {
         let opened = read_events_stream(
             discovery.port,
             Some(&discovery.token),
+            None,
             "content-type: text/event-stream",
             opened_head,
         )
@@ -2152,6 +2252,7 @@ mod tests {
         let opened = read_events_stream(
             port,
             Some(&admin_secret),
+            None,
             "content-type: text/event-stream",
             head_landed,
         )
@@ -2172,6 +2273,175 @@ mod tests {
         let discovery: EndpointDiscovery =
             serde_json::from_slice(&std::fs::read(endpoint_config_path(dir)).unwrap()).unwrap();
         discovery.port
+    }
+
+    // The webview's CORS face: an allow-listed origin's preflight for a
+    // consumed face is answered with the reflected origin and the face's
+    // method, the actual command-API response carries the origin too, and
+    // every other caller (foreign origin, no origin, the agent face) keeps
+    // today's header-free answers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn webview_preflights_are_answered_and_other_callers_keep_the_plain_answers() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let dir = crate::testutil::test_path("transport-cors");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, _receiver) = tokio::sync::broadcast::channel::<PushEvent>(16);
+        let handle = start_with_events(
+            pool.clone(),
+            test_deps(&dir, Arc::new(|_| {}), noop_refreshes(), noop_comment_changes()),
+            test_config(0),
+            McpStatusHandle::for_config(&test_config(0)),
+            Some(events),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let discovery: EndpointDiscovery =
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(&dir)).unwrap()).unwrap();
+        let admin = crate::identity::create_first_admin_in_pool(&pool, "ops").await.unwrap();
+
+        let preflight = |origin: Option<&str>, path: &str, method: &str| {
+            let origin_header = origin
+                .map(|value| format!("origin: {value}\r\n"))
+                .unwrap_or_default();
+            send_raw_over_socket(
+                discovery.port,
+                format!(
+                    "OPTIONS {path} HTTP/1.1\r\nhost: 127.0.0.1\r\n{origin_header}access-control-request-method: {method}\r\naccess-control-request-headers: authorization, content-type\r\nconnection: close\r\n\r\n"
+                ),
+            )
+            .join()
+            .unwrap()
+        };
+
+        let answered = preflight(Some("tauri://localhost"), "/api/list_repos", "POST");
+        assert!(answered.starts_with("HTTP/1.1 200 OK"), "unexpected response: {answered}");
+        assert!(
+            answered.contains("access-control-allow-origin: tauri://localhost"),
+            "unexpected preflight: {answered}"
+        );
+        assert!(
+            answered.contains("access-control-allow-methods: POST"),
+            "unexpected preflight: {answered}"
+        );
+        assert!(
+            answered.contains("access-control-allow-headers: Authorization, Content-Type"),
+            "unexpected preflight: {answered}"
+        );
+        assert!(answered.contains("access-control-max-age: 600"), "unexpected preflight: {answered}");
+        assert_eq!(answered.split("\r\n\r\n").nth(1), Some(""));
+
+        let events_preflight = preflight(Some("http://tauri.localhost"), "/events", "GET");
+        assert!(events_preflight.starts_with("HTTP/1.1 200 OK"), "unexpected response: {events_preflight}");
+        assert!(
+            events_preflight.contains("access-control-allow-origin: http://tauri.localhost"),
+            "unexpected preflight: {events_preflight}"
+        );
+        assert!(
+            events_preflight.contains("access-control-allow-methods: GET"),
+            "unexpected preflight: {events_preflight}"
+        );
+
+        let foreign = preflight(Some("https://evil.example"), "/api/list_repos", "POST");
+        assert!(foreign.starts_with("HTTP/1.1 405"), "unexpected response: {foreign}");
+        assert!(!foreign.contains("access-control"), "unexpected CORS headers: {foreign}");
+
+        let originless = preflight(None, "/api/list_repos", "POST");
+        assert!(originless.starts_with("HTTP/1.1 405"), "unexpected response: {originless}");
+        assert!(!originless.contains("access-control"), "unexpected CORS headers: {originless}");
+
+        // The actual command-API response carries the reflected origin so
+        // the engine hands the body to the reader.
+        let request = format!(
+            "POST /api/list_repos HTTP/1.1\r\nhost: 127.0.0.1\r\nauthorization: Bearer {}\r\norigin: tauri://localhost\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}",
+            admin.secret,
+        );
+        let served = send_raw_over_socket(discovery.port, request).join().unwrap();
+        assert!(served.starts_with("HTTP/1.1 200 OK"), "unexpected response: {served}");
+        assert!(
+            served.contains("access-control-allow-origin: tauri://localhost"),
+            "unexpected response: {served}"
+        );
+
+        // The agent face never gains CORS headers, webview origin included.
+        let body = rpc_body(json!(1), "post_review", review_params("/demo"));
+        let agent = send_raw_over_socket(
+            discovery.port,
+            format!(
+                "POST / HTTP/1.1\r\nhost: 127.0.0.1\r\nauthorization: Bearer {}\r\norigin: tauri://localhost\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                discovery.token,
+                body.len(),
+            ),
+        )
+        .join()
+        .unwrap();
+        assert!(agent.starts_with("HTTP/1.1 200 OK"), "unexpected response: {agent}");
+        assert!(!agent.contains("access-control"), "unexpected CORS headers: {agent}");
+        handle.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The SSE head carries the reflected origin only for an allow-listed
+    // webview; a foreign origin keeps the bare head the endpoint has always
+    // written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sse_head_carries_the_origin_only_for_webview_callers() {
+        let pool = test_pool().await;
+        let dir = crate::testutil::test_path("transport-sse-cors");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, _receiver) = tokio::sync::broadcast::channel::<PushEvent>(16);
+        let handle = start_with_events(
+            pool,
+            test_deps(&dir, Arc::new(|_| {}), noop_refreshes(), noop_comment_changes()),
+            test_config(0),
+            McpStatusHandle::for_config(&test_config(0)),
+            Some(events),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let discovery: EndpointDiscovery =
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(&dir)).unwrap()).unwrap();
+
+        let (webview_head, _) = std::sync::mpsc::channel();
+        let webview = read_events_stream(
+            discovery.port,
+            Some(&discovery.token),
+            Some("https://tauri.localhost"),
+            "content-type: text/event-stream",
+            webview_head,
+        )
+        .join()
+        .unwrap();
+        assert!(webview.contains("HTTP/1.1 200 OK"), "unexpected response: {webview}");
+        assert!(
+            webview.contains("access-control-allow-origin: https://tauri.localhost"),
+            "unexpected stream head: {webview}"
+        );
+        assert!(
+            webview.contains("content-type: text/event-stream"),
+            "unexpected stream head: {webview}"
+        );
+
+        let (bare_head, _) = std::sync::mpsc::channel();
+        let bare = read_events_stream(
+            discovery.port,
+            Some(&discovery.token),
+            Some("https://evil.example"),
+            "content-type: text/event-stream",
+            bare_head,
+        )
+        .join()
+        .unwrap();
+        assert!(bare.contains("HTTP/1.1 200 OK"), "unexpected response: {bare}");
+        assert!(
+            bare.contains("content-type: text/event-stream"),
+            "unexpected stream head: {bare}"
+        );
+        assert!(!bare.contains("access-control"), "unexpected CORS headers: {bare}");
+        handle.stop();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // A restart stops the idle listener without any inbound connection,

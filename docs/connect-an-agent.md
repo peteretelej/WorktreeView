@@ -70,6 +70,23 @@ token is the authentication boundary; anything holding a token reads
 reviews and comments as that agent, so issue one token per agent and
 delete the tokens of machines that leave.
 
+## Agents on a WorktreeView server
+
+The headless server ([server.md](server.md)) serves the same two faces
+on its own listener, so an agent running on the server host connects
+exactly as above, reading the server home's `config.json` instead of the
+desktop app's: it carries the same `{port, token}`, is rewritten at
+every server start, and lives under `~/.worktreeview-server/` by default
+(relocated with `--home <dir>` or `WORKTREEVIEW_SERVER_HOME`). The
+contract is unchanged and the address stays a localhost default: same
+MCP and JSON-RPC faces, same tools and error semantics, same
+`Authorization: Bearer` header. Manual configuration uses the server's
+address with an agent token an admin minted for it (in the desktop
+app's Servers management section, exposed to the server's admin routes);
+the server's built-in default token works the same way the desktop's
+does while it is live. Comments and submissions attribute to the
+token's agent name exactly as they do on the desktop.
+
 ## The agent skill
 
 The repo ships an installable skill that teaches agents all of the above

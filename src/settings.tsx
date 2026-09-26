@@ -3,12 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { ArrowLeft } from "lucide-react";
 import { ZOOM_LEVELS, snapZoom } from "./zoom.ts";
-import { connectionLabel, probeConnection, type ServerConnectionRow } from "./remote.ts";
+import { connectionLabel, call, probeConnection, type RemoteSource, type ServerConnectionRow } from "./remote.ts";
 
 export type Theme = "system" | "light" | "dark";
 export type DiffLayout = "unified" | "split";
 export type ChangedFilesView = "tree" | "list" | "details";
 export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; syntax_visible: boolean; inline_comments_visible: boolean; files_pane_visible: boolean; comments_pane_visible: boolean; comments_pane_wide: boolean; changed_files_view: ChangedFilesView; zoom: number; mcp_enabled: boolean; notifications_enabled: boolean; mcp_listen_address: string; mcp_port: number; activity_seen_id: number };
+
+// Mirrors the server's identity rows; the secret exists only in the
+// create response and is shown once.
+export type ServerUser = { id: number; name: string; is_admin: boolean; created_at: number };
+export type CreatedServerUser = { user: ServerUser; secret: string };
 
 export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false, syntax_visible: true, inline_comments_visible: true, files_pane_visible: true, comments_pane_visible: true, comments_pane_wide: false, changed_files_view: "tree", zoom: 1, mcp_enabled: true, notifications_enabled: true, mcp_listen_address: "127.0.0.1", mcp_port: 9888, activity_seen_id: 0 };
 
@@ -241,7 +246,8 @@ function errorMessageOf(error: unknown) {
 // Saving probes the server first (one authenticated list_repos through the
 // remote seam) so a wrong URL or token never lands as a row; deleting a
 // connection cascades this app's references to its projects and never
-// touches the server's own store.
+// touches the server's own store. Under the list, one management section
+// per connection drives the server's admin routes through the remote seam.
 function ServerConnectionsSection({ onChanged }: { onChanged: () => void }) {
   const [connections, setConnections] = useState<ServerConnectionRow[]>([]);
   const [url, setUrl] = useState("");
@@ -306,7 +312,8 @@ function ServerConnectionsSection({ onChanged }: { onChanged: () => void }) {
     }
   }
 
-  return <section id="settings-servers" className="settings-section" aria-labelledby="settings-servers-heading">
+  return <>
+    <section id="settings-servers" className="settings-section" aria-labelledby="settings-servers-heading">
     <h2 id="settings-servers-heading">Servers</h2>
     <div className="settings-row settings-row-flush">
       <div className="settings-row-copy"><strong>{editingId === null ? "Connect to a server" : "Edit connection"}</strong><span>WorktreeView server URL and your user token. The token is stored in this app's local store and sent as a bearer header on every server call.</span></div>
@@ -340,6 +347,149 @@ function ServerConnectionsSection({ onChanged }: { onChanged: () => void }) {
       </div>)}
     </div>}
     {connections.length > 0 && <p className="request-form-hint">Deleting removes the connection and this app's references to its projects. The server's own store is never touched.</p>}
+    {error && <div className="settings-inline-error" role="status" aria-live="polite">{error}</div>}
+    </section>
+    {connections.map((connection) => <ServerManagementSection key={connection.id} connection={connection} />)}
+  </>;
+}
+
+// One connection's server management: member accounts and agent tokens
+// over the server's admin routes through the remote seam. The server
+// enforces the admin flag and its refusals (non-admin access, the
+// last-admin delete) surface in the section's error line; created secrets
+// are shown once and stored only as a hash server-side.
+function ServerManagementSection({ connection }: { connection: ServerConnectionRow }) {
+  const source: RemoteSource = { kind: "server", connectionId: connection.id, url: connection.url, token: connection.token };
+  const label = connectionLabel(connection);
+  const endpointBase = `${connection.url.replace(/\/+$/, "")}`;
+  const [users, setUsers] = useState<ServerUser[]>([]);
+  const [tokens, setTokens] = useState<AgentToken[]>([]);
+  const [revealedUser, setRevealedUser] = useState<CreatedServerUser | null>(null);
+  const [revealedToken, setRevealedToken] = useState<CreatedAgentToken | null>(null);
+  const [newUserName, setNewUserName] = useState("");
+  const [newTokenName, setNewTokenName] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [armed, setArmed] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    void (async () => {
+      try {
+        const [loadedUsers, loadedTokens] = await Promise.all([
+          call<ServerUser[]>("list_users", undefined, source),
+          call<AgentToken[]>("list_agent_tokens", undefined, source),
+        ]);
+        if (!mounted) return;
+        setUsers(loadedUsers);
+        setTokens(loadedTokens);
+      } catch (caught) {
+        if (mounted) setError(errorMessageOf(caught));
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  async function reload() {
+    const [loadedUsers, loadedTokens] = await Promise.all([
+      call<ServerUser[]>("list_users", undefined, source),
+      call<AgentToken[]>("list_agent_tokens", undefined, source),
+    ]);
+    setUsers(loadedUsers);
+    setTokens(loadedTokens);
+  }
+
+  async function run(action: () => Promise<void>) {
+    setError("");
+    setBusy(true);
+    try {
+      await action();
+    } catch (caught) {
+      setError(errorMessageOf(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // The delete buttons arm with a confirming second click; refusals land
+  // in the section's error line.
+  function armThen(key: string, action: () => Promise<void>) {
+    if (armed !== key) {
+      setArmed(key);
+      window.setTimeout(() => setArmed((current) => (current === key ? null : current)), 4000);
+      return;
+    }
+    setArmed(null);
+    void run(action);
+  }
+
+  async function createUser() {
+    const created = await call<CreatedServerUser>("create_user", { name: newUserName.trim() }, source);
+    setRevealedUser(created);
+    setNewUserName("");
+    await reload();
+  }
+
+  async function createToken() {
+    const created = await call<CreatedAgentToken>("create_agent_token", { name: newTokenName.trim() }, source);
+    setRevealedToken(created);
+    setNewTokenName("");
+    await reload();
+  }
+
+  return <section className="settings-section" aria-labelledby={`settings-server-${connection.id}-heading`}>
+    <h2 id={`settings-server-${connection.id}-heading`}>Manage {label}</h2>
+    <div className="settings-row settings-row-flush">
+      <div className="settings-row-copy"><strong>Create a user</strong><span>Names the member and mints their first bearer token, shown once.</span></div>
+      <span className="settings-row-actions">
+        <input className="settings-select settings-input-name" type="text" spellCheck={false} aria-label={`User name on ${label}`} placeholder="name" value={newUserName} onChange={(event) => setNewUserName(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter" && newUserName.trim()) void run(createUser); }} />
+        <button className="settings-select settings-button" type="button" disabled={busy || !newUserName.trim()} onClick={() => void run(createUser)}>Create user</button>
+      </span>
+    </div>
+    {revealedUser && <div className="settings-reveal" role="status">
+      <div className="settings-reveal-head"><strong>{revealedUser.user.name}</strong><CopyButton value={revealedUser.secret} label="Copy token" /></div>
+      <code>{revealedUser.secret}</code>
+      <span>Shown once; the server stores only its hash. It is the user token that member enters under Servers.</span>
+    </div>}
+    {users.length > 0 && <div className="settings-token-list">
+      {users.map((user) => <div className="settings-token" key={user.id}>
+        <div className="settings-token-copy">
+          <strong>{user.name}{user.is_admin && <span className="settings-badge default">admin</span>}</strong>
+          <span>Created {formatDate(user.created_at)}</span>
+        </div>
+        <button className={armed === `user-${user.id}` ? "settings-select settings-button settings-button-danger" : "settings-select settings-button"} type="button" onClick={() => armThen(`user-${user.id}`, async () => {
+          await call("delete_user", { id: user.id }, source);
+          if (revealedUser?.user.id === user.id) setRevealedUser(null);
+          await reload();
+        })}>{armed === `user-${user.id}` ? "Confirm delete" : "Delete"}</button>
+      </div>)}
+    </div>}
+    <div className="settings-row settings-row-flush">
+      <div className="settings-row-copy"><strong>Mint an agent token</strong><span>Name the agent and paste the secret into its config on the server host, once.</span></div>
+      <span className="settings-row-actions">
+        <input className="settings-select settings-input-name" type="text" spellCheck={false} aria-label={`Agent token name on ${label}`} placeholder="codex" value={newTokenName} onChange={(event) => setNewTokenName(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter" && newTokenName.trim()) void run(createToken); }} />
+        <button className="settings-select settings-button" type="button" disabled={busy || !newTokenName.trim()} onClick={() => void run(createToken)}>Create token</button>
+      </span>
+    </div>
+    {revealedToken && <div className="settings-reveal" role="status">
+      <div className="settings-reveal-head"><strong>{revealedToken.token.name}</strong><CopyButton value={revealedToken.secret} label="Copy secret" /></div>
+      <code>{revealedToken.secret}</code>
+      <div className="settings-reveal-head"><code>Authorization: Bearer &lt;secret&gt; on POST {endpointBase}/mcp</code><CopyButton value={`Authorization: Bearer ${revealedToken.secret}`} label="Copy header" /></div>
+      <span>Shown once; it is stored only as a hash and cannot be displayed again.</span>
+    </div>}
+    {tokens.length > 0 && <div className="settings-token-list">
+      {tokens.map((token) => <div className="settings-token" key={token.id}>
+        <div className="settings-token-copy">
+          <strong>{token.name}{token.is_default && <span className="settings-badge default">built-in</span>}</strong>
+          <span>{token.is_default ? "Renewed at every server start; discovery clients re-read it automatically." : `Created ${formatDate(token.created_at)}${token.last_used_at ? ` · last used ${formatDate(token.last_used_at)}` : " · never used"}`}</span>
+        </div>
+        {!token.is_default && <button className={armed === `token-${token.id}` ? "settings-select settings-button settings-button-danger" : "settings-select settings-button"} type="button" onClick={() => armThen(`token-${token.id}`, async () => {
+          await call("delete_agent_token", { id: token.id }, source);
+          if (revealedToken?.token.id === token.id) setRevealedToken(null);
+          await reload();
+        })}>{armed === `token-${token.id}` ? "Confirm delete" : "Delete"}</button>}
+      </div>)}
+    </div>}
     {error && <div className="settings-inline-error" role="status" aria-live="polite">{error}</div>}
   </section>;
 }

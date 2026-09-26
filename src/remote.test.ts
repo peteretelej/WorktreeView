@@ -9,6 +9,7 @@ import {
   mergePortalActivity,
   mergePortalReviews,
   normalizeServerUrl,
+  parseSseFrames,
   probeConnection,
   remoteErrorFrom,
   repoNameFromPath,
@@ -170,4 +171,34 @@ test("merged listings concatenate sources", () => {
     [{ repo_path: "/b", last_activity_at: 9 }],
   ] as unknown as Parameters<typeof mergePortalReviews>[0];
   assert.deepEqual(mergePortalReviews(rows).map((row) => row.repo_path), ["/b", "/a"]);
+});
+
+// The stream chunks arrive at TCP whimsy, so the parser must carry partial
+// frames across chunks and surface only complete ones.
+test("parseSseFrames splits frames, skips keepalives, and holds partials", () => {
+  const parsed = parseSseFrames(
+    ': keepalive\n\nevent: comment-changed\ndata: {"repo_path":"/srv/demo","action":"created"}\n\nevent: project-re',
+  );
+  assert.deepEqual(parsed.frames, [{ event: "comment-changed", data: { repo_path: "/srv/demo", action: "created" } }]);
+  assert.equal(parsed.rest, "event: project-re");
+  // The partial frame completes on the next chunk.
+  const next = parseSseFrames(`${parsed.rest}freshed\ndata: {"repo_path":"/srv/demo"}\n\n`);
+  assert.deepEqual(next.frames, [{ event: "project-refreshed", data: { repo_path: "/srv/demo" } }]);
+  assert.equal(next.rest, "");
+});
+
+test("parseSseFrames tolerates CRLF, joins data lines, and drops malformed frames", () => {
+  const parsed = parseSseFrames(
+    'event: submission-received\r\ndata: {"agent_name":"ops"}\r\n\r\n'
+      // Joined data lines reassemble whitespace between JSON tokens.
+      + "event: split\ndata: {\"repo_path\":\ndata: \"/srv/demo\"}\n\n"
+      + "event: broken\ndata: not json\n\n"
+      + "event: after\ndata: {}\n\n",
+  );
+  assert.deepEqual(parsed.frames, [
+    { event: "submission-received", data: { agent_name: "ops" } },
+    { event: "split", data: { repo_path: "/srv/demo" } },
+    { event: "after", data: {} },
+  ]);
+  assert.equal(parsed.rest, "");
 });

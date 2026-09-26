@@ -8,7 +8,7 @@ import { ChevronsLeft, Clock, Download, FileCheck, FolderGit2, MessageSquare, Ch
 import { createNavigationHistory, DEFAULT_PORTAL_FILTERS, sameReviewTarget, type AppLocation, type BranchInventory, type BranchSummary, type ChangedFile, type CommitInfo, type GoneSurface, type RecordedKey, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type ReviewsStateFilter, type SurfaceListing, type ThreadsStateFilter, type ThreadsVoiceFilter, type Worktree } from "./navigation";
 import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
 import { arrivalChangeLabel, arrivalProjectLabel, arrivalSentenceBody, olderArrivalsSuffix } from "./arrivals";
-import { call, connectionLabel, connectionSources, mergeAttention, mergePortalActivity, mergePortalReviews, mergePortalThreadGroups, mergeSearchMatches, repoNameFromPath, resolveSource, sourceForConnection, type RemoteSource, type ServerConnectionRow, type SourceResolver } from "./remote";
+import { call, connectEventStream, connectionLabel, connectionSources, mergeAttention, mergePortalActivity, mergePortalReviews, mergePortalThreadGroups, mergeSearchMatches, repoNameFromPath, resolveSource, sourceForConnection, type RemoteSource, type ServerConnectionRow, type SourceResolver } from "./remote";
 import { SettingsPage, addServerProject, applyTheme, defaultSettings, getSettings, listServerConnections, persistSettings, removeServerProject, setServerProjectPinned, type ChangedFilesView, type Settings } from "./settings";
 import { DEFAULT_ZOOM, snapZoom, stepZoom, zoomShortcut } from "./zoom";
 import { imageMimeForPath } from "./stream";
@@ -135,8 +135,11 @@ function App() {
   const [arrivals, setArrivals] = useState<ArrivalEntry[]>([]);
   // Bumped when a submission arrives for the review identity the user is
   // reading: the open review's comment stream and submissions strip reload
-  // from it without navigating away and back.
+  // from it without navigating away and back. The request twin does the
+  // same for the header's request strip when a server streams a
+  // review-request change for the open review.
   const [reviewRefreshTick, setReviewRefreshTick] = useState(0);
+  const [requestRefreshTick, setRequestRefreshTick] = useState(0);
   // When each project's local overview data was last re-read, in epoch
   // milliseconds: the header's freshness stamp reads from this.
   const [refreshedAt, setRefreshedAt] = useState<Record<string, number>>({});
@@ -193,8 +196,7 @@ function App() {
   const commentIdentity: ReviewIdentity | null = reviewLocation?.identity ?? (historyLocation?.selectedCommit ? { repoPath: historyLocation.repoPath, base: historyLocation.selectedCommit.parents[0] ?? "empty-tree", target: commitTargetOf(historyLocation.selectedCommit), scope: "committed", reversed: false } : null);
   const commentPatchLines = useMemo(() => (patch && !patch.binary ? parseHunks(patch.text).flatMap((hunk) => hunk.lines) : []), [patch]);
   const commentFile = selectedFile && patch && !patch.binary ? { path: selectedFile.path, lines: commentPatchLines } : null;
-  const commentsReadOnly = commentIdentity ? resolveRepoSource(commentIdentity.repoPath).kind === "server" : false;
-  const comments = useReviewComments(commentIdentity, reviewIndex, commentFile, reversed, commentsReadOnly, resolveRepoSource);
+  const comments = useReviewComments(commentIdentity, reviewIndex, commentFile, reversed, resolveRepoSource);
   // The event listeners read the live comment layer and open repo path
   // through refs, so they subscribe once and never hold stale closures.
   const commentsRef = useRef(comments); const activeRepoPathRef = useRef(activeRepoPath); const reposRef = useRef(repos); const settingsRef = useRef(settings);
@@ -531,6 +533,56 @@ function App() {
     });
     return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
   }, []);
+  // Server-backed projects live-update through each connection's SSE
+  // stream: one fetch-stream reader per connection (bearer header,
+  // backoff reconnect per docs/server.md) feeding the same four handler
+  // paths the local Tauri events drive, scoped to the connection's
+  // projects. Saving or removing a connection tears its stream down with
+  // the effect; a failed establishment surfaces once per failed stretch.
+  useEffect(() => {
+    const closes = connections.map((connection) => connectEventStream(connection.url, connection.token, {
+      onEvent: (frame) => {
+        const projects = connectionsRef.current.find((entry) => entry.id === connection.id)?.projects ?? [];
+        const known = (repoPath: string) => projects.some((project) => project.repo_path === repoPath);
+        const openKeyMatches = (repoPath: string, baseSha: string, targetKey: string, targetKind: string) => {
+          const key = commentsRef.current.key;
+          return key !== null && key.repoPath === repoPath && key.baseSha === baseSha && key.targetKey === targetKey && key.targetKind === targetKind;
+        };
+        switch (frame.event) {
+          case "submission-received": {
+            const arrival = frame.data as SubmissionArrival;
+            if (!known(arrival.repo_path)) return;
+            void arrive({ moment: "delivery", repo_path: arrival.repo_path, base_sha: arrival.base_sha, target_key: arrival.target_key, target_kind: arrival.target_kind, actor: arrival.agent_name });
+            void refreshAttention();
+            if (openKeyMatches(arrival.repo_path, arrival.base_sha, arrival.target_key, arrival.target_kind)) setReviewRefreshTick((tick) => tick + 1);
+            return;
+          }
+          case "comment-changed": {
+            const change = frame.data as CommentChange;
+            if (openKeyMatches(change.repo_path, change.base_sha, change.target_key, change.target_kind)) void commentsRef.current.refresh();
+            return;
+          }
+          case "project-refreshed": {
+            const refresh = frame.data as ProjectRefresh;
+            if (known(refresh.repo_path)) void relistRef.current(refresh.repo_path);
+            return;
+          }
+          case "review-request-changed": {
+            const change = frame.data as RequestChange;
+            void refreshAttention().then((queue) => {
+              if (change.event !== "review_announced" || !known(change.repo_path)) return;
+              const actor = attentionRows(queue).find((row) => row.request_id === change.request_id)?.requester ?? "An agent";
+              void arrive({ moment: "announce", repo_path: change.repo_path, base_sha: change.base_sha, target_key: change.target_key, target_kind: change.target_kind, actor });
+            });
+            if (openKeyMatches(change.repo_path, change.base_sha, change.target_key, change.target_kind)) setRequestRefreshTick((tick) => tick + 1);
+            return;
+          }
+        }
+      },
+      onUnestablished: (error) => setOperationError(`${connectionLabel(connection)}: ${errorMessage(error)}`),
+    }));
+    return () => closes.forEach((close) => close());
+  }, [connections]);
   useEffect(() => {
     if (reviewTarget || !historyLocation) return;
     const selected = historyLocation.selectedCommit;
@@ -1115,8 +1167,10 @@ function App() {
   // Activating an arrival opens the review the submission targeted: the
   // worktree row when it is loaded, otherwise the commit review re-derived
   // from the recorded identity (the base override pins the recorded base).
+  // The lookup reads every rendered project, so a server-backed arrival
+  // opens its review the same way a local one does.
   function openArrival(entry: ArrivalEntry) {
-    const repo = repos.find((item) => item.path === entry.repo_path);
+    const repo = allRepos.find((item) => item.path === entry.repo_path);
     if (!repo) return;
     setActiveRepoPath(repo.path);
     if (entry.target_kind === "head") {
@@ -1209,7 +1263,6 @@ function App() {
   const diffPrefs: DiffPreferences = { layout: settings.diff_layout, whitespaceVisible: settings.whitespace_visible, lineWrap: settings.line_wrap, syntaxVisible: settings.syntax_visible, inlineCommentsVisible: settings.inline_comments_visible };
   const reviewRemote = reviewLocation ? resolveRepoSource(reviewLocation.identity.repoPath).kind === "server" : false;
   const historyRemote = historyLocation ? resolveRepoSource(historyLocation.repoPath).kind === "server" : false;
-  const threadRemote = threadLocation ? sourceForConnection(threadLocation.connectionId, connections).kind === "server" : false;
   const diffToggles = <DiffToggles settings={settings} onChange={(next) => { void updateSettings(next); }} />;
   const goneReview = reviewLocation && reviewIndex !== null && reviewIndex.error && (reviewIndex.error_code === "unresolvable_ref" || reviewIndex.error_code === "git_execution") ? goneSurfaceMatching(reviewLocation.identity.repoPath, reviewLocation.identity.target) : null;
   // The partial-clone recovery offer: only when the live review failed for
@@ -1452,10 +1505,10 @@ function App() {
       : <AttentionQueueView queue={attention} endpointEnabled={settings.mcp_enabled} tab={portalLocation.filters.category} onTab={(category) => nav.push({ ...portalLocation, filters: { ...portalLocation.filters, category } })} onOpenRow={openAttentionRow} />}
       </div>
       : threadLocation ?
-      <PortalThreadDetail payload={portalThread} groups={portalThreads?.groups ?? []} repoNames={repoNames} onOpenThread={openPortalThread} onOpenReview={openThreadInReview} onChanged={() => setThreadsNonce((nonce) => nonce + 1)} readOnly={threadRemote} />
+      <PortalThreadDetail payload={portalThread} groups={portalThreads?.groups ?? []} repoNames={repoNames} onOpenThread={openPortalThread} onOpenReview={openThreadInReview} onChanged={() => setThreadsNonce((nonce) => nonce + 1)} source={threadLocation ? sourceForConnection(threadLocation.connectionId, connections) : undefined} />
       : reviewLocation ?
       goneReview && !comments.key ?
-      <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} repoName={reviewRepo?.name ?? reviewLocation.identity.repoPath} liveWorktree={reviewRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={reviewRepo?.worktrees} resolveSource={resolveRepoSource} readOnly={reviewRemote} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}focusedCommentId={reviewLocation.focusedCommentId}reviewRefreshTick={reviewRefreshTick}commentsWide={settings.comments_pane_wide}onCommentsWide={changeCommentsWide}onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file }); void selectFile(file, reviewLocation.identity); }} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[reviewLocation.identity.repoPath] ? reviewLocation.identity.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[reviewLocation.identity.repoPath])} onOsOpenFailure={() => setOsOpenUnavailable((current) => ({ ...current, [reviewLocation.identity.repoPath]: true }))} />
+      <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} repoName={reviewRepo?.name ?? reviewLocation.identity.repoPath} liveWorktree={reviewRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={reviewRepo?.worktrees} resolveSource={resolveRepoSource} readOnly={reviewRemote} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}focusedCommentId={reviewLocation.focusedCommentId}reviewRefreshTick={reviewRefreshTick}requestRefreshTick={requestRefreshTick}commentsWide={settings.comments_pane_wide}onCommentsWide={changeCommentsWide}onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file }); void selectFile(file, reviewLocation.identity); }} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[reviewLocation.identity.repoPath] ? reviewLocation.identity.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[reviewLocation.identity.repoPath])} onOsOpenFailure={() => setOsOpenUnavailable((current) => ({ ...current, [reviewLocation.identity.repoPath]: true }))} />
       : historyLocation ?
       <HistoryView readOnly={historyRemote} resolveSource={resolveRepoSource} history={history ?? { repoPath: historyLocation.repoPath, startPointLabel: historyLocation.startPointLabel, worktreePath: historyLocation.worktreePath ?? undefined, startRef: historyLocation.startRef ?? undefined, commits: [], hasMore: false, loading: true, error: "" }} historyRefs={historyRefs} index={reviewIndex} loading={reviewLoading} selectedCommit={historyLocation.selectedCommit} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { const selected = historyLocation.selectedCommit; if (selectedFile && selected) void ensureFileContent(selectedFile, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false }); }} onBack={goInbox} onBasePick={(value) => { const selected = historyLocation.selectedCommit; if (selected) void openReview(commitTargetOf(selected), historyLocation.repoPath, { base: value }, historyLocation.startRef ?? undefined); }} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}commentsWide={settings.comments_pane_wide}onCommentsWide={changeCommentsWide}onFile={(file) => { const selected = historyLocation.selectedCommit; if (selected) { nav.replace({ ...historyLocation, selectedFile: file }); void selectFile(file, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false, originRef: historyLocation.startRef ?? undefined }); } }} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[historyLocation.repoPath] ? historyLocation.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[historyLocation.repoPath])} onOsOpenFailure={() => setOsOpenUnavailable((current) => ({ ...current, [historyLocation.repoPath]: true }))} />
       : <section className="inbox-pane" aria-labelledby="inbox-heading" aria-busy={loading || activeRepoHydrating}>

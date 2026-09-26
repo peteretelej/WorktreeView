@@ -2,11 +2,11 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, ArrowLeftRight, ArrowRight, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, CircleDot, Code, Columns2, ExternalLink, FileDiff, FileWarning, FolderOpen, GitBranch, MessageSquare, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, Search, Space, UnfoldVertical, WrapText } from "lucide-react";
-import { call, type SourceResolver } from "./remote.ts";
+import { call, type RemoteSource, type SourceResolver } from "./remote.ts";
 import { sameReviewTarget, type ChangedFile, type CommitDetail, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type Worktree } from "./navigation";
 import { allTreeDirPaths, buildFileTree, filterChangedFiles, flattenFileTree, splitFilePath } from "./fileTree";
 import { workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
-import { listAgentTokens, type AgentToken, type ChangedFilesView, type DiffLayout, type Settings } from "./settings";
+import { type AgentToken, type ChangedFilesView, type DiffLayout, type Settings } from "./settings";
 import { changeRegions, deletionTicks, hunksWithExpandedGaps, parseHunkHeader, patchGaps, splitFileLines, type ChangeRegion, type DiffLine, type PatchGap } from "./diff";
 import { buildFileRows, buildPatchRows, imageMimeForPath, MAX_RENDERED_ROWS, type RowSpec } from "./stream";
 import { hunkSideSources, languageForPath, splitWhitespace, tokenizeHunk, type HighlightToken, type TokenLine } from "./highlight";
@@ -270,23 +270,28 @@ export function CommitRow({ title, children }: { title: string; children: React.
 
 // The review header's request surface for the open review identity:
 // status badges plus human verdict/withdraw/re-request actions and the
-// inline request form. Actions act on the local store and are always
-// available (no listener or token has to exist), matching the queue's
-// store-backed rendering; live updates ride the same
-// review-request-changed event the queue follows.
-function ReviewRequestBar({ identityKey, headSha }: { identityKey: ReviewKey; headSha: string }) {
+// inline request form. Actions run against the review's own backend (the
+// local store, or the server a server-backed project reads from) and are
+// always available (no listener or token has to exist), matching the
+// queue's store-backed rendering; live updates ride the same
+// review-request-changed event the queue follows, streamed from the
+// server for server-backed projects.
+function ReviewRequestBar({ identityKey, headSha, resolve, refreshTick }: { identityKey: ReviewKey; headSha: string; resolve: SourceResolver; refreshTick: number }) {
+  const source = resolve(identityKey.repoPath);
   const [rows, setRows] = useState<ReviewRequestRow[]>([]);
   const [formOpen, setFormOpen] = useState(false);
   const [error, setError] = useState("");
   const identityRef = useRef(identityKey);
-  useEffect(() => { identityRef.current = identityKey; });
+  const sourceRef = useRef(source);
+  const mountedTick = useRef(refreshTick);
+  useEffect(() => { identityRef.current = identityKey; sourceRef.current = source; });
   useEffect(() => {
     setError("");
     setFormOpen(false);
     let cancelled = false;
     void (async () => {
       try {
-        const listed = await invoke<ReviewRequestRow[]>("list_requests", { repoPath: identityKey.repoPath, baseSha: identityKey.baseSha, targetKey: identityKey.targetKey, targetKind: identityKey.targetKind });
+        const listed = await call<ReviewRequestRow[]>("list_requests", { repoPath: identityKey.repoPath, baseSha: identityKey.baseSha, targetKey: identityKey.targetKey, targetKind: identityKey.targetKind }, sourceRef.current);
         if (!cancelled) setRows(listed);
       } catch (caught) {
         if (!cancelled) setError(errorMessage(caught));
@@ -294,8 +299,9 @@ function ReviewRequestBar({ identityKey, headSha }: { identityKey: ReviewKey; he
     })();
     return () => { cancelled = true; };
   }, [identityKey]);
-  // One refetch per matching mutation (agent tool or human command);
-  // failures keep the last payload, stale rather than gone.
+  // One refetch per matching mutation (agent tool or human command) and
+  // per streamed server change; failures keep the last payload, stale
+  // rather than gone.
   useEffect(() => {
     let disposed = false;
     const subscription = listen<RequestChange>("review-request-changed", (event) => {
@@ -305,17 +311,24 @@ function ReviewRequestBar({ identityKey, headSha }: { identityKey: ReviewKey; he
       if (key.repoPath !== change.repo_path || key.baseSha !== change.base_sha || key.targetKey !== change.target_key || key.targetKind !== change.target_kind) return;
       void (async () => {
         try {
-          const listed = await invoke<ReviewRequestRow[]>("list_requests", { repoPath: key.repoPath, baseSha: key.baseSha, targetKey: key.targetKey, targetKind: key.targetKind });
+          const listed = await call<ReviewRequestRow[]>("list_requests", { repoPath: key.repoPath, baseSha: key.baseSha, targetKey: key.targetKey, targetKind: key.targetKind }, sourceRef.current);
           if (!disposed) setRows(listed);
         } catch { /* keep the last payload */ }
       })();
     });
     return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
   }, []);
+  useEffect(() => {
+    if (refreshTick === mountedTick.current) return;
+    const key = identityRef.current;
+    void call<ReviewRequestRow[]>("list_requests", { repoPath: key.repoPath, baseSha: key.baseSha, targetKey: key.targetKey, targetKind: key.targetKind }, sourceRef.current)
+      .then((listed) => setRows(listed))
+      .catch(() => { /* keep the last payload */ });
+  }, [refreshTick]);
   async function runAction(row: ReviewRequestRow, action: RequestAction, note: string) {
     setError("");
     try {
-      const updated = await invoke<ReviewRequestRow>("update_review_request", { id: row.id, action, note: note.trim() || null, headSha: action === "re_request" ? headSha : null });
+      const updated = await call<ReviewRequestRow>("update_review_request", { id: row.id, action, note: note.trim() || null, headSha: action === "re_request" ? headSha : null }, sourceRef.current);
       setRows((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       return true;
     } catch (caught) {
@@ -338,7 +351,7 @@ function ReviewRequestBar({ identityKey, headSha }: { identityKey: ReviewKey; he
         <button className="request-action" type="button" aria-expanded={formOpen} onClick={() => setFormOpen((open) => !open)}>{formOpen ? "Close form" : "Request review"}</button>
       </div>
     </div>
-    {formOpen && <RequestForm identityKey={identityKey} headSha={headSha} onCreated={absorbCreated} />}
+    {formOpen && <RequestForm identityKey={identityKey} headSha={headSha} source={source} onCreated={absorbCreated} />}
   </div>;
 }
 
@@ -382,7 +395,7 @@ function RequestRowView({ row, headSha, onAction }: { row: ReviewRequestRow; hea
   </div>;
 }
 
-function RequestForm({ identityKey, headSha, onCreated }: { identityKey: ReviewKey; headSha: string; onCreated: (row: ReviewRequestRow) => void }) {
+function RequestForm({ identityKey, headSha, source, onCreated }: { identityKey: ReviewKey; headSha: string; source: RemoteSource; onCreated: (row: ReviewRequestRow) => void }) {
   const [note, setNote] = useState("");
   const [lenses, setLenses] = useState<RequestLens[]>([]);
   const [reviewers, setReviewers] = useState<string[]>([]);
@@ -391,9 +404,13 @@ function RequestForm({ identityKey, headSha, onCreated }: { identityKey: ReviewK
   const [attempted, setAttempted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const sourceRef = useRef(source);
+  useEffect(() => { sourceRef.current = source; });
   useEffect(() => {
     let cancelled = false;
-    listAgentTokens().then((next) => { if (!cancelled) setTokens(next); }).catch(() => { /* open pickup stays available */ });
+    // The named-reviewer checklist reads the reviewed backend's agent
+    // tokens; an admin-only refusal leaves open pickup as the fallback.
+    call<AgentToken[]>("list_agent_tokens", undefined, sourceRef.current).then((next) => { if (!cancelled) setTokens(next); }).catch(() => { /* open pickup stays available */ });
     return () => { cancelled = true; };
   }, []);
   const errors = validateRequestForm({ note, lenses, max_rounds: maxRounds });
@@ -407,7 +424,7 @@ function RequestForm({ identityKey, headSha, onCreated }: { identityKey: ReviewK
     setSubmitting(true);
     setError("");
     try {
-      onCreated(await invoke<ReviewRequestRow>("create_review_request", { repoPath: identityKey.repoPath, baseSha: identityKey.baseSha, targetKey: identityKey.targetKey, targetKind: identityKey.targetKind, note: note.trim(), lenses, reviewers, maxRounds, headSha }));
+      onCreated(await call<ReviewRequestRow>("create_review_request", { repoPath: identityKey.repoPath, baseSha: identityKey.baseSha, targetKey: identityKey.targetKey, targetKind: identityKey.targetKind, note: note.trim(), lenses, reviewers, maxRounds, headSha }, source));
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
@@ -435,7 +452,7 @@ function RequestForm({ identityKey, headSha, onCreated }: { identityKey: ReviewK
   </form>;
 }
 
-export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target, refs, base, scope, reversed, index, loading, selectedFile, patch, patchError, patchLoading, fileView, diffPrefs, diffToggles, comments, content, contentLoading, contentError, imageSrc, imageError, imageLoading, onEnsureContent, canBack, canForward, onHistoryBack, onHistoryForward, onBack, onBaseChange, onTargetChange, onPreset, onReverse, onFileView, onFile, panes, onPaneVisibility, branchAction, focusedCommentId, reviewRefreshTick, commentsWide, onCommentsWide, osOpenRepoKey, osOpenBlocked, onOsOpenFailure, resolveSource, readOnly }: { repoPath: string; repoName: string; liveWorktree?: Worktree; worktrees?: Worktree[]; target: ReviewTarget; refs: RefInventory; base: string; scope: ReviewScope; reversed: boolean; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; fileView: ChangedFilesView; diffPrefs: DiffPreferences; diffToggles: React.ReactNode; comments: CommentsApi; content: FileContent | null; contentLoading: boolean; contentError: string; imageSrc: string | null; imageError: string; imageLoading: boolean; onEnsureContent: () => void; canBack: boolean; canForward: boolean; onHistoryBack: () => void; onHistoryForward: () => void; onBack: () => void; onBaseChange: (value: string) => void; onTargetChange: (target: ReviewTarget) => void; onPreset: (preset: WorktreeReviewPreset) => void; onReverse: () => void; onFileView: (view: ChangedFilesView) => void; onFile: (file: ChangedFile) => void; panes: { files: boolean; comments: boolean }; onPaneVisibility: (next: { files: boolean; comments: boolean }) => void; branchAction?: { ref: string; busy: boolean; run: () => void } | null; focusedCommentId: number | null; reviewRefreshTick: number; commentsWide: boolean; onCommentsWide: (wide: boolean) => void; osOpenRepoKey?: string | null; osOpenBlocked?: boolean; onOsOpenFailure?: () => void; resolveSource: SourceResolver; readOnly: boolean }) {
+export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target, refs, base, scope, reversed, index, loading, selectedFile, patch, patchError, patchLoading, fileView, diffPrefs, diffToggles, comments, content, contentLoading, contentError, imageSrc, imageError, imageLoading, onEnsureContent, canBack, canForward, onHistoryBack, onHistoryForward, onBack, onBaseChange, onTargetChange, onPreset, onReverse, onFileView, onFile, panes, onPaneVisibility, branchAction, focusedCommentId, reviewRefreshTick, requestRefreshTick, commentsWide, onCommentsWide, osOpenRepoKey, osOpenBlocked, onOsOpenFailure, resolveSource, readOnly }: { repoPath: string; repoName: string; liveWorktree?: Worktree; worktrees?: Worktree[]; target: ReviewTarget; refs: RefInventory; base: string; scope: ReviewScope; reversed: boolean; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; fileView: ChangedFilesView; diffPrefs: DiffPreferences; diffToggles: React.ReactNode; comments: CommentsApi; content: FileContent | null; contentLoading: boolean; contentError: string; imageSrc: string | null; imageError: string; imageLoading: boolean; onEnsureContent: () => void; canBack: boolean; canForward: boolean; onHistoryBack: () => void; onHistoryForward: () => void; onBack: () => void; onBaseChange: (value: string) => void; onTargetChange: (target: ReviewTarget) => void; onPreset: (preset: WorktreeReviewPreset) => void; onReverse: () => void; onFileView: (view: ChangedFilesView) => void; onFile: (file: ChangedFile) => void; panes: { files: boolean; comments: boolean }; onPaneVisibility: (next: { files: boolean; comments: boolean }) => void; branchAction?: { ref: string; busy: boolean; run: () => void } | null; focusedCommentId: number | null; reviewRefreshTick: number; requestRefreshTick: number; commentsWide: boolean; onCommentsWide: (wide: boolean) => void; osOpenRepoKey?: string | null; osOpenBlocked?: boolean; onOsOpenFailure?: () => void; resolveSource: SourceResolver; readOnly: boolean }) {
   const targetName = target.kind === "worktree" ? target.worktree.branch : target.kind === "commit" ? target.sha : target.name;
   const allRefs = [...refs.heads, ...refs.remotes, ...refs.tags];
   const targetRefs = allRefs.filter((ref) => ref !== liveWorktree?.branch);
@@ -453,6 +470,9 @@ export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target
   // file in the patch and lands on the row; the pane consumes the jump
   // once that row renders.
   const { anchorJump, openCommentAnchor } = useAnchorJump(reversed, selectedFile, files, onFile, comments);
+  // readOnly only means "no local disk root here": a server-backed review
+  // shows its files from the server host, so OS-open would aim at a path
+  // that does not exist on this machine.
   const diskWorktree = readOnly ? null : reviewFileRoot(target, selectedFile, worktrees, repoPath);
   // A thread opened from the portal scrolls into view in the comments
   // stream and highlights once; the comments layer loads asynchronously,
@@ -506,9 +526,9 @@ export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target
         {target.kind === "commit" ? <div className="scope-toggle" role="group" aria-label="Commit review preset"><button className={!target.defaultBaseAncestor && branchPreset && base === branchPreset && branchPreset !== commitPreset ? "active" : ""} type="button" disabled={target.defaultBaseAncestor || !branchPreset} onClick={() => onBaseChange(branchPreset)}>Branch so far</button><button className={base === commitPreset ? "active" : ""} type="button" onClick={() => onBaseChange(commitPreset)}>This commit</button></div> : target.kind === "worktree" ? <div className="scope-toggle" role="group" aria-label="Review scope"><button className={workingChangesActive ? "active" : ""} type="button" title="Only the uncommitted working-tree changes" onClick={() => onPreset("working")}>Working changes</button><button className={scope === "all" && !workingChangesActive ? "active" : ""} type="button" title="Everything against the base, uncommitted included" onClick={() => onPreset("all")}>All changes</button><button className={scope === "committed" && base !== workingBase ? "active" : ""} type="button" onClick={() => onPreset("committed")}>Committed only</button></div> : <span className="scope-fixed" aria-label="Review scope">Committed only</span>}
         <span className="bar-grow" />
         <span className="review-counts"><code>{index?.error ? "Review index unavailable" : index ? `${files.length} files, +${index.additions} -${index.deletions}` : "Loading review index..."}</code></span>
-        {comments.key && !readOnly && <button className="secondary-button" type="button" aria-label="Comment on review" title="Comment on review" onClick={() => comments.openComposer("review")}><MessageSquare size={13} /> Review</button>}
+        {comments.key && <button className="secondary-button" type="button" aria-label="Comment on review" title="Comment on review" onClick={() => comments.openComposer("review")}><MessageSquare size={13} /> Review</button>}
       </div>
-      {comments.key && !readOnly && <ReviewRequestBar identityKey={comments.key} headSha={index && !index.error ? index.target_sha : ""} />}
+      {comments.key && <ReviewRequestBar identityKey={comments.key} headSha={index && !index.error ? index.target_sha : ""} resolve={resolveSource} refreshTick={requestRefreshTick} />}
       <CommitRow key={targetName} title={commitTitle}>
         {target.kind === "commit" ? <>
           {summary?.body && <p className="commit-body">{summary.body}</p>}
@@ -673,9 +693,7 @@ export function PatchPane({ selectedFile, patch, patchError, patchLoading, diffP
   const split = diffPrefs.layout === "split";
   const whitespace = diffPrefs.whitespaceVisible;
   const commentsActive = comments.key !== null;
-  // Read-only layers (server-backed reviews this phase) keep their cards
-  // visible but offer no new anchors, chips, or composers.
-  const canComment = commentsActive && !comments.readOnly;
+  const canComment = commentsActive;
   const fileMode = patchView === "file";
   const expandedHunks = useMemo(() => hunksWithExpandedGaps(hunks, gaps, expandedGaps, contentLines), [hunks, gaps, expandedGaps, contentLines]);
   // One continuous row stream serves both modes: patch rows, or the whole

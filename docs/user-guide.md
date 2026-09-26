@@ -3,11 +3,13 @@
 WorktreeView is a review inbox over your Git worktrees, and this page
 walks through it the way you will actually use it: add a repository,
 read the overview, open reviews, leave comments, and let your coding
-agents work alongside you. Everything here is read-only: reviews explain
-your repositories, they never modify them. Local projects stay entirely
-on this machine, and the Fetch action's explicit fetch is their only
+agents work alongside you. Your repositories stay read-only: reviews
+explain them, they never modify them. Local projects stay entirely on
+this machine, and the Fetch action's explicit fetch is their only
 network request; a remote project reads over SSH from its own host
-instead.
+instead. A configured server (see
+[Work against a server](#work-against-a-server)) is the one other place
+the app talks to the network.
 
 ## Add a repository
 
@@ -421,14 +423,60 @@ touches your Git state.
 
 ## Tune the app
 
-Settings has three pages. **General** covers appearance (theme,
+Settings has four pages. **General** covers appearance (theme,
 interface zoom), diff behavior (layout, highlighting, whitespace,
 line wrap), and notifications (the arrival cue and desktop toasts).
+**Servers** connects the app to WorktreeView servers and manages their
+members and agent tokens (see [Work against a server](#work-against-a-server)).
 **Agent API** controls the local endpoint your coding agents
 connect through; saved address and port changes apply through that
 section's Restart action, no app restart needed. **About** names the app
 and its version (the same value agents see from the endpoint), and its
 Logs row opens the diagnostic log folder.
+
+## Work against a server
+
+A WorktreeView server turns one review surface into a shared one: several
+people (and their agents) read and write the same reviews, comments, and
+review requests against repositories that live on the server host.
+Running the server is covered in [server.md](server.md); from the app's
+side:
+
+Connect in **Settings > Servers**. Enter the server's URL and your user
+token: the server's operator creates your account
+(`worktreeview-server create-admin` bootstraps the first admin; admins
+create the other members) and hands you the token, which is shown once
+at creation. The app checks the pair with one authenticated call before
+anything is saved. Connected servers group the sidebar under
+**Servers**, and adding a project is by path, typed against the server
+host: the repository's path on that machine, not yours.
+
+Server-backed projects read everything from the server: the overview,
+reviews, diffs, and the Pulse tabs all show the server's shared state.
+Writes attribute to you by name: your comments, replies, resolves, and
+review-request actions carry your account's display name, visible to
+every member, while agents on the server keep their own names. Anyone
+can reply to and resolve any thread, and review-request actions follow
+the same rules as locally; the server enforces them. The activity feed
+names the human actors behind server events, and a server-backed
+arrival's open action lands on its review like a local one. What stays
+machine-local: for a server-backed review the "open file" and "reveal in
+explorer" actions are hidden (the files exist on the server host), and
+the seen watermark and appearance settings remain yours alone.
+
+Updates arrive live. While a server-backed project is in the app, the
+app holds one event stream per server (reconnecting with backoff if it
+drops), so comments, submissions, and request changes from other members
+and agents appear without a refresh. A stream that cannot be established
+surfaces an error instead of failing silently; reading and writing still
+works, only without the live push.
+
+Admins manage the server's people and agents in
+**Settings > Servers > Manage <server>**: create a user (their first
+token prints once), delete a user (the server refuses to delete the last
+admin), and mint or delete agent tokens. The server checks the admin
+right on every action, and its refusals surface as errors in the
+section; the app never guesses who is an admin.
 
 ## Troubleshooting
 

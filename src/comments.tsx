@@ -37,9 +37,6 @@ export type ComposerState = { kind: "review" } | { kind: "file"; filePath: strin
 
 export type CommentsApi = {
   key: ReviewKey | null;
-  // True for a server-backed review: the conversation reads from its
-  // server and every write affordance stays hidden until the writes phase.
-  readOnly: boolean;
   threads: CommentThread[];
   visibleThreads: CommentThread[];
   statuses: Record<number, AnchorStatus>;
@@ -57,7 +54,7 @@ export type CommentsApi = {
   remove(commentId: number): Promise<void>;
 };
 
-export function useReviewComments(identity: ReviewIdentity | null, index: ReviewIndexSummary | null, file: { path: string; lines: DiffLine[] } | null, reversed: boolean, readOnly = false, resolve: SourceResolver = () => ({ kind: "local" }) satisfies RemoteSource): CommentsApi {
+export function useReviewComments(identity: ReviewIdentity | null, index: ReviewIndexSummary | null, file: { path: string; lines: DiffLine[] } | null, reversed: boolean, resolve: SourceResolver = () => ({ kind: "local" }) satisfies RemoteSource): CommentsApi {
   // The resolved key wins once the index lands; until then (or when it
   // never resolves), the identity's recorded refs key the stored
   // conversation, so a review stays readable after its Git surface is gone.
@@ -70,8 +67,7 @@ export function useReviewComments(identity: ReviewIdentity | null, index: Review
   // The resolver is held through a ref so the subscription effects keep
   // their identity-key deps and never resubscribe on a new closure.
   const resolveRef = useRef(resolve);
-  const readOnlyRef = useRef(readOnly);
-  useEffect(() => { resolveRef.current = resolve; readOnlyRef.current = readOnly; });
+  useEffect(() => { resolveRef.current = resolve; });
 
   useEffect(() => {
     if (!key) {
@@ -117,39 +113,38 @@ export function useReviewComments(identity: ReviewIdentity | null, index: Review
   const threads = useMemo(() => commentThreads(comments), [comments]);
   return {
     key,
-    readOnly,
     threads,
     visibleThreads: filterThreadsByAuthor(threads, author),
     statuses,
     author,
     setAuthor,
     composer,
-    openComposer(kind: "review") { if (!readOnly) setComposer({ kind }); },
-    openFileComposer(filePath: string) { if (!readOnly) setComposer({ kind: "file", filePath }); },
+    openComposer(kind: "review") { setComposer({ kind }); },
+    openFileComposer(filePath: string) { setComposer({ kind: "file", filePath }); },
     closeComposer() { setComposer(null); },
     async refresh() { if (key) await refresh(key); },
     async create(draft: CommentDraft) {
-      if (!key || readOnlyRef.current) return;
+      if (!key) return;
       await call("create_comment", { repoPath: key.repoPath, baseSha: key.baseSha, targetKey: key.targetKey, targetKind: key.targetKind, draft }, resolveRef.current(key.repoPath));
       await refresh(key);
     },
     async reply(parentId: number, body: string) {
-      if (!key || readOnlyRef.current) return;
+      if (!key) return;
       await call("reply_comment", { parentId, body }, resolveRef.current(key.repoPath));
       if (key) await refresh(key);
     },
     async setResolved(commentId: number, resolved: boolean) {
-      if (!key || readOnlyRef.current) return;
+      if (!key) return;
       await call("set_comment_resolved", { commentId, resolved }, resolveRef.current(key.repoPath));
       if (key) await refresh(key);
     },
     async edit(commentId: number, body: string) {
-      if (!key || readOnlyRef.current) return;
+      if (!key) return;
       await call("edit_comment", { commentId, body }, resolveRef.current(key.repoPath));
       if (key) await refresh(key);
     },
     async remove(commentId: number) {
-      if (!key || readOnlyRef.current) return;
+      if (!key) return;
       await call("delete_comment", { commentId }, resolveRef.current(key.repoPath));
       if (key) await refresh(key);
     },
@@ -239,7 +234,6 @@ export function DraftComposer({ placeholder, submitLabel, initialBody = "", onSu
 // cards omit it because they already sit in the diff.
 export function CommentThreadView({ thread, status, comments, reversed = false, onOpenAnchor }: { thread: CommentThread; status: AnchorStatus | null; comments: CommentsApi; reversed?: boolean; onOpenAnchor?: (comment: ReviewComment) => void }) {
   const [replying, setReplying] = useState(false);
-  const readOnly = comments.readOnly;
   const [editing, setEditing] = useState<number | null>(null);
   const root = thread.comment;
   const resolved = root.resolved_at !== null;
@@ -263,13 +257,13 @@ export function CommentThreadView({ thread, status, comments, reversed = false, 
         {root.file_path !== null && (onOpenAnchor
           ? <button className="comment-anchor" type="button" title={`Open ${anchorLabel(root, reversed)} in the diff`} onClick={() => onOpenAnchor(root)}>{anchor}</button>
           : <span className="comment-anchor" title={`${root.side === "LEFT" ? "Old" : "New"} side of ${root.file_path}`}>{anchor}</span>)}
-        {!readOnly && <button type="button" onClick={() => void comments.setResolved(root.id, !resolved)}>{resolved ? "Reopen" : "Resolve"}</button>}
-        {!readOnly && <button type="button" onClick={() => setReplying(!replying)}>{replying ? "Cancel" : "Reply"}</button>}
+        <button type="button" onClick={() => void comments.setResolved(root.id, !resolved)}>{resolved ? "Reopen" : "Resolve"}</button>
+        <button type="button" onClick={() => setReplying(!replying)}>{replying ? "Cancel" : "Reply"}</button>
       </div>
-      {!readOnly && editControls(root)}
+      {editControls(root)}
     </>} />
-    {thread.replies.map((reply) => <CommentCard key={reply.id} comment={reply} status={null} reversed={reversed} actions={readOnly ? undefined : editControls(reply)} />)}
-    {!readOnly && replying && <MiniComposer placeholder="Reply" submitLabel="Reply" busy={false} onSubmit={(body) => { setReplying(false); void comments.reply(root.id, body); }} onCancel={() => setReplying(false)} />}
+    {thread.replies.map((reply) => <CommentCard key={reply.id} comment={reply} status={null} reversed={reversed} actions={editControls(reply)} />)}
+    {replying && <MiniComposer placeholder="Reply" submitLabel="Reply" busy={false} onSubmit={(body) => { setReplying(false); void comments.reply(root.id, body); }} onCancel={() => setReplying(false)} />}
   </div>;
 }
 
@@ -298,7 +292,7 @@ export function CommentStream({ comments, reversed = false, strip, onCollapse, w
         <DraftComposer placeholder="Summary, question, or finding…" submitLabel="Comment" onSubmit={({ body, severity }) => { void comments.create({ body, severity, file_path: null, side: null, start_line: null, end_line: null, lines: [] }).then(comments.closeComposer); }} onCancel={comments.closeComposer} />
       </div>}
       {comments.visibleThreads.length === 0
-        ? <div className="comment-empty">No comments{comments.author === "all" ? " yet" : ` from ${comments.author} authors`}{comments.readOnly ? "." : ". Click a diff line to comment; shift-click or drag the line numbers for a range."}</div>
+        ? <div className="comment-empty">No comments{comments.author === "all" ? " yet" : ` from ${comments.author} authors`}. Click a diff line to comment; shift-click or drag the line numbers for a range.</div>
         : comments.visibleThreads.map((thread) => <CommentThreadView key={thread.comment.id} thread={thread} status={comments.statuses[thread.comment.id] ?? null} comments={comments} reversed={reversed} onOpenAnchor={onOpenAnchor} />)}
     </div>
   </aside>;

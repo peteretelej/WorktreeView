@@ -86,7 +86,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     VITE_E2E_PICKER_PATH=/tmp/worktreeview-e2e-selection \
     npm run tauri -- build --no-bundle \
       --config '{"build":{"beforeBuildCommand":"npm run build:e2e"}}' \
-  && cp /app/src-tauri/target/release/worktreeview /tmp/worktreeview
+  && cp /app/src-tauri/target/release/worktreeview /tmp/worktreeview \
+  && cp /app/src-tauri/target/release/worktreeview-server /tmp/worktreeview-server
 
 FROM debian:bookworm-slim AS runtime
 
@@ -110,6 +111,7 @@ COPY --from=build /app/e2e ./e2e
 COPY --from=build /tmp/tauri-driver/bin/tauri-driver /usr/local/bin/tauri-driver
 COPY --from=build /tmp/worktreeview /app/worktreeview
 COPY --from=build /tmp/libnss_fixuid.so.2 /usr/lib/x86_64-linux-gnu/libnss_fixuid.so.2
+COPY --from=build /tmp/worktreeview-server /app/worktreeview-server
 
 RUN sed -E -i 's/^(passwd:.*)$/\1 fixuid/' /etc/nsswitch.conf \
   && for command in cargo rustc cc gcc g++ make; do \

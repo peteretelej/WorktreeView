@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  activityActorLabel,
   activityDayGroups,
   activityDividerIndex,
   activityKindFamily,
@@ -263,4 +264,12 @@ test("the divider sits at the first event past the seen watermark", () => {
   // Array order decides, not id order: the divider tracks the first row
   // past the watermark wherever the feed puts it.
   assert.equal(activityDividerIndex([event({ id: 2 }), event({ id: 7 })], 5), 1);
+});
+
+test("activity actors read as you locally and by name from a server", () => {
+  assert.equal(activityActorLabel(event({ actor_kind: "human", actor_name: "you" })), "you");
+  // A server-backed human event names the member who acted; agents keep
+  // their names on both backends.
+  assert.equal(activityActorLabel(event({ actor_kind: "human", actor_name: "ops", connection_id: 2 })), "ops");
+  assert.equal(activityActorLabel(event({ actor_kind: "agent", actor_name: "codex", connection_id: 2 })), "codex");
 });

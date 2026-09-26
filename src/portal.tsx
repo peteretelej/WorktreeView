@@ -5,8 +5,9 @@ import { copyText } from "./clipboard.ts";
 import { call } from "./remote.ts";
 import { CommentThreadView, type CommentsApi } from "./comments.tsx";
 import { anchorLabel } from "./comments.ts";
-import { activityDividerIndexForSources } from "./remote.ts";
+import { activityDividerIndexForSources, type RemoteSource } from "./remote.ts";
 import {
+  activityActorLabel,
   activityDayGroups,
   activityKindFamily,
   activityKindLabel,
@@ -222,16 +223,17 @@ function CopyRouteButton({ rootCommentId }: { rootCommentId: number }) {
 }
 
 // The portal thread detail: the stored conversation, resolve/reopen and
-// reply through the same comment commands the review surface uses, the
-// anchored snippet as stored, and the change's other threads alongside.
-export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, onOpenReview, onChanged, readOnly = false }: {
+// reply through the same comment commands the review surface uses against
+// the thread's own backend, the anchored snippet as stored, and the
+// change's other threads alongside.
+export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, onOpenReview, onChanged, source = { kind: "local" } }: {
   payload: PortalThreadPayload;
   groups: PortalThreadGroup[];
   repoNames: Map<string, string>;
   onOpenThread: (rootCommentId: number) => void;
   onOpenReview: (row: ReviewIdentityRef, focusedCommentId: number) => void;
   onChanged: () => void;
-  readOnly?: boolean;
+  source?: RemoteSource;
 }) {
   const { detail } = payload;
   const group = detail
@@ -242,11 +244,10 @@ export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, o
   if (!detail) return <section className="inbox-pane attention-pane threads-pane" aria-labelledby="thread-detail-heading"><div className="section-heading"><div className="project-heading"><h1 id="thread-detail-heading">Thread</h1></div></div><ReviewsEmpty title="Loading thread..." detail="Reading the stored conversation." /></section>;
   const resolved = detail.resolved_at !== null;
   // The conversation renders through the review surface's own thread view;
-  // its actions route to the same store commands, so the portal adds no
-  // new mutation path.
+  // its actions route to the same store commands against the thread's
+  // backend, so the portal adds no new mutation path.
   const commentsApi: CommentsApi = {
     key: null,
-    readOnly,
     threads: [{ comment: detail.root, replies: detail.replies }],
     visibleThreads: [],
     statuses: {},
@@ -259,23 +260,19 @@ export function PortalThreadDetail({ payload, groups, repoNames, onOpenThread, o
     async refresh() { onChanged(); },
     async create() { },
     async reply(parentId, body) {
-      if (readOnly) return;
-      await call("reply_comment", { parentId, body, severity: null }, { kind: "local" });
+      await call("reply_comment", { parentId, body, severity: null }, source);
       onChanged();
     },
     async setResolved(commentId, resolvedValue) {
-      if (readOnly) return;
-      await call("set_comment_resolved", { commentId, resolved: resolvedValue }, { kind: "local" });
+      await call("set_comment_resolved", { commentId, resolved: resolvedValue }, source);
       onChanged();
     },
     async edit(commentId, body) {
-      if (readOnly) return;
-      await call("edit_comment", { commentId, body }, { kind: "local" });
+      await call("edit_comment", { commentId, body }, source);
       onChanged();
     },
     async remove(commentId) {
-      if (readOnly) return;
-      await call("delete_comment", { commentId }, { kind: "local" });
+      await call("delete_comment", { commentId }, source);
       onChanged();
     },
   };
@@ -369,7 +366,7 @@ export function PortalActivityTab({ payload, repoNames, activityProject, onProje
               <span className="activity-project path-text" title={event.repo_path}>{repoNames.get(event.repo_path) ?? event.repo_path}</span>
               <span className={`activity-kind activity-kind-${family}`} title={activityKindLabel(event.kind)} aria-label={activityKindLabel(event.kind)}><Icon size={13} /></span>
               <strong className="activity-summary" title={event.summary}>{event.summary}</strong>
-              <span className="activity-meta">{event.actor_kind === "human" ? "you" : event.actor_name} · {attentionAge(event.created_at, now)}</span>
+              <span className="activity-meta">{activityActorLabel(event)} · {attentionAge(event.created_at, now)}</span>
             </div>
           </div>;
         })}</div>

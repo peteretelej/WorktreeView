@@ -260,13 +260,17 @@ A flat React + Vite app: `App.tsx` (shell, project overview, state and
 effects, and the agent submission arrival cue and endpoint event listeners:
 `submission-received` queues the arrival cue, `comment-changed` refetches
 the loaded review's comments when the change names it, and
-`project-refreshed` re-lists the open repository's surfaces),
+`project-refreshed` re-lists the open repository's surfaces; the same
+four handler paths are fed per connection by the webview's server event
+streams),
 `remote.ts` (the one dispatch seam: an invoke-shaped `call` that routes a
 command to the local backend or, for a server-backed repo path resolved
 from the local `server_projects` rows, to that server's command API with
 its bearer token; global Pulse listings fan out over every source and
 merge client-side, with thread and activity rows carrying the owning
-connection id so id-keyed detail opens land on the right backend), and
+connection id so id-keyed detail opens land on the right backend; the
+same module holds the fetch-stream SSE reader that keeps one
+authenticated event stream per connection with backoff reconnects), and
 `format.ts` (shared formatting and error-message helpers),
 `ui.tsx` (shared widgets: copy button, empty state, pager, brand mark,
 top bar), `review.tsx` (the review surface: review view, changed-file

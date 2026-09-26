@@ -340,3 +340,11 @@ export function activityDayGroups(events: PortalActivityEvent[], now: number): A
 export function activityDividerIndex(events: PortalActivityEvent[], seenId: number): number {
   return events.findIndex((event) => event.id > seenId);
 }
+
+// The activity row's actor: the local feed's human events are the
+// viewer's own, but a server-backed row's human actor is a named member
+// of the shared server, so the feed shows their display name.
+export function activityActorLabel(event: Pick<PortalActivityEvent, "actor_kind" | "actor_name" | "connection_id">): string {
+  if (event.actor_kind === "agent") return event.actor_name;
+  return (event.connection_id ?? null) === null ? "you" : event.actor_name;
+}

@@ -60,7 +60,31 @@ Idle streams carry a `: keepalive` comment, and a subscriber that falls
 too far behind is cut. The client fallback is reconnect with
 exponential backoff; no polling re-implementation is built, and a
 stream that cannot be established surfaces an error instead of
-degrading silently.
+degrading silently. Two clients are built in: the desktop app consumes
+this stream for its server-backed projects (see
+[user-guide.md](user-guide.md#work-against-a-server)), and coding
+agents discover the endpoint as
+[connect-an-agent.md](connect-an-agent.md) describes.
+
+The desktop app's webview is the one browser-engine caller, and its
+fetches all carry an `Authorization` header, so the endpoint answers
+CORS preflights for the bundled webview origins (`tauri://localhost`,
+`http://tauri.localhost`, `https://tauri.localhost`) on the faces the
+webview consumes (`/api/*` and `/events`), reflecting the matched
+origin. Every other caller keeps the header-free responses a
+non-browser client always sees, and a preflight never bypasses the
+bearer gate: the token remains the authentication boundary on every
+face.
+
+## Accounts and tokens
+
+The first admin is bootstrapped on the host with
+`worktreeview-server create-admin <name>`: it prints the member's first
+bearer token once, and that token is what a desktop app enters under
+Settings > Servers to connect. Admins create further members and mint
+agent tokens from the connected desktop app's management section; the
+token semantics (hash-only storage, print-once secrets, the protected
+last admin) are the same on both faces.
 
 ## Running under systemd
 
