@@ -8,7 +8,7 @@ normalized domain data through narrow, typed Tauri commands.
 ## Backend (`src-tauri/src`)
 
 - `commands.rs`: thin typed IPC adapters. The full command surface:
-  `open_repo`, `list_repos`, `list_worktrees`, `list_worktree_status`,
+  `open_repo`, `open_remote_repo`, `list_repos`, `list_worktrees`, `list_worktree_status`,
   `remove_repo`, `get_branch_inventory`, `fetch_project`,
   `set_repo_pinned`, `set_surface_pinned`, `get_settings`, `set_settings`,
   `list_agent_tokens`, `create_agent_token`, `delete_agent_token`,
@@ -32,6 +32,23 @@ normalized domain data through narrow, typed Tauri commands.
   fetch the refresh action runs), and kill-on-drop cancellation.
   Repository-scoped runs share one hardened builder; no-index diffs get
   their own isolated stdin command.
+- `git/remote.rs`: the remote runner for SSH-hosted projects. Remote
+  identities are canonical `user@host:path` strings (a non-default port
+  renders as `ssh://[user@]host:port/path`; IPv6 hosts keep their
+  brackets), parsed and normalized in Rust; the webview never owns the
+  shape. One allowlist choke point decides which git argv may run on the
+  host, mirroring the local read-only plumbing set; anything not matched
+  is refused with a typed error. Spawns go to the user's own `ssh`
+  (inheriting its config, agent, and ProxyJump) with explicit argument
+  arrays, BatchMode fail-fast (passphrase and host-key prompts fail with
+  actionable errors pointing at ssh-agent and host-key acceptance),
+  bounded output, deadlines sized to include connection setup, and
+  kill-on-drop. Every repo- or user-derived argv slot passes one tested
+  POSIX shell-quoting helper before entering a composed command, and
+  sentinel-framed fragments let one ssh invocation carry several commands
+  with per-fragment exit codes (consumed by the batched remote reads).
+  ControlMaster multiplexing options are built behind a non-Windows gate
+  (Windows OpenSSH has no ControlMaster).
 - `git/validate.rs`: path, ref, scope, and flag-combination validation, plus
   repository classification through `git rev-parse --is-inside-work-tree`.
 - `git/filters.rs`: detects configured clean and process filters and
@@ -149,7 +166,9 @@ normalized domain data through narrow, typed Tauri commands.
   bounded Git spawn before recording it with pin origin.
 - `store.rs`: SQLite persistence (sqlx) for repositories, pins, and
   settings, plus path canonicalization and normalization of stored
-  Windows verbatim paths. Migrations live in `src-tauri/migrations`.
+  Windows verbatim paths. Remote project rows carry the canonical
+  identity string plus a `remote` marker, and that POSIX identity is
+  never canonicalized locally. Migrations live in `src-tauri/migrations`.
 
 ## Git as the semantic authority
 
@@ -215,7 +234,8 @@ null when the token is deleted, which makes the request human-keyed from
 then on. The schema is one consolidated `0001` migration plus
 append-only additive migrations (`0002` adds the `agent_tokens` table and
 comment ownership; `0003` adds review requests; `0004` adds the `events`
-table); migration divergence handling is described at the end of this
+table; `0005` rebuilds it with an extended kind vocabulary; `0006` marks
+remote project rows); migration divergence handling is described at the end of this
 section.
 
 The `events` table is the append-only activity log: every review-relevant

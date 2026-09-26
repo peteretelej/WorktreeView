@@ -5,7 +5,7 @@ use crate::agents::{
 use crate::git::{
     fetch_remote_branch, fetch_remotes, git_execution_error, parse_status_count, parse_worktrees,
     remote_branch_of_tracking_ref, run_git, validate_fetch_name, validate_ref, CommitPage,
-    Worktree,
+    RemoteTarget, Worktree,
 };
 use crate::overview::{branch_inventory, BranchInventory};
 use crate::portal::{
@@ -32,8 +32,9 @@ use crate::reviews::{
     Submission,
 };
 use crate::store::{
-    get_settings_in_pool, load_repos, mark_activity_seen_in_pool, open_repo_path,
-    remove_repo_in_pool, set_repo_pinned_in_pool, set_settings_in_pool, Repo, Settings,
+    get_settings_in_pool, load_repos, mark_activity_seen_in_pool, open_remote_repo_path,
+    open_repo_path, remove_repo_in_pool, set_repo_pinned_in_pool, set_settings_in_pool, Repo,
+    Settings,
 };
 use crate::transport::{
     restart, ListenerConfig, ListenerOwner, ListenerStatus, McpStatusHandle, TransportDeps,
@@ -50,6 +51,21 @@ pub(crate) async fn open_repo(
     state: tauri::State<'_, AppState>,
 ) -> Result<Repo, CommandError> {
     open_repo_path(&path, &state.pool).await
+}
+
+// The add-project remote form's command: typed target fields in (the
+// backend owns normalization), the stored Repo out, or one of the typed
+// validation failures (unreachable host, auth, not a work tree).
+#[tauri::command]
+pub(crate) async fn open_remote_repo(
+    user: Option<String>,
+    host: String,
+    port: Option<u16>,
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Repo, CommandError> {
+    let target = RemoteTarget::from_parts(user.as_deref(), &host, port, &path)?;
+    open_remote_repo_path(&state.pool, &target).await
 }
 
 #[tauri::command]

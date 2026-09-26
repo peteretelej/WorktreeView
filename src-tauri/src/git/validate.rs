@@ -90,7 +90,7 @@ pub(crate) async fn ensure_work_tree(canonical: &Path) -> Result<(), CommandErro
     Ok(())
 }
 
-fn is_not_a_repository_diagnostic(stderr: &[u8]) -> bool {
+pub(crate) fn is_not_a_repository_diagnostic(stderr: &[u8]) -> bool {
     String::from_utf8_lossy(stderr)
         .to_ascii_lowercase()
         .contains("not a git repository")

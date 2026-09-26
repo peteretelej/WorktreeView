@@ -1,5 +1,5 @@
 use crate::events;
-use crate::git::{ensure_work_tree, Worktree};
+use crate::git::{ensure_work_tree, validate_work_tree, RemoteTarget, Worktree};
 use crate::{canonical_path, plain_path, CommandError};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -186,6 +186,18 @@ async fn upsert_repo(
     Ok(())
 }
 
+// The remote twin of upsert_repo: the row is marked remote so every layer
+// classifies it without re-parsing the identity string.
+async fn upsert_remote_repo(
+    pool: &SqlitePool,
+    path: &str,
+    name: &str,
+    clock: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO repos (path, name, remote, last_opened_at, created_at) VALUES (?, ?, 1, MAX(?, COALESCE((SELECT MAX(last_opened_at) + 1 FROM repos), ?)), ?) ON CONFLICT(path) DO UPDATE SET name = excluded.name, last_opened_at = excluded.last_opened_at, remote = 1").bind(path).bind(name).bind(clock).bind(clock).bind(clock).execute(pool).await?;
+    Ok(())
+}
+
 pub(crate) async fn load_repos(pool: &SqlitePool) -> Result<Vec<Repo>, CommandError> {
     let rows = sqlx::query(
         "SELECT path, name, pinned_at FROM repos ORDER BY last_opened_at DESC, created_at DESC, path ASC",
@@ -239,9 +251,10 @@ pub(crate) async fn list_repo_rows_in_pool(pool: &SqlitePool) -> Result<Vec<Repo
 
 // Older versions stored Windows verbatim paths (\\?\C:\...) on open; move
 // them to plain paths so the UI shows what the user selected. A plain-path
-// row wins if both forms already exist.
+// row wins if both forms already exist. Remote rows are never touched:
+// their POSIX identity strings must survive byte-for-byte.
 pub(crate) async fn normalize_stored_paths(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    let paths: Vec<String> = sqlx::query_scalar("SELECT path FROM repos")
+    let paths: Vec<String> = sqlx::query_scalar("SELECT path FROM repos WHERE remote = 0")
         .fetch_all(pool)
         .await?;
     for path in paths {
@@ -325,6 +338,55 @@ pub(crate) async fn open_repo_path(path: &str, pool: &SqlitePool) -> Result<Repo
         .await?;
     Ok(Repo {
         path: path.into(),
+        name: name.into(),
+        worktrees: Vec::new(),
+        pinned_at,
+    })
+}
+
+// The remote open: identity normalization and host-side validation replace
+// the local canonicalize-and-probe. The canonical identity string is stored
+// as the path (POSIX, never canonicalized locally) with the remote marker
+// set; narration and pin handling mirror the local open exactly.
+pub(crate) async fn open_remote_repo_path(
+    pool: &SqlitePool,
+    target: &RemoteTarget,
+) -> Result<Repo, CommandError> {
+    validate_work_tree(target).await?;
+    let identity = target.identity();
+    let name = target.name();
+    // Only a genuinely new registry row narrates: re-opening an existing
+    // repository refreshes it in place, and no add happened.
+    let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM repos WHERE path = ?")
+        .bind(&identity)
+        .fetch_one(pool)
+        .await?;
+    upsert_remote_repo(pool, &identity, name, now_millis()).await?;
+    if existing == 0 {
+        events::record_event(
+            pool,
+            events::NewEvent {
+                repo_path: identity.clone(),
+                kind: events::REPO_ADDED,
+                base_sha: None,
+                target_key: None,
+                target_kind: None,
+                request_id: None,
+                comment_id: None,
+                actor_kind: events::ACTOR_HUMAN,
+                actor_name: "human".to_string(),
+                summary: "repo added".to_string(),
+            },
+        )
+        .await?;
+    }
+    let pinned_at =
+        sqlx::query_scalar::<_, Option<i64>>("SELECT pinned_at FROM repos WHERE path = ?")
+            .bind(&identity)
+            .fetch_one(pool)
+            .await?;
+    Ok(Repo {
+        path: identity,
         name: name.into(),
         worktrees: Vec::new(),
         pinned_at,
@@ -771,6 +833,43 @@ mod tests {
         let rows = load_repos(&pool).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, r"C:\repos\demo");
+    }
+
+    #[tokio::test]
+    async fn remote_rows_are_marked_and_never_normalized() {
+        let pool = test_pool().await;
+        let target = crate::git::RemoteTarget::from_parts(
+            Some("dev"),
+            "host.example",
+            Some(2200),
+            "/srv/re po",
+        )
+        .unwrap();
+        let identity = target.identity();
+        upsert_remote_repo(&pool, &identity, target.name(), 50).await.unwrap();
+        // Re-opening refreshes in place and stays remote.
+        upsert_remote_repo(&pool, &identity, "renamed", 51).await.unwrap();
+
+        normalize_stored_paths(&pool).await.unwrap();
+
+        let row =
+            sqlx::query("SELECT path, name, remote FROM repos WHERE path = ?")
+                .bind(&identity)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.get::<String, _>("name"), "renamed");
+        assert_eq!(row.get::<i64, _>("remote"), 1);
+        // Local rows keep the local marker.
+        upsert_repo(&pool, r"\\?\C:\repos\demo", "demo", 40).await.unwrap();
+        normalize_stored_paths(&pool).await.unwrap();
+        let local: i64 =
+            sqlx::query_scalar("SELECT remote FROM repos WHERE path = ?")
+                .bind(r"C:\repos\demo")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(local, 0);
     }
 
     #[tokio::test]

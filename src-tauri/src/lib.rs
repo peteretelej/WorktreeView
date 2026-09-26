@@ -23,10 +23,10 @@ use commands::{
     list_attention, list_comments, list_commits, list_portal_activity, list_portal_reviews,
     list_portal_threads, list_refs, list_repos, list_requests, list_review_changes,
     list_submissions, list_surfaces, list_worktree_status, list_worktrees, mark_activity_seen,
-    match_comment_anchors, open_log_dir, open_repo, open_review_file, read_review_file,
-    read_review_file_bytes, read_review_patch, remove_repo, reply_comment, restart_mcp,
-    search_portal, update_review_request, set_comment_resolved, set_repo_pinned, set_settings,
-    set_surface_pinned,
+    match_comment_anchors, open_log_dir, open_remote_repo, open_repo, open_review_file,
+    read_review_file, read_review_file_bytes, read_review_patch, remove_repo, reply_comment,
+    restart_mcp, search_portal, update_review_request, set_comment_resolved, set_repo_pinned,
+    set_settings, set_surface_pinned,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -275,6 +275,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_repo,
+            open_remote_repo,
             list_repos,
             list_worktrees,
             list_worktree_status,
@@ -592,8 +593,8 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        // The embedded set: the consolidated baseline plus 0002 through 0005.
-        assert_eq!(versions.len(), 5);
+        // The embedded set: the consolidated baseline plus 0002 through 0006.
+        assert_eq!(versions.len(), 6);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await
@@ -654,7 +655,7 @@ mod tests {
                 .unwrap();
         // The overwritten backup held the first rebuilt store: the full
         // embedded migration set.
-        assert_eq!(preserved.0, 5);
+        assert_eq!(preserved.0, 6);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -729,7 +730,7 @@ mod tests {
                 .await
                 .unwrap();
         // The rebuilt store carries the full embedded migration set.
-        assert_eq!(versions.len(), 5);
+        assert_eq!(versions.len(), 6);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await

@@ -1,6 +1,7 @@
 mod exec;
 mod filters;
 mod parse;
+mod remote;
 mod validate;
 
 pub(crate) use exec::{
@@ -17,6 +18,7 @@ pub(crate) use parse::{
     parse_untracked_paths, parse_worktrees, BranchRecord, BranchSummary, ChangedFile, CommitInfo,
     CommitPage, Worktree,
 };
+pub(crate) use remote::{validate_work_tree, RemoteTarget};
 pub(crate) use validate::{
     effective_head_ref, ensure_work_tree, partial_clone_failure, primary_branch,
     remote_branch_of_tracking_ref, resolve_empty_tree, resolve_ref, validate_fetch_name,
