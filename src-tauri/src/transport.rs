@@ -431,7 +431,7 @@ async fn handle_refresh_repo(state: TransportState, id: Value, params: Value) ->
             "No repository with that path is open in WorktreeView.",
         );
     }
-    match refresh_repo(Path::new(&params.repo_path), &state.refreshes).await {
+    match refresh_repo(&state.pool, &params.repo_path, &state.refreshes).await {
         Ok(()) => (
             StatusCode::OK,
             Json(json!({

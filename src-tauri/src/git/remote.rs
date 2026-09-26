@@ -1,6 +1,6 @@
 use super::exec::{git_execution_error, read_bounded};
 use super::parse::{parse_framed_output, FragmentOutput};
-use super::validate::is_not_a_repository_diagnostic;
+use super::validate::{is_not_a_repository_diagnostic, validate_file};
 use crate::CommandError;
 use std::future::Future;
 use std::pin::Pin;
@@ -273,8 +273,8 @@ pub(crate) fn frame_fragment(nonce: &str, fragment: &str) -> String {
 // The remote allowlist: the single match deciding which git argv may run on
 // the host, mirroring the read-only plumbing set of the local call sites.
 // The runner's entry point is the only caller; anything not matched here is
-// refused with a typed error. `git diff --no-index` and the bounded read
-// command are deliberate later additions, not absent by omission.
+// refused with a typed error. The bounded read command's fixed template is
+// gated beside this match (`read_command_string`), the one non-git entry.
 fn allowlisted(args: &[String]) -> Result<(), CommandError> {
     let args = leading_globals_and_configs(args)?;
     let Some((subcommand, rest)) = args.split_first() else {
@@ -293,7 +293,9 @@ fn allowlisted(args: &[String]) -> Result<(), CommandError> {
         ),
         "diff" => {
             // ext-diff and textconv execute repository-defined converters;
-            // both neutralizations are required, not optional.
+            // both neutralizations are required, not optional. `--no-index`
+            // serves the untracked patch, diffing `/dev/null` against the one
+            // substituted file operand with its cwd outside the repository.
             if !rest.iter().any(|arg| arg == "--no-ext-diff")
                 || !rest.iter().any(|arg| arg == "--no-textconv")
             {
@@ -302,6 +304,7 @@ fn allowlisted(args: &[String]) -> Result<(), CommandError> {
             flags(
                 rest,
                 &[
+                    "--no-index",
                     "--no-ext-diff",
                     "--no-textconv",
                     "--no-color",
@@ -344,7 +347,7 @@ fn allowlisted(args: &[String]) -> Result<(), CommandError> {
             _ => Err(refused("cat-file only reads blobs.")),
         },
         "ls-tree" => flags(rest, &["-z", "--"], &[]),
-        "ls-files" => flags(rest, &["--others", "--exclude-standard", "-z"], &[]),
+        "ls-files" => flags(rest, &["--others", "--exclude-standard", "-z", "--"], &[]),
         "remote" if rest.is_empty() => Ok(()),
         // config without a read subcommand writes (`config user.name x`);
         // only the two read forms pass.
@@ -355,6 +358,14 @@ fn allowlisted(args: &[String]) -> Result<(), CommandError> {
         "hash-object" => {
             if rest != ["-t", "tree", "--stdin"] {
                 return Err(refused("hash-object only computes the empty tree."));
+            }
+            Ok(())
+        }
+        // The project fetch, one hop removed: the exact argv the local Fetch
+        // action runs, remote-tracking refs only, no refspec of any kind.
+        "fetch" => {
+            if rest != ["--all", "--prune", "--quiet"] {
+                return Err(refused("only `fetch --all --prune --quiet` is allowed."));
             }
             Ok(())
         }
@@ -671,10 +682,11 @@ fn beside_git(program: &str) -> Option<String> {
 
 // Deadlines sized to include connection setup: 60 s bounds a hung remote
 // read without tripping the phase-5 latency gate threshold (8 s); the
-// remote fetch matches the local fetch budget.
+// bounded content read inherits the local content budget exactly (30 s),
+// and the remote fetch matches the local fetch budget.
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
-#[allow(dead_code)] // consumed by the remote fetch (phase 3)
 const REMOTE_FETCH_TIMEOUT: Duration = Duration::from_secs(300);
+const REMOTE_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn run_remote_git_budgeted(
     spawner: &Spawner,
@@ -928,6 +940,130 @@ fn ssh_failure(stderr: &[u8]) -> CommandError {
     )
 }
 
+// The reviewed file's host-side path: the target's worktree path joined with
+// the validated diff-relative name. Both halves are POSIX and neither
+// contains a traversal, so plain composition stays inside the worktree.
+fn host_file_path(worktree: &str, file: &str) -> String {
+    format!("{}/{}", worktree.trim_end_matches('/'), file)
+}
+
+// The bounded read command: one fixed template (`cat`) whose only variable
+// slot is the shell-quoted host file path. It is the allowlist's single
+// non-git entry, so the template builder is the gate: nothing else can
+// reach the host through it. Output is bounded per stream by the runner and
+// raw bytes return to the caller; the C locale is pinned because the
+// missing-file classification reads stderr.
+pub(crate) fn read_command_string(worktree: &str, file: &str) -> Result<String, CommandError> {
+    validate_file(file)?;
+    Ok(format!(
+        "LC_ALL=C LANG=C cat {}",
+        shell_quote(&host_file_path(worktree, file))
+    ))
+}
+
+// What the read command saw: `Some` carries the raw bounded bytes, `None`
+// marks a file that does not exist on the host (the caller decides whether
+// absence is empty content or a failure).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemoteRead {
+    File(Vec<u8>),
+    Missing,
+}
+
+// cat's missing-file diagnostic, matched only because the command pins the
+// C locale; every other failure keeps its own diagnostic.
+fn is_missing_file_diagnostic(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr)
+        .to_ascii_lowercase()
+        .contains("no such file or directory")
+}
+
+// The bounded read through the injected spawner; entry points pass the
+// production spawner, tests inject a fake.
+pub(crate) async fn run_remote_read_with(
+    spawner: &Spawner,
+    target: &RemoteTarget,
+    file: &str,
+) -> Result<RemoteRead, CommandError> {
+    let remote_command = read_command_string(&target.path, file)?;
+    let spawn = ssh_invocation(
+        target,
+        &ssh_program(),
+        &remote_command,
+        multiplex_socket(target).as_deref(),
+    );
+    let child = (spawner)(spawn).await?;
+    let (exit_code, stdout, stderr) = run_child(child, REMOTE_READ_TIMEOUT).await?;
+    if exit_code == 255 {
+        return Err(ssh_failure(&stderr));
+    }
+    if exit_code != 0 {
+        if is_missing_file_diagnostic(&stderr) {
+            return Ok(RemoteRead::Missing);
+        }
+        return Err(git_execution_error(&stderr));
+    }
+    Ok(RemoteRead::File(stdout))
+}
+
+// The no-index untracked diff, executed on the host with its cwd outside any
+// repository (the temp directory, mirroring the local spawn hygiene), so
+// repository attributes cannot apply to it. The file operand is the only
+// substituted slot; `/dev/null` is the empty old side, exactly as the local
+// stdin-fed shape diffs it.
+pub(crate) fn no_index_diff_fragment(
+    worktree: &str,
+    file: &str,
+    numstat: bool,
+) -> BatchFragment {
+    let mut args = vec![
+        "diff".into(),
+        "--no-index".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+    ];
+    if numstat {
+        args.extend(["--numstat".into(), "-z".into()]);
+    } else {
+        args.extend(["--no-color".into(), "-U3".into()]);
+    }
+    args.extend([
+        "--".into(),
+        "/dev/null".into(),
+        host_file_path(worktree, file),
+    ]);
+    BatchFragment {
+        cwd: Some("/tmp".into()),
+        args,
+        stdin: None,
+    }
+}
+
+// The project fetch, one hop removed: the same `fetch --all --prune` the
+// local Fetch action runs, executed on the host against the host's own
+// remotes. Remote-tracking refs only; the one-Git-write invariant is
+// unchanged. Output keeps the user's locale exactly as the local fetch does.
+pub(crate) async fn run_remote_fetch_with(
+    spawner: &Spawner,
+    target: &RemoteTarget,
+) -> Result<(), CommandError> {
+    let args = [
+        "fetch".to_string(),
+        "--all".to_string(),
+        "--prune".to_string(),
+        "--quiet".to_string(),
+    ];
+    let (exit_code, _, stderr) =
+        run_remote_git_budgeted(spawner, target, &args, false, REMOTE_FETCH_TIMEOUT).await?;
+    if exit_code == 255 {
+        return Err(ssh_failure(&stderr));
+    }
+    if exit_code != 0 {
+        return Err(git_execution_error(&stderr));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1105,6 +1241,65 @@ pub(crate) fn batch_fake_spawner(
     }
 
     #[test]
+    fn read_command_template_quotes_the_only_variable_slot() {
+        assert_eq!(
+            read_command_string("/srv/repo", "src/file.rs").unwrap(),
+            "LC_ALL=C LANG=C cat '/srv/repo/src/file.rs'"
+        );
+        assert_eq!(
+            read_command_string("/srv/re po", "it's file.txt").unwrap(),
+            "LC_ALL=C LANG=C cat '/srv/re po/it'\\''s file.txt'"
+        );
+        // The template is the gate: traversal, absolute paths, and
+        // option-shaped names are refused before anything spawns.
+        assert_eq!(
+            read_command_string("/srv/repo", "../outside").unwrap_err().code,
+            "invalid_path"
+        );
+        assert_eq!(
+            read_command_string("/srv/repo", "-flag").unwrap_err().code,
+            "invalid_path"
+        );
+    }
+
+    #[test]
+    fn no_index_fragments_diff_outside_the_repository() {
+        let fragment = no_index_diff_fragment("/srv/re po", "new.txt", true);
+        assert_eq!(fragment.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(
+            fragment.args,
+            args_of(&[
+                "diff",
+                "--no-index",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--numstat",
+                "-z",
+                "--",
+                "/dev/null",
+                "/srv/re po/new.txt",
+            ])
+        );
+        assert!(allowlisted(&fragment.args).is_ok());
+        let patch = no_index_diff_fragment("/srv/repo", "src/new.txt", false);
+        assert_eq!(
+            patch.args,
+            args_of(&[
+                "diff",
+                "--no-index",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "-U3",
+                "--",
+                "/dev/null",
+                "/srv/repo/src/new.txt",
+            ])
+        );
+        assert!(allowlisted(&patch.args).is_ok());
+    }
+
+    #[test]
     fn nonces_are_random_hex() {
         let first = new_nonce().unwrap();
         let second = new_nonce().unwrap();
@@ -1159,6 +1354,32 @@ pub(crate) fn batch_fake_spawner(
                 "--",
                 "src/file.rs",
             ],
+            // The no-index untracked shapes: neutralized, `/dev/null` old
+            // side, the substituted file operand, run from outside the repo.
+            &[
+                "diff",
+                "--no-index",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--numstat",
+                "-z",
+                "--",
+                "/dev/null",
+                "/srv/repo/new.txt",
+            ],
+            &[
+                "diff",
+                "--no-index",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "-U3",
+                "--",
+                "/dev/null",
+                "/srv/re po/new.txt",
+            ],
+            // The project fetch's exact argv.
+            &["fetch", "--all", "--prune", "--quiet"],
             &[
                 "status",
                 "--porcelain=v1",
@@ -1230,10 +1451,11 @@ pub(crate) fn batch_fake_spawner(
             &["cat-file", "commit", "abc123"],
             &["hash-object", "-t", "blob", "--stdin"],
             &["rev-parse", "--upload-pack", "evil"],
-            // Missing the required diff neutralizations.
+            // Missing the required diff neutralizations, no-index included.
             &["diff", "--numstat", "-z", "a...b"],
-            // The phase-3 addition is not allowlisted yet.
-            &["diff", "--no-index", "--no-ext-diff", "--no-textconv", "a", "b"],
+            &["diff", "--no-index", "--numstat", "-z", "a", "b"],
+            &["fetch", "--all", "--prune"],
+            &["fetch", "--all", "--prune", "--quiet", "refs/heads/main"],
             &["check-attr", "-z", "diff", "--", "file"],
             &["-c", "core.fsmonitor=true", "status", "--porcelain=v1"],
             &["-c", "filter.x.clean=evil", "diff", "--no-ext-diff", "--no-textconv"],
@@ -1307,6 +1529,55 @@ pub(crate) fn batch_fake_spawner(
             let child = canned_child(exit_code, stdout, stderr);
             Box::pin(async move { Ok(child) }) as SpawnResult
         })
+    }
+
+    // A fake runner for flows that mix framed batches with single-shot
+    // commands (a batched probe followed by the raw read or fetch): scripts
+    // containing a begin marker get the next canned batch's frames, every
+    // other invocation gets the next canned raw (exit, stdout, stderr).
+    // Recorded scripts are the composition assertions either way.
+    pub(crate) fn hybrid_fake_spawner(
+        batched: Vec<Vec<(i32, Vec<u8>)>>,
+        raw: Vec<(i32, Vec<u8>, Vec<u8>)>,
+    ) -> (Spawner, Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let scripts: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = scripts.clone();
+        let batch_cursor = Arc::new(AtomicUsize::new(0));
+        let raw_cursor = Arc::new(AtomicUsize::new(0));
+        let spawner: Spawner = Arc::new(move |spawn: SshSpawn| {
+            let script = spawn.args.last().cloned().unwrap_or_default();
+            recorder.lock().unwrap().push(script.clone());
+            if script.contains("-begin") {
+                let index = batch_cursor.fetch_add(1, Ordering::Relaxed);
+                let frames = batched.get(index).cloned().unwrap_or_default();
+                let nonce = script
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("echo WTV-")
+                            .and_then(|rest| rest.strip_suffix("-begin"))
+                    })
+                    .unwrap_or_default()
+                    .to_string();
+                let mut output = String::new();
+                for (exit_code, body) in frames {
+                    output.push_str(&format!("WTV-{nonce}-begin\n"));
+                    output.push_str(&String::from_utf8_lossy(&body));
+                    output.push_str(&format!("WTV-{nonce}-exit-{exit_code}\n"));
+                }
+                let child = canned_child(0, output.as_bytes(), b"");
+                Box::pin(async move { Ok(child) }) as SpawnResult
+            } else {
+                let index = raw_cursor.fetch_add(1, Ordering::Relaxed);
+                let (exit_code, stdout, stderr) = raw
+                    .get(index)
+                    .cloned()
+                    .unwrap_or((1, Vec::new(), b"unexpected invocation".to_vec()));
+                let child = canned_child(exit_code, &stdout, &stderr);
+                Box::pin(async move { Ok(child) }) as SpawnResult
+            }
+        });
+        (spawner, scripts)
     }
 
     // A fake runner that spawns a real local process in ssh's place, for
@@ -1395,6 +1666,74 @@ pub(crate) fn batch_fake_spawner(
         .unwrap_err();
         assert_eq!(error.code, "remote_command_refused");
         assert!(!spawned.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn read_command_spawns_the_fixed_template_and_returns_raw_bytes() {
+        let bytes: Vec<u8> = [b'a', 0, b'b', 0xff].repeat(64);
+        let raw = bytes.clone();
+        let recorded: Arc<std::sync::Mutex<Option<SshSpawn>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let recorder = recorded.clone();
+        let spawner: Spawner = Arc::new(move |spawn: SshSpawn| {
+            *recorder.lock().unwrap() = Some(spawn);
+            let child = canned_child(0, &raw, b"");
+            Box::pin(async move { Ok(child) }) as SpawnResult
+        });
+        let read = run_remote_read_with(&spawner, &target(), "src/asset.bin")
+            .await
+            .unwrap();
+        // NUL-bearing bytes return untouched: the byte path serves images.
+        assert_eq!(read, RemoteRead::File(bytes));
+        let spawn = recorded.lock().unwrap().take().unwrap();
+        assert_eq!(
+            spawn.args.last().unwrap(),
+            &read_command_string("/srv/repo", "src/asset.bin").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_command_classifies_missing_and_keeps_other_failures() {
+        let missing: &'static [u8] = b"cat: /srv/repo/gone.txt: No such file or directory\n";
+        let spawner: Spawner = Arc::new(move |_spawn: SshSpawn| {
+            let child = canned_child(1, b"", missing);
+            Box::pin(async move { Ok(child) }) as SpawnResult
+        });
+        let read = run_remote_read_with(&spawner, &target(), "gone.txt")
+            .await
+            .unwrap();
+        assert_eq!(read, RemoteRead::Missing);
+
+        let spawner: Spawner = Arc::new(move |_spawn: SshSpawn| {
+            let child = canned_child(1, b"", b"cat: /srv/repo/x: Permission denied\n");
+            Box::pin(async move { Ok(child) }) as SpawnResult
+        });
+        let error = run_remote_read_with(&spawner, &target(), "x")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "git_execution");
+
+        let spawner: Spawner = Arc::new(move |_spawn: SshSpawn| {
+            let child = canned_child(255, b"", b"host.example: Permission denied.\n");
+            Box::pin(async move { Ok(child) }) as SpawnResult
+        });
+        let error = run_remote_read_with(&spawner, &target(), "x")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "auth_failed");
+    }
+
+    #[tokio::test]
+    async fn read_command_refuses_output_beyond_the_bound() {
+        let big = vec![0u8; super::super::MAX_OUTPUT + 1];
+        let spawner: Spawner = Arc::new(move |_spawn: SshSpawn| {
+            let child = canned_child(0, &big, b"");
+            Box::pin(async move { Ok(child) }) as SpawnResult
+        });
+        let error = run_remote_read_with(&spawner, &target(), "big.bin")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "git_output_too_large");
     }
 
     #[tokio::test]

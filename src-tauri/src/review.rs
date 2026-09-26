@@ -2,14 +2,14 @@ use crate::cache;
 use crate::git::{
     acceptable_diff_exit, batch_fragment, configured_filter_names, effective_head_ref,
     ensure_work_tree, filter_override_args, fragment_sha, git_args, git_execution_error,
-    parse_applicable_filter_paths, parse_commits, parse_configured_filter_names,
+    no_index_diff_fragment, parse_applicable_filter_paths, parse_commits, parse_configured_filter_names,
     parse_name_status, parse_numstat, parse_untracked_paths, partial_clone_failure,
     primary_branch, read_target, read_worktree_target, reject_applicable_filters,
     resolve_empty_tree, resolve_ref, run_git, run_git_with_stdin, run_remote_batch,
-    run_remote_batch_with,
-    stdin_git_command, unsupported_filter_error, validate_file, validate_ref,
-    validate_scope_combination, validate_untracked_combination, BatchFragment, ChangedFile,
-    CommitInfo, CommitPage, ReadTarget, RemoteTarget, MAX_OUTPUT,
+    run_remote_batch_with, run_remote_read_with, stdin_git_command, unsupported_filter_error,
+    validate_file, validate_ref, validate_scope_combination, validate_untracked_combination,
+    validate_work_tree_with, BatchFragment, ChangedFile, CommitInfo, CommitPage, ReadTarget,
+    RemoteRead, RemoteTarget, MAX_OUTPUT,
 };
 use crate::retrospection;
 use crate::CommandError;
@@ -1433,13 +1433,7 @@ pub(crate) async fn review_patch(
         }
         ReadTarget::Remote(target) => {
             if untracked {
-                // The no-index untracked patch is the content-parity phase's
-                // addition; refuse it rather than misreading the request as
-                // a working-changes scope.
-                return Err(CommandError::new(
-                    "remote_scope_unsupported",
-                    "Untracked file patches for remote projects are not available yet.",
-                ));
+                return review_patch_untracked_remote(&target, &file).await;
             }
             review_patch_remote(
                 &target,
@@ -1453,6 +1447,59 @@ pub(crate) async fn review_patch(
             .await
         }
     }
+}
+
+// The remote untracked patch: the same no-index mechanism as the local
+// capture, executed on the host where the file lives. One invocation carries
+// the literal untracked check and the two diffs; exit 1 is no-index's
+// "differences found" code, accepted exactly as locally.
+async fn review_patch_untracked_remote(
+    target: &RemoteTarget,
+    file: &str,
+) -> Result<FilePatch, CommandError> {
+    review_patch_untracked_remote_with(&crate::git::process_spawner(), target, file).await
+}
+
+async fn review_patch_untracked_remote_with(
+    spawner: &crate::git::Spawner,
+    target: &RemoteTarget,
+    file: &str,
+) -> Result<FilePatch, CommandError> {
+    let check = batch_fragment(vec![
+        "ls-files".into(),
+        "--others".into(),
+        "--exclude-standard".into(),
+        "-z".into(),
+        "--".into(),
+        format!(":(literal){file}"),
+    ]);
+    let numstat = no_index_diff_fragment(&target.path, file, true);
+    let patch = no_index_diff_fragment(&target.path, file, false);
+    let batch = run_remote_batch_with(spawner, target, &[check, numstat, patch]).await?;
+    let listed = parse_untracked_paths(&batch.ok(0)?.stdout)?;
+    if !listed.iter().any(|untracked| untracked == file) {
+        return Err(CommandError::new(
+            "invalid_path",
+            "The selected file is not an untracked review file.",
+        ));
+    }
+    if !acceptable_diff_exit(batch.code(1), true) {
+        return Err(git_execution_error(&batch.stderr));
+    }
+    let (_, _, binary) = parse_numstat(&batch.fragments[1].stdout)?;
+    if binary {
+        return Ok(FilePatch {
+            binary: true,
+            text: String::new(),
+        });
+    }
+    if !acceptable_diff_exit(batch.code(2), true) {
+        return Err(git_execution_error(&batch.stderr));
+    }
+    let text = String::from_utf8(batch.fragments[2].stdout.clone()).map_err(|_| {
+        CommandError::new("git_output_malformed", "Git returned invalid patch text.")
+    })?;
+    Ok(FilePatch { binary: false, text })
 }
 
 async fn review_patch_local(
@@ -1800,12 +1847,16 @@ async fn merge_base_or_none(
     Ok(if sha.is_empty() { None } else { Some(sha) })
 }
 
-async fn merge_base_or_none_remote(
+// The remote twin of the local merge-base probe, through the injected
+// spawner: None when the revs share no history.
+async fn merge_base_or_none_remote_with(
+    spawner: &crate::git::Spawner,
     target: &RemoteTarget,
     left: &str,
     right: &str,
 ) -> Result<Option<String>, CommandError> {
-    let batch = run_remote_batch(
+    let batch = run_remote_batch_with(
+        spawner,
         target,
         &[batch_fragment(vec![
             "merge-base".into(),
@@ -1823,12 +1874,14 @@ async fn merge_base_or_none_remote(
 
 // The remote twin of the ls-tree-then-cat-file read: the blob SHA comes
 // from ls-tree's output so no assembled `rev:path` name reaches Git.
-async fn read_committed_file_remote(
+async fn read_committed_file_remote_with(
+    spawner: &crate::git::Spawner,
     target: &RemoteTarget,
     rev: &str,
     file: &str,
 ) -> Result<Vec<u8>, CommandError> {
-    let listed = run_remote_batch(
+    let listed = run_remote_batch_with(
+        spawner,
         target,
         &[batch_fragment(vec![
             "ls-tree".into(),
@@ -1853,7 +1906,8 @@ async fn read_committed_file_remote(
         [_, "blob", sha] => *sha,
         _ => return Ok(Vec::new()),
     };
-    let loaded = run_remote_batch(
+    let loaded = run_remote_batch_with(
+        spawner,
         target,
         &[batch_fragment(vec![
             "cat-file".into(),
@@ -2004,10 +2058,12 @@ async fn resolve_review_file_bytes_local(
     Ok(read_committed_file(&path, &head_ref, &file).await?)
 }
 
-// The remote new side reads pure Git: merge-base plus ls-tree and cat-file
-// for reversed committed scopes, plain ls-tree plus cat-file otherwise.
-// Untracked captures and working-changes file reads touch the local
-// filesystem by design and belong to the content-parity phase.
+// The remote new side: committed and reversed scopes read pure Git
+// (merge-base plus ls-tree and cat-file); working-changes and untracked
+// content ride the bounded read command with the worktree pinned first,
+// mirroring the local cap-std reads. Raw bytes return untouched, so the
+// byte path serves images; the NUL binary check stays caller-side on the
+// text path exactly as locally.
 async fn resolve_review_file_bytes_remote(
     target: &RemoteTarget,
     base: String,
@@ -2017,27 +2073,86 @@ async fn resolve_review_file_bytes_remote(
     file: String,
     untracked: bool,
 ) -> Result<Vec<u8>, CommandError> {
-    if untracked || (!committed_only && !reversed) {
-        return Err(CommandError::new(
-            "remote_scope_unsupported",
-            "Working-changes and untracked content for remote projects is not available yet.",
-        ));
+    resolve_review_file_bytes_remote_with(
+        &crate::git::process_spawner(),
+        target,
+        base,
+        head_ref,
+        committed_only,
+        reversed,
+        file,
+        untracked,
+    )
+    .await
+}
+
+async fn resolve_review_file_bytes_remote_with(
+    spawner: &crate::git::Spawner,
+    target: &RemoteTarget,
+    base: String,
+    head_ref: String,
+    committed_only: bool,
+    reversed: bool,
+    file: String,
+    untracked: bool,
+) -> Result<Vec<u8>, CommandError> {
+    if untracked {
+        let listed = run_remote_batch_with(
+            spawner,
+            target,
+            &[batch_fragment(vec![
+                "ls-files".into(),
+                "--others".into(),
+                "--exclude-standard".into(),
+                "-z".into(),
+                "--".into(),
+                format!(":(literal){file}"),
+            ])],
+        )
+        .await?;
+        let paths = parse_untracked_paths(&listed.ok(0)?.stdout)?;
+        if !paths.iter().any(|path| path == &file) {
+            return Err(CommandError::new(
+                "invalid_path",
+                "The selected file is not an untracked review file.",
+            ));
+        }
+        return match run_remote_read_with(spawner, target, &file).await? {
+            // A file that vanished between the inventory check and the read
+            // fails like the local capture does.
+            RemoteRead::Missing => Err(CommandError::new(
+                "invalid_path",
+                "The selected file could not be opened.",
+            )),
+            RemoteRead::File(bytes) => Ok(bytes),
+        };
+    }
+    if !committed_only && !reversed {
+        // The working-changes read pins the root to a verified worktree
+        // first, exactly as the local cap-std read does.
+        validate_work_tree_with(spawner, target).await?;
+        return match run_remote_read_with(spawner, target, &file).await? {
+            // Absence is empty content ("no file on this side"), never an
+            // error.
+            RemoteRead::Missing => Ok(Vec::new()),
+            RemoteRead::File(bytes) => Ok(bytes),
+        };
     }
     if reversed {
         if base == "empty-tree" {
             return Ok(Vec::new());
         }
         if committed_only {
-            return match merge_base_or_none_remote(target, &base, &head_ref).await? {
+            return match merge_base_or_none_remote_with(spawner, target, &base, &head_ref).await? {
                 Some(merge_base) => {
-                    read_committed_file_remote(target, &merge_base, &file).await
+                    read_committed_file_remote_with(spawner, target, &merge_base, &file).await
                 }
                 None => Ok(Vec::new()),
             };
         }
-        return read_committed_file_remote(target, &base, &file).await;
+        return read_committed_file_remote_with(spawner, target, &base, &file).await;
     }
-    read_committed_file_remote(target, &head_ref, &file).await
+    read_committed_file_remote_with(spawner, target, &head_ref, &file).await
 }
 
 #[cfg(test)]
@@ -2045,6 +2160,7 @@ mod tests {
     use super::*;
     use crate::git::read_bounded;
     use crate::git::batch_fake_spawner;
+    use crate::git::hybrid_fake_spawner;
     use crate::git::spawn_counted;
     use crate::testutil::{seed_repo, test_git, test_path, test_pool, test_repo, test_rev_parse};
     #[cfg(unix)]
@@ -3751,5 +3867,209 @@ repo.to_str().unwrap().into(),
         assert_eq!(index.files[0].path, "src/app.rs");
         assert_eq!(index.additions, 3);
         assert_eq!(index.deletions, 1);
+    }
+
+    fn remote_target(path: &str) -> RemoteTarget {
+        RemoteTarget::from_parts(Some("dev"), "host.example", None, path).unwrap()
+    }
+
+    // The remote untracked patch rides one invocation: the literal untracked
+    // check at the worktree plus the two no-index diffs, which run with
+    // their cwd outside the repository and the file operand as the only
+    // substituted slot.
+    #[tokio::test]
+    async fn remote_untracked_patch_diffs_on_the_host() {
+        let (spawner, scripts) = batch_fake_spawner(vec![vec![
+            (0, b"new.txt\0".to_vec()),
+            (1, b"2\t0\t/srv/re po/new.txt\0".to_vec()),
+            (
+                1,
+                b"diff --git a/dev/null b/new.txt\nnew file mode 100644\n@@ -0,0 +1,2 @@\n"
+                    .to_vec(),
+            ),
+        ]]);
+        let target = remote_target("/srv/re po");
+        let patch = review_patch_untracked_remote_with(&spawner, &target, "new.txt")
+            .await
+            .unwrap();
+        assert_eq!(scripts.lock().unwrap().len(), 1);
+        let script = scripts.lock().unwrap()[0].clone();
+        assert_eq!(script.matches("-begin").count(), 3);
+        assert!(script.contains("':(literal)new.txt'"));
+        assert!(script.contains("-C '/tmp'"));
+        assert!(script.contains("'/dev/null'"));
+        assert!(script.contains("'/srv/re po/new.txt'"));
+        assert!(script.contains("--no-index"));
+        assert!(script.contains("--no-ext-diff"));
+        assert!(script.contains("--no-textconv"));
+        assert!(script.contains("GIT_ATTR_NOSYSTEM=1"));
+        assert!(script.contains("LC_ALL=C LANG=C"));
+        assert!(!patch.binary);
+        assert!(patch.text.contains("new file mode"));
+    }
+
+    #[tokio::test]
+    async fn remote_untracked_patch_reports_binary_without_patch_text() {
+        let (spawner, _scripts) = batch_fake_spawner(vec![vec![
+            (0, b"image.bin\0".to_vec()),
+            (1, b"-\t-\t/srv/repo/image.bin\0".to_vec()),
+            (1, Vec::new()),
+        ]]);
+        let target = remote_target("/srv/repo");
+        let patch = review_patch_untracked_remote_with(&spawner, &target, "image.bin")
+            .await
+            .unwrap();
+        assert!(patch.binary);
+        assert!(patch.text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remote_untracked_patch_requires_the_untracked_inventory() {
+        let (spawner, _scripts) = batch_fake_spawner(vec![vec![
+            (0, b"other.txt\0".to_vec()),
+            (1, Vec::new()),
+            (1, Vec::new()),
+        ]]);
+        let target = remote_target("/srv/repo");
+        let error = review_patch_untracked_remote_with(&spawner, &target, "missing.txt")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_path");
+    }
+
+    // The working-changes read pins the root to a verified worktree, then
+    // rides the fixed read command. NUL-bearing bytes return raw, so the
+    // byte path serves images while the text path's caller-side NUL check
+    // refuses the same content.
+    #[tokio::test]
+    async fn remote_working_content_reads_raw_bytes_after_the_worktree_probe() {
+        let bytes = b"png\x00bytes\xff".to_vec();
+        let (spawner, scripts) = hybrid_fake_spawner(
+            vec![],
+            vec![
+                (0, b"true\n".to_vec(), Vec::new()),
+                (0, bytes.clone(), Vec::new()),
+            ],
+        );
+        let target = remote_target("/srv/re po");
+        let read = resolve_review_file_bytes_remote_with(
+            &spawner,
+            &target,
+            "HEAD".into(),
+            "HEAD".into(),
+            false,
+            false,
+            "src/asset.bin".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(read, bytes);
+        assert_eq!(scripts.lock().unwrap().len(), 2);
+        assert!(scripts.lock().unwrap()[0].contains("'rev-parse' '--is-inside-work-tree'"));
+        let read_command = &scripts.lock().unwrap()[1];
+        assert!(read_command.starts_with("LC_ALL=C LANG=C cat "));
+        assert!(read_command.contains("'/srv/re po/src/asset.bin'"));
+        // The text path's caller-side check refuses these bytes.
+        assert!(content_is_binary(&bytes));
+    }
+
+    #[tokio::test]
+    async fn remote_working_content_treats_absence_as_empty() {
+        let (spawner, _scripts) = hybrid_fake_spawner(
+            vec![],
+            vec![
+                (0, b"true\n".to_vec(), Vec::new()),
+                (
+                    1,
+                    Vec::new(),
+                    b"cat: /srv/re po/gone.txt: No such file or directory".to_vec(),
+                ),
+            ],
+        );
+        let target = remote_target("/srv/re po");
+        let read = resolve_review_file_bytes_remote_with(
+            &spawner,
+            &target,
+            "HEAD".into(),
+            "HEAD".into(),
+            false,
+            false,
+            "gone.txt".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(read.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remote_working_content_refuses_a_non_worktree_root() {
+        let (spawner, scripts) = hybrid_fake_spawner(
+            vec![],
+            vec![(128, Vec::new(), b"fatal: not a git repository".to_vec())],
+        );
+        let target = remote_target("/etc");
+        let error = resolve_review_file_bytes_remote_with(
+            &spawner,
+            &target,
+            "HEAD".into(),
+            "HEAD".into(),
+            false,
+            false,
+            "passwd".into(),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "not_a_work_tree");
+        // The read command never ran against the refused root.
+        assert_eq!(scripts.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn remote_untracked_content_checks_inventory_then_reads() {
+        let bytes = b"bracket\ntext\n".to_vec();
+        let (spawner, scripts) = hybrid_fake_spawner(
+            vec![vec![(0, b"new[1].txt\0".to_vec())]],
+            vec![(0, bytes.clone(), Vec::new())],
+        );
+        let target = remote_target("/srv/re po");
+        let read = resolve_review_file_bytes_remote_with(
+            &spawner,
+            &target,
+            "HEAD".into(),
+            "HEAD".into(),
+            false,
+            false,
+            "new[1].txt".into(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(read, bytes);
+        assert_eq!(scripts.lock().unwrap().len(), 2);
+        assert!(scripts.lock().unwrap()[0].contains("':(literal)new[1].txt'"));
+        assert!(scripts.lock().unwrap()[1].contains("cat '/srv/re po/new[1].txt'"));
+    }
+
+    #[tokio::test]
+    async fn remote_untracked_content_refuses_a_missing_inventory_name() {
+        let (spawner, _scripts) =
+            hybrid_fake_spawner(vec![vec![(0, b"other\0".to_vec())]], vec![]);
+        let target = remote_target("/srv/repo");
+        let error = resolve_review_file_bytes_remote_with(
+            &spawner,
+            &target,
+            "HEAD".into(),
+            "HEAD".into(),
+            false,
+            false,
+            "missing.txt".into(),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_path");
     }
 }

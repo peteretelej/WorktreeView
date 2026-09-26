@@ -18,6 +18,10 @@ repository cannot mutate it or execute code it defines.
   behind. The fetch is initiated by the user, or pinged by an
   authenticated agent through the endpoint's `refresh_repo` method; the
   app owns the operation in both cases and runs it on the same path.
+  For a remote project the same fetch runs one hop away on the project's
+  own host, against the host's configured remotes, through the same
+  allowlist choke point and with no refspec of any kind beyond
+  `--all --prune`; the one-Git-write invariant is unchanged.
   Local re-reads of that state are read-only and run on their own
   schedule (on window focus and a quiet interval); the fetch itself
   never runs automatically.
@@ -37,7 +41,10 @@ repository cannot mutate it or execute code it defines.
   diff.autoRefreshIndex are disabled per invocation, every diff passes
   `--no-ext-diff --no-textconv`, configured clean and process filters are
   neutralized, and no-index diffs run with an empty attributes file,
-  `GIT_ATTR_NOSYSTEM`, outside the repository directory.
+  `GIT_ATTR_NOSYSTEM`, outside the repository directory. The same no-index
+  hygiene holds on a remote project's host, where the diff's working
+  directory is the host's temp directory, so no repository there can map
+  its attributes onto the diff either.
 - Invocations whose stderr is machine-parsed pin `LC_ALL` and `LANG` to C,
   so classification never depends on the user's Git language. All other
   invocations keep the user's locale for human-readable errors.
@@ -51,9 +58,19 @@ repository cannot mutate it or execute code it defines.
   working-changes reads go through the same cap-std path as untracked
   captures: relative paths only, the root pinned to a verified worktree,
   regular files only.
+- A remote project reads the same content from its own host. Working-changes
+  and untracked content rides one fixed-argv read command, `cat` with only
+  the shell-quoted host file path substituted, gated beside the git
+  allowlist at the same choke point; the worktree root is re-verified on
+  the host before the read, and untracked captures verify the file is
+  untracked first. Untracked patches diff on the host with the same
+  neutralized `git diff --no-index`, executed outside any repository
+  directory there.
 - Every content read shares the patch read's bounds: 16 MiB ceiling per
   stream, a 30 second deadline, kill-on-drop, and a binary check that
-  refuses NUL-bearing content instead of rendering it.
+  refuses NUL-bearing content instead of rendering it. Remote reads inherit
+  exactly those bounds; the NUL check stays caller-side on the text path,
+  so the raw-byte path can still serve images untouched.
 
 ## Opening reviewed files
 
@@ -72,6 +89,14 @@ repository cannot mutate it or execute code it defines.
   missing file with a visible error; no render-time filesystem probing
   runs, and the opened file may differ from the reviewed content when the
   checkout is not at the reviewed commit.
+- A remote project's reviewed file has no local path, so the open copies
+  first: the file's content is fetched from the host under the
+  reading-content bounds after the same worktree verification, written to
+  a fresh nonce-named folder under the app's temp location, named after
+  the reviewed file, and that local copy is what the OS opens or reveals.
+  The renderer still supplies only the diff-relative path and never a
+  resolved path; a failed fetch surfaces as a typed failure the frontend
+  uses to hide the action for that project.
 
 ## Network
 
@@ -85,13 +110,16 @@ repository cannot mutate it or execute code it defines.
 - A remote project's review computations contact only that project's
   configured SSH host, reached with the user's own `ssh` binary and its
   config, agent, and known hosts. The same read-only plumbing runs on the
-  host: every remote git invocation passes one allowlist of read-only
-  subcommands, the identity of that allowlist check is the same choke
-  point for validation and for batched review reads, and anything outside
-  it is refused before a connection is used. The same neutralizations
-  apply on the host (filters never execute, ext-diff and textconv are
-  off, the locale is pinned where output is machine-parsed), so hosting
-  the read elsewhere runs no repository-defined code there either.
+  host: every remote git invocation passes one allowlist at a single
+  choke point, the read-only plumbing set plus the neutralized no-index
+  diff and, outside git, the fixed-argv `cat` read template whose only
+  variable slot is the shell-quoted file path. The identity of that
+  allowlist check is the same choke point for validation and for batched
+  review reads, and anything outside it is refused before a connection is
+  used. The same neutralizations apply on the host (filters never execute,
+  ext-diff and textconv are off, the locale is pinned where output is
+  machine-parsed), so hosting the read elsewhere runs no
+  repository-defined code there either.
 - Remote reads carry no credentials of their own. ssh runs in batch mode
   and never answers a passphrase or host-key prompt; a rejected key or an
   unaccepted host key fails the read with an actionable message that
@@ -110,11 +138,15 @@ repository cannot mutate it or execute code it defines.
   computation. The project fetch contacts only the repository's own
   configured remotes and updates remote-tracking refs, exactly as the
   user's Git would from a terminal; the endpoint's `refresh_repo` method
-  pings this same fetch. The review-content fetch, offered when a review
-  fails on missing partial-clone content, re-fetches one named branch with
-  the configured clone filter suspended so that branch's blobs land on
-  disk; it never converts the whole clone. Both run through the same
-  hardened spawn (explicit argv, bounded output, kill-on-drop, a wide
+  pings this same fetch, and for a remote project the same shared fetch
+  path executes it on the project's own host. The review-content fetch,
+  offered when a review fails on missing partial-clone content, re-fetches
+  one named branch with the configured clone filter suspended so that
+  branch's blobs land on disk; it never converts the whole clone. That
+  recovery stays a local-project operation by design: it re-fetches a
+  named branch of a local clone, and remote hosts keep their own clone
+  state, so there is no remote equivalent. Both operations run through the
+  same hardened spawn (explicit argv, bounded output, kill-on-drop, a wide
   deadline for slow links), and every review computation reads whatever
   state the last fetch left behind.
 - The agent endpoint is the app's one inbound network surface, served

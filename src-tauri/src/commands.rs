@@ -3,11 +3,11 @@ use crate::agents::{
     AgentToken, CreatedAgentToken,
 };
 use crate::git::{
-    fetch_remote_branch, fetch_remotes, git_args, git_execution_error, parse_status_count,
-    parse_worktrees, read_target, read_worktree_target, remote_branch_of_tracking_ref, run_git,
-    run_remote_batch_with, validate_fetch_name, validate_ref, BatchFragment, CommitPage,
-    ReadTarget,
-    RemoteTarget, Worktree,
+    batch_fragment, fetch_remote_branch, fetch_remotes, git_args, git_execution_error, new_nonce,
+    parse_status_count, parse_worktrees, read_target, read_worktree_target, repo_is_remote,
+    remote_branch_of_tracking_ref, run_git, run_remote_batch_with, run_remote_fetch_with,
+    run_remote_read_with, validate_fetch_name, validate_file, validate_ref,
+    validate_work_tree_with, BatchFragment, CommitPage, ReadTarget, RemoteTarget, Worktree,
 };
 use crate::overview::{branch_inventory, BranchInventory};
 use crate::portal::{
@@ -45,7 +45,7 @@ use crate::{canonical_path, plain_path, AppState, CommandError};
 use serde::Serialize;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Manager;
 
@@ -415,8 +415,30 @@ pub(crate) type RefreshSink = Arc<dyn Fn(&str) + Send + Sync>;
 // of a review computation; the read-only probes always see whatever state
 // the last fetch left behind. Without a configured remote there is nothing
 // to fetch and no reason to spawn the network command at all; both outcomes
-// announce through the sink.
-pub(crate) async fn refresh_repo(path: &Path, refreshes: &RefreshSink) -> Result<(), CommandError> {
+// announce through the sink. Remote projects run the same fetch one hop
+// away on the host, against the host's own remotes.
+pub(crate) async fn refresh_repo(
+    pool: &SqlitePool,
+    path: &str,
+    refreshes: &RefreshSink,
+) -> Result<(), CommandError> {
+    refresh_repo_with(&crate::git::process_spawner(), pool, path, refreshes).await
+}
+
+pub(crate) async fn refresh_repo_with(
+    spawner: &crate::git::Spawner,
+    pool: &SqlitePool,
+    path: &str,
+    refreshes: &RefreshSink,
+) -> Result<(), CommandError> {
+    if repo_is_remote(pool, path).await? {
+        let target = RemoteTarget::parse_identity(path)?;
+        return refresh_remote_repo_with(spawner, &target, refreshes).await;
+    }
+    refresh_local_repo(Path::new(path), refreshes).await
+}
+
+async fn refresh_local_repo(path: &Path, refreshes: &RefreshSink) -> Result<(), CommandError> {
     let (exit_code, stdout, stderr) = run_git(path, &["remote"]).await?;
     if exit_code != 0 {
         return Err(git_execution_error(&stderr));
@@ -433,13 +455,33 @@ pub(crate) async fn refresh_repo(path: &Path, refreshes: &RefreshSink) -> Result
     Ok(())
 }
 
+// The remote branch of the shared fetch: the same `remote` listing and the
+// same `fetch --all --prune`, executed on the host with the remote-tracking
+// refs only. The one-Git-write invariant is unchanged except for running
+// one hop away; the sink announces with the stored identity.
+async fn refresh_remote_repo_with(
+    spawner: &crate::git::Spawner,
+    target: &RemoteTarget,
+    refreshes: &RefreshSink,
+) -> Result<(), CommandError> {
+    let listed =
+        run_remote_batch_with(spawner, target, &[batch_fragment(vec!["remote".into()])]).await?;
+    if listed.ok(0)?.stdout.iter().all(|byte| byte.is_ascii_whitespace()) {
+        refreshes(&target.identity());
+        return Ok(());
+    }
+    run_remote_fetch_with(spawner, target).await?;
+    refreshes(&target.identity());
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn fetch_project(
     path: String,
+    state: tauri::State<'_, AppState>,
     refreshes: tauri::State<'_, RefreshSink>,
 ) -> Result<(), CommandError> {
-    let path = canonical_path(&path)?;
-    refresh_repo(&path, &refreshes).await
+    refresh_repo(&state.pool, &path, &refreshes).await
 }
 
 // The review-content fetch: one remote branch's objects with the configured
@@ -1020,18 +1062,41 @@ pub(crate) async fn describe_commit(
 
 // Handing a reviewed file to the OS shell is user-initiated and must stay
 // inside the reviewed worktree: the renderer supplies only a diff-relative
-// path, the join is canonicalized, and anything resolving outside the root
-// (absolute paths, `..`, symlinks out) is refused before the opener runs.
+// path, the command joins the app-known worktree root, and anything
+// resolving outside that root (absolute paths, `..`, symlinks out) is
+// refused before the opener runs. Remote projects resolve on the app side:
+// the file's content is fetched under the same bounds, copied to a local
+// temp file, and that copy is what the OS opens.
 #[tauri::command]
-pub(crate) fn open_review_file(
+pub(crate) async fn open_review_file(
     worktree_path: String,
     path: String,
     reveal: bool,
+    repo_path: Option<String>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
     if path.trim().is_empty() {
         return Err(CommandError::new("invalid_path", "Select a non-empty file."));
     }
-    let root = Path::new(&worktree_path);
+    let target = match repo_path.as_deref() {
+        Some(repo) => Some(read_worktree_target(&state.pool, repo, &worktree_path).await?),
+        None => None,
+    };
+    match target {
+        Some(ReadTarget::Remote(target)) => {
+            let temp = copy_review_file_to_temp(&target, &path).await?;
+            open_with_os(&temp, reveal)
+        }
+        _ => open_local_review_file(&worktree_path, &path, reveal),
+    }
+}
+
+fn open_local_review_file(
+    worktree_path: &str,
+    path: &str,
+    reveal: bool,
+) -> Result<(), CommandError> {
+    let root = Path::new(worktree_path);
     if !root.is_dir() {
         return Err(CommandError::new(
             "invalid_path",
@@ -1041,7 +1106,7 @@ pub(crate) fn open_review_file(
     let root = plain_path(&root.canonicalize().map_err(|_| {
         CommandError::new("invalid_path", "The worktree folder could not be resolved.")
     })?);
-    let resolved = plain_path(&root.join(&path).canonicalize().map_err(|_| {
+    let resolved = plain_path(&root.join(path).canonicalize().map_err(|_| {
         CommandError::new("invalid_path", "The file is no longer in the worktree.")
     })?);
     if !resolved.starts_with(&root) {
@@ -1050,14 +1115,60 @@ pub(crate) fn open_review_file(
             "The file is outside the worktree.",
         ));
     }
+    open_with_os(&resolved, reveal)
+}
+
+fn open_with_os(path: &Path, reveal: bool) -> Result<(), CommandError> {
     let opened = if reveal {
-        tauri_plugin_opener::reveal_item_in_dir(&resolved)
+        tauri_plugin_opener::reveal_item_in_dir(path)
     } else {
-        tauri_plugin_opener::open_path(&resolved, None::<&str>)
+        tauri_plugin_opener::open_path(path, None::<&str>)
     };
     opened.map_err(|error| {
         CommandError::new("open_failed", format!("The file could not be opened: {error}"))
     })
+}
+
+// The remote copy-to-temp: the reviewed worktree file is fetched under the
+// same content bounds as every other remote read, after the same worktree
+// pin the local open's containment check enforces, and written to a fresh
+// nonce-named folder under the app's temp location, named after the file.
+// The renderer never supplies a resolved path; every fetch failure surfaces
+// as its typed error for the frontend to hide the action with.
+async fn copy_review_file_to_temp(
+    target: &RemoteTarget,
+    file: &str,
+) -> Result<PathBuf, CommandError> {
+    copy_review_file_to_temp_with(&crate::git::process_spawner(), target, file).await
+}
+
+async fn copy_review_file_to_temp_with(
+    spawner: &crate::git::Spawner,
+    target: &RemoteTarget,
+    file: &str,
+) -> Result<PathBuf, CommandError> {
+    validate_file(file)?;
+    validate_work_tree_with(spawner, target).await?;
+    let bytes = match run_remote_read_with(spawner, target, file).await? {
+        crate::git::RemoteRead::File(bytes) => bytes,
+        crate::git::RemoteRead::Missing => {
+            return Err(CommandError::new(
+                "invalid_path",
+                "The file is no longer in the worktree.",
+            ))
+        }
+    };
+    let name = file.rsplit('/').next().unwrap_or(file);
+    let dir = std::env::temp_dir()
+        .join(format!("worktreeview-open-{}", new_nonce()?));
+    std::fs::create_dir_all(&dir).map_err(|_| {
+        CommandError::new("open_failed", "The temporary folder could not be created.")
+    })?;
+    let temp = dir.join(name);
+    std::fs::write(&temp, bytes).map_err(|_| {
+        CommandError::new("open_failed", "The temporary copy could not be written.")
+    })?;
+    Ok(temp)
 }
 
 // The settings page's log access resolves the same app log dir the log
@@ -1185,9 +1296,10 @@ pub(crate) async fn match_comment_anchors(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_request_as_human, fetch_remote_branch, is_offline_failure, list_worktrees_in_pool,
-        list_worktrees_remote_with, list_worktree_status_remote_with, local_outcome,
-        note_remote_read_success, read_target, refresh_repo, remote_outcome, update_request_in_pool,
+        copy_review_file_to_temp_with, create_request_as_human, fetch_remote_branch,
+        is_offline_failure, list_worktrees_in_pool, list_worktrees_remote_with,
+        list_worktree_status_remote_with, local_outcome, note_remote_read_success, read_target,
+        refresh_repo, refresh_repo_with, remote_outcome, update_request_in_pool,
         worktree_change_count, CommandError, ReadOutcome, ReadState, ReadTarget, RemoteRead,
         RemoteTarget, RequestAction, RefreshSink, Worktree, WorktreeStatus, STALE_AFTER_MS,
     };
@@ -1245,7 +1357,9 @@ mod tests {
 
         // A repository with no fetched refs yet picks up the remote's
         // branches on the first refresh.
-        refresh_repo(&clone, &refreshes).await.unwrap();
+        refresh_repo(&pool, clone.to_str().unwrap(), &refreshes)
+            .await
+            .unwrap();
         let inventory = branch_inventory(&pool, clone.to_str().unwrap().into())
             .await
             .unwrap();
@@ -1263,7 +1377,9 @@ mod tests {
         test_git(&origin, &["checkout", "--quiet", "-b", "side"]);
         std::fs::write(origin.join("tracked.txt"), "changed\n").unwrap();
         test_git(&origin, &["commit", "--quiet", "-am", "advance"]);
-        refresh_repo(&clone, &refreshes).await.unwrap();
+        refresh_repo(&pool, clone.to_str().unwrap(), &refreshes)
+            .await
+            .unwrap();
         let inventory = branch_inventory(&pool, clone.to_str().unwrap().into())
             .await
             .unwrap();
@@ -1278,7 +1394,9 @@ mod tests {
         // A repository without remotes fetches nothing and still succeeds,
         // announcing the no-op like any completed refresh.
         let bare = test_repo("fetch-no-remote");
-        refresh_repo(&bare, &refreshes).await.unwrap();
+        refresh_repo(&pool, bare.to_str().unwrap(), &refreshes)
+            .await
+            .unwrap();
         assert_eq!(announced.lock().unwrap().len(), 3);
 
         let _ = std::fs::remove_dir_all(&origin);
@@ -1632,5 +1750,110 @@ mod tests {
         .unwrap();
         assert!(remote.contains("\"state\":\"live\""));
         assert!(remote.contains("\"last_success_age_ms\":0"));
+    }
+
+    async fn remote_row(pool: &sqlx::SqlitePool, identity: &str) {
+        sqlx::query(
+            "INSERT INTO repos (path, name, remote, last_opened_at, created_at) \
+             VALUES (?, 'demo', 1, 1, 1)",
+        )
+        .bind(identity)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    // The shared fetch path routes remote projects through the runner: one
+    // batched `remote` listing, then the exact local fetch argv executed on
+    // the host. Both the IPC command and the endpoint method call this same
+    // refresh_repo, so the routing holds for either caller.
+    #[tokio::test]
+    async fn refresh_repo_routes_remote_projects_through_the_runner() {
+        let pool = test_pool().await;
+        let identity = "dev@host.example:/srv/re po";
+        remote_row(&pool, identity).await;
+        let (spawner, scripts) = crate::git::hybrid_fake_spawner(
+            vec![vec![(0, b"origin\n".to_vec())]],
+            vec![(0, Vec::new(), Vec::new())],
+        );
+        let (refreshes, announced) = recording_sink();
+        refresh_repo_with(&spawner, &pool, identity, &refreshes)
+            .await
+            .unwrap();
+        // The guard is scoped: a held `scripts` lock relocks below.
+        let (listing, fetch) = {
+            let recorded = scripts.lock().unwrap();
+            assert_eq!(recorded.len(), 2);
+            (recorded[0].clone(), recorded[1].clone())
+        };
+        assert!(listing.contains("-begin"));
+        assert!(listing.contains("remote"));
+        assert!(fetch.contains("'fetch' '--all' '--prune' '--quiet'"));
+        assert!(fetch.contains("'/srv/re po'"));
+        assert_eq!(
+            announced.lock().unwrap().as_slice(),
+            [identity]
+        );
+    }
+
+    // A remote project without remotes fetches nothing: the no-op announces
+    // exactly as the local one does, and no fetch spawns.
+    #[tokio::test]
+    async fn refresh_repo_noops_for_a_remote_project_without_remotes() {
+        let pool = test_pool().await;
+        let identity = "dev@host.example:/srv/repo";
+        remote_row(&pool, identity).await;
+        let (spawner, scripts) =
+            crate::git::hybrid_fake_spawner(vec![vec![(0, Vec::new())]], vec![]);
+        let (refreshes, announced) = recording_sink();
+        refresh_repo_with(&spawner, &pool, identity, &refreshes)
+            .await
+            .unwrap();
+        assert_eq!(scripts.lock().unwrap().len(), 1);
+        assert_eq!(announced.lock().unwrap().as_slice(), [identity]);
+    }
+
+    // The remote OS-open copies the reviewed file to a fresh temp folder
+    // under the app's temp location, after the same worktree pin the local
+    // open enforces; a missing file is the typed failure the frontend hides
+    // the action with.
+    #[tokio::test]
+    async fn remote_open_copies_the_reviewed_file_to_a_temp_copy() {
+        let bytes = b"file\x00bytes".to_vec();
+        let (spawner, scripts) = crate::git::hybrid_fake_spawner(
+            vec![],
+            vec![
+                (0, b"true\n".to_vec(), Vec::new()),
+                (0, bytes.clone(), Vec::new()),
+            ],
+        );
+        let target = RemoteTarget::from_parts(Some("dev"), "host.example", None, "/srv/repo")
+            .unwrap();
+        let temp = copy_review_file_to_temp_with(&spawner, &target, "src/doc.txt")
+            .await
+            .unwrap();
+        assert_eq!(temp.file_name().unwrap(), "doc.txt");
+        assert!(std::fs::read(&temp).unwrap() == bytes);
+        assert!(temp.starts_with(std::env::temp_dir()));
+        assert_eq!(scripts.lock().unwrap().len(), 2);
+        assert!(scripts.lock().unwrap()[0].contains("'rev-parse' '--is-inside-work-tree'"));
+        assert!(scripts.lock().unwrap()[1].contains("cat '/srv/repo/src/doc.txt'"));
+        std::fs::remove_dir_all(temp.parent().unwrap()).unwrap();
+
+        let (spawner, _scripts) = crate::git::hybrid_fake_spawner(
+            vec![],
+            vec![
+                (0, b"true\n".to_vec(), Vec::new()),
+                (
+                    1,
+                    Vec::new(),
+                    b"cat: /srv/repo/gone.txt: No such file or directory".to_vec(),
+                ),
+            ],
+        );
+        let error = copy_review_file_to_temp_with(&spawner, &target, "gone.txt")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_path");
     }
 }

@@ -16,7 +16,7 @@ pub(crate) use exec::{
 #[cfg(test)]
 pub(crate) use exec::{read_bounded, spawn_counted};
 #[cfg(test)]
-pub(crate) use remote::tests::batch_fake_spawner;
+pub(crate) use remote::tests::{batch_fake_spawner, hybrid_fake_spawner};
 pub(crate) use filters::{
     configured_filter_names, filter_override_args, parse_applicable_filter_paths,
     parse_configured_filter_names, reject_applicable_filters, unsupported_filter_error,
@@ -27,8 +27,9 @@ pub(crate) use parse::{
     CommitPage, Worktree,
 };
 pub(crate) use remote::{
-    process_spawner, run_remote_batch, run_remote_batch_with, validate_work_tree, BatchFragment,
-    BatchOutput, RemoteTarget, Spawner,
+    new_nonce, no_index_diff_fragment, process_spawner, run_remote_batch, run_remote_batch_with,
+    run_remote_fetch_with, run_remote_read_with, validate_work_tree, validate_work_tree_with,
+    BatchFragment, BatchOutput, RemoteRead, RemoteTarget, Spawner,
 };
 
 // Shared allowlisted fragment shapes the plumbing modules compose into
@@ -112,7 +113,7 @@ pub(crate) enum ReadTarget {
     Remote(RemoteTarget),
 }
 
-async fn repo_is_remote(pool: &SqlitePool, repo_path: &str) -> Result<bool, CommandError> {
+pub(crate) async fn repo_is_remote(pool: &SqlitePool, repo_path: &str) -> Result<bool, CommandError> {
     let remote: Option<i64> = sqlx::query_scalar("SELECT remote FROM repos WHERE path = ?")
         .bind(repo_path)
         .fetch_optional(pool)

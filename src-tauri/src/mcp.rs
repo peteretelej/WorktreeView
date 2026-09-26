@@ -27,7 +27,6 @@ use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
-use std::path::Path;
 
 // The one protocol revision this face speaks. Tools requests carry it in
 // `_meta["io.modelcontextprotocol/protocolVersion"]`; a missing one is
@@ -1362,7 +1361,7 @@ async fn refresh_repo_tool(state: &TransportState, args: RefreshRepoArgs) -> Too
     ensure_repo_open(state, &args.repo_path)
         .await
         .map_err(|error| error.message)?;
-    refresh_repo(Path::new(&args.repo_path), &state.refreshes)
+    refresh_repo(&state.pool, &args.repo_path, &state.refreshes)
         .await
         .map_err(|error| error.message)?;
     payload(json!({ "ok": true }))
