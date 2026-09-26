@@ -1470,6 +1470,7 @@ mod tests {
             comment_changes: noop_comment_changes(),
             request_changes: noop_request_changes(),
             status: dummy_status(),
+            events: None,
         };
         (state, secret)
     }
@@ -2131,6 +2132,7 @@ mod tests {
             comment_changes: noop_comment_changes(),
             request_changes: noop_request_changes(),
             status: dummy_status(),
+            events: None,
         };
         let payload = call_tool_raw(
             &state,
@@ -2180,6 +2182,7 @@ mod tests {
             comment_changes: changes,
             request_changes: noop_request_changes(),
             status: dummy_status(),
+            events: None,
         };
         let created = call_tool_raw(
             &state,
@@ -2437,6 +2440,7 @@ mod tests {
             comment_changes: changes,
             request_changes: noop_request_changes(),
             status: dummy_status(),
+            events: None,
         };
         let root_id = seed_review_with_comment(&pool, &state, &secret).await;
         announced.lock().unwrap().clear();
@@ -3391,6 +3395,7 @@ mod tests {
             comment_changes: noop_comment_changes(),
             request_changes: changes,
             status: dummy_status(),
+            events: None,
         };
         let created = seed_request(&state, &secret, "/demo", "head-1").await;
         let id = created["id"].as_i64().unwrap();

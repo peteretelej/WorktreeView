@@ -11,6 +11,7 @@ mod requests;
 mod retrospection;
 mod review;
 mod reviews;
+pub mod server;
 mod store;
 #[cfg(test)]
 mod testutil;

@@ -6,6 +6,21 @@ license = "Apache-2.0"
 authors = ["Peter Etelej"]
 edition = "2021"
 
+[features]
+# default-on so cargo still builds the server bin; the Tauri CLI only sees
+# explicitly passed features, so it keeps the bin out of desktop bundles
+server-bin = []
+default = ["server-bin"]
+
+[[bin]]
+name = "worktreeview"
+path = "src/main.rs"
+
+[[bin]]
+name = "worktreeview-server"
+path = "src/bin/worktreeview-server.rs"
+required-features = ["server-bin"]
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]

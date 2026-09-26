@@ -13,6 +13,8 @@ How-tos:
   features for humans
 - [connect-an-agent.md](connect-an-agent.md): connect a coding agent:
   discovery, tokens, endpoints
+- [server.md](server.md): run the headless server: install shape,
+  start flags, systemd and Docker, events beyond the desktop
 
 Reference:
 

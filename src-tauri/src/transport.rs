@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
+use tokio::sync::broadcast;
 
 // Coarse pre-parse guard: the ingest's 2 MiB payload cap is the
 // authoritative size rule; this only bounds what the transport reads, with
@@ -33,6 +34,14 @@ const ACCEPT_POLL: Duration = Duration::from_millis(200);
 const RESPONSE_BODY_LIMIT: usize = 1024 * 1024;
 // A request head beyond this is refused before parsing continues.
 const REQUEST_HEAD_LIMIT: usize = 64 * 1024;
+
+// A quiet SSE subscriber is cut once no frame and no keepalive has been
+// written for this long; every write, keepalives included, restarts the
+// window.
+const SSE_IDLE_LIMIT: Duration = CONNECTION_STALL_LIMIT;
+// Must stay below SSE_IDLE_LIMIT, or an idle stream is cut before its
+// first keepalive.
+const SSE_KEEPALIVE_PERIOD: Duration = Duration::from_secs(15);
 
 pub(crate) const PARSE_ERROR: i32 = -32700;
 pub(crate) const INVALID_REQUEST: i32 = -32600;
@@ -104,6 +113,15 @@ pub(crate) struct RequestChange {
 // injected like CommentSink so the request engine is testable without an
 // app.
 pub(crate) type RequestChangeSink = Arc<dyn Fn(RequestChange) + Send + Sync>;
+
+// One push on the SSE stream: the same event name and JSON payload the
+// desktop bridge emits, fanned out through a broadcast channel on the
+// server.
+#[derive(Debug, Clone)]
+pub(crate) struct PushEvent {
+    pub(crate) kind: &'static str,
+    pub(crate) payload: Value,
+}
 
 // Shared, live view of the listener for the Settings MCP section. The
 // startup path writes it and the get_mcp_status command reads it.
@@ -203,6 +221,10 @@ pub(crate) struct TransportState {
     pub(crate) comment_changes: CommentSink,
     pub(crate) request_changes: RequestChangeSink,
     pub(crate) status: McpStatusHandle,
+    // Fan-out for the push events on the server, wired where the desktop
+    // wires its sinks to the webview; the SSE route subscribes to it. None
+    // on the desktop, where GET /events keeps its generic answer.
+    pub(crate) events: Option<broadcast::Sender<PushEvent>>,
 }
 
 #[derive(Deserialize)]
@@ -251,17 +273,35 @@ pub(crate) fn rpc_error(id: &Value, status: StatusCode, code: i32, message: impl
         .into_response()
 }
 
+// The presented secret, extracted before any await: the request body's
+// trait object is not Sync, and connection tasks are spawned, so no borrow
+// of a request may cross an await.
+fn bearer_secret(request: &Request) -> Option<String> {
+    request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::to_string)
+}
+
 // Bearer authentication is evaluated only here, once per request: the
 // presented secret is hashed and matched against the agent_tokens table.
 // Revoked, unknown, and missing secrets all answer identically so callers
 // cannot probe which tokens exist.
-async fn authenticate(state: &TransportState, request: &Request) -> Option<AgentIdentity> {
-    let secret = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))?;
-    authenticate_token_in_pool(&state.pool, secret).await
+async fn authenticate(state: &TransportState, secret: Option<String>) -> Option<AgentIdentity> {
+    authenticate_token_in_pool(&state.pool, secret.as_deref()?).await
+}
+
+// The one refusal shape for a failed bearer evaluation, shared by the
+// request handlers and the SSE route.
+fn unauthorized_response() -> Response {
+    rpc_error(
+        &Value::Null,
+        StatusCode::UNAUTHORIZED,
+        UNAUTHORIZED,
+        "Missing, wrong, or deleted bearer token. Discovery clients: re-read the config file for the current boot.",
+    )
 }
 
 async fn handle_post_review(
@@ -446,17 +486,12 @@ async fn handle_refresh_repo(state: TransportState, id: Value, params: Value) ->
 }
 
 pub(crate) async fn handle(State(state): State<TransportState>, request: Request) -> Response {
-    let identity = match authenticate(&state, &request).await {
+    let identity = match authenticate(&state, bearer_secret(&request)).await {
         Some(identity) => identity,
         None => {
             // The presented secret is never logged, only the miss.
             log::warn!("agent endpoint rejected an unauthorized request to {}", request.uri().path());
-            return rpc_error(
-                &Value::Null,
-                StatusCode::UNAUTHORIZED,
-                UNAUTHORIZED,
-                "Missing, wrong, or deleted bearer token. Discovery clients: re-read the config file for the current boot.",
-            );
+            return unauthorized_response();
         }
     };
     let path = request.uri().path().to_string();
@@ -518,7 +553,8 @@ impl TransportHandle {
     // Full stop for restarts: signal, then wait for the thread so the
     // socket is released and config cleanup has run before a new
     // listener may rebind the same address. Bounded by one idle poll
-    // period plus the stall limit while an in-flight request finishes.
+    // period; connection tasks end with the runtime and an in-flight
+    // request is cut at its next await rather than waited out.
     pub(crate) fn stop(mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
@@ -637,35 +673,61 @@ fn buffer_headers(buffer: &[u8], head_len: usize) -> Result<Vec<(String, Vec<u8>
         .collect())
 }
 
-// One connection: exactly one request, one response, then close. Serving
-// inline keeps the whole request path free of cross-task scheduling; the
-// stall limit bounds a client that neither delivers nor closes.
-async fn serve_connection(stream: &mut tokio::net::TcpStream, state: TransportState) {
-    let handled = async {
-        let mut buffer: Vec<u8> = Vec::with_capacity(1024);
-        let head_len = read_request_head(stream, &mut buffer).await.map_err(|_| "malformed head")?;
-        let (method, path, content_length) = {
-            let mut headers = [httparse::EMPTY_HEADER; 64];
-            let mut parsed = httparse::Request::new(&mut headers);
-            let httparse::Status::Complete(_) = parsed
-                .parse(&buffer)
-                .map_err(|_| "malformed head")?
-            else {
-                return Err("malformed head");
-            };
-            let method = parsed.method.unwrap_or("").to_string();
-            let path = parsed.path.unwrap_or("/").to_string();
-            let content_length = parsed
-                .headers
-                .iter()
-                .find(|header| header.name.eq_ignore_ascii_case("content-length"))
-                .and_then(|header| std::str::from_utf8(header.value).ok())
-                .and_then(|value| value.trim().parse::<usize>().ok())
-                .unwrap_or(0);
-            (method, path, content_length)
+// One connection's parsed head, kept so the request can be routed before
+// any body is read.
+struct RequestHead {
+    buffer: Vec<u8>,
+    head_len: usize,
+    method: String,
+    path: String,
+    content_length: usize,
+}
+
+// Reads the socket until a complete HTTP/1.1 head is buffered and parsed;
+// malformed heads and oversized heads are connection errors.
+async fn read_request_head_full(
+    stream: &mut tokio::net::TcpStream,
+) -> Result<RequestHead, ()> {
+    let mut buffer: Vec<u8> = Vec::with_capacity(1024);
+    let head_len = read_request_head(stream, &mut buffer).await.map_err(|_| ())?;
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut parsed = httparse::Request::new(&mut headers);
+    let httparse::Status::Complete(_) = parsed
+        .parse(&buffer)
+        .map_err(|_| ())?
+    else {
+        return Err(());
+    };
+    let method = parsed.method.unwrap_or("").to_string();
+    let path = parsed.path.unwrap_or("/").to_string();
+    let content_length = parsed
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-length"))
+        .and_then(|header| std::str::from_utf8(header.value).ok())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    Ok(RequestHead { buffer, head_len, method, path, content_length })
+}
+
+// One connection: the head read is bounded by the stall limit for every
+// request shape, then either the SSE stream runs on an idle deadline or a
+// single request gets one response and the connection closes under the
+// stall limit.
+async fn serve_connection(mut stream: tokio::net::TcpStream, state: TransportState) {
+    let mut head =
+        match tokio::time::timeout(CONNECTION_STALL_LIMIT, read_request_head_full(&mut stream)).await
+        {
+            Ok(Ok(head)) => head,
+            _ => return,
         };
-        let path = path.split('?').next().unwrap_or("/").to_string();
-        if method != "POST" {
+    let path = head.path.split('?').next().unwrap_or("/").to_string();
+    if head.method == "GET" && path == "/events" && state.events.is_some() {
+        stream_events(&mut stream, &state, &head.buffer, head.head_len).await;
+        return;
+    }
+    let handled = async {
+        if head.method != "POST" {
             let response = if path == "/" || path == "/mcp" {
                 plain_error_response(
                     StatusCode::METHOD_NOT_ALLOWED,
@@ -674,45 +736,132 @@ async fn serve_connection(stream: &mut tokio::net::TcpStream, state: TransportSt
             } else {
                 plain_error_response(StatusCode::NOT_FOUND, "POST / and POST /mcp are the only endpoints")
             };
-            write_response(stream, response).await.map_err(|_| "write failed")?;
+            write_response(&mut stream, response).await.map_err(|_| "write failed")?;
             return Ok(());
         }
         if path != "/" && path != "/mcp" {
             let response = plain_error_response(StatusCode::NOT_FOUND, "POST / and POST /mcp are the only endpoints");
-            write_response(stream, response).await.map_err(|_| "write failed")?;
+            write_response(&mut stream, response).await.map_err(|_| "write failed")?;
             return Ok(());
         }
-        if content_length > TRANSPORT_BODY_GUARD_BYTES {
+        if head.content_length > TRANSPORT_BODY_GUARD_BYTES {
             let response = rpc_error(
                 &Value::Null,
                 StatusCode::PAYLOAD_TOO_LARGE,
                 REQUEST_TOO_LARGE,
                 format!("The request body exceeds the {TRANSPORT_BODY_GUARD_BYTES} byte guard."),
             );
-            write_response(stream, response).await.map_err(|_| "write failed")?;
+            write_response(&mut stream, response).await.map_err(|_| "write failed")?;
             return Ok(());
         }
-        while buffer.len() - head_len < content_length {
+        while head.buffer.len() - head.head_len < head.content_length {
             let mut chunk = [0u8; 4096];
             let read = stream.read(&mut chunk).await.map_err(|_| "read failed")?;
             if read == 0 {
                 return Err("connection closed mid-body");
             }
-            buffer.extend_from_slice(&chunk[..read]);
+            head.buffer.extend_from_slice(&chunk[..read]);
         }
-        let body = buffer[head_len..head_len + content_length].to_vec();
+        let body = head.buffer[head.head_len..head.head_len + head.content_length].to_vec();
 
-        let mut builder = Request::builder().method(method.as_str()).uri(path.as_str());
-        for header in buffer_headers(&buffer, head_len).map_err(|_| "malformed head")? {
+        let mut builder = Request::builder().method(head.method.as_str()).uri(path.as_str());
+        for header in buffer_headers(&head.buffer, head.head_len).map_err(|_| "malformed head")? {
             builder = builder.header(header.0, header.1);
         }
         let request = builder
             .body(axum::body::Body::from(body))
             .map_err(|_| "unrepresentable request")?;
         let response = handle(State(state), request).await;
-        write_response(stream, response).await.map_err(|_| "write failed")
+        write_response(&mut stream, response).await.map_err(|_| "write failed")
     };
     let _ = tokio::time::timeout(CONNECTION_STALL_LIMIT, handled).await;
+}
+
+// Builds just enough request for the bearer evaluation: only the forwarded
+// authorization header matters.
+async fn sse_identity(
+    state: &TransportState,
+    buffer: &[u8],
+    head_len: usize,
+) -> Option<AgentIdentity> {
+    let mut builder = Request::builder().method("GET").uri("/events");
+    for header in buffer_headers(buffer, head_len).ok()? {
+        builder = builder.header(header.0, header.1);
+    }
+    let request = builder.body(axum::body::Body::empty()).ok()?;
+    authenticate(state, bearer_secret(&request)).await
+}
+
+// GET /events: the same bearer gate, then the push-event stream. The head
+// goes out once (no content-length, no close) and frames follow as the
+// sinks push them, with keepalive comments marking an idle stream. Every
+// write resets the idle deadline; a lagged subscriber's task ends and the
+// client reconnects with backoff (docs/server.md).
+async fn stream_events(
+    stream: &mut tokio::net::TcpStream,
+    state: &TransportState,
+    buffer: &[u8],
+    head_len: usize,
+) {
+    use tokio::io::AsyncWriteExt;
+    if sse_identity(state, buffer, head_len).await.is_none() {
+        // The presented secret is never logged, only the miss.
+        log::warn!("agent endpoint rejected an unauthorized request to /events");
+        let _ = write_response(stream, unauthorized_response()).await;
+        return;
+    }
+    let Some(events) = &state.events else { return };
+    let mut receiver = events.subscribe();
+    if write_event_stream_head(stream).await.is_err() {
+        return;
+    }
+    let mut last_write = tokio::time::Instant::now();
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(last_write + SSE_IDLE_LIMIT) => return,
+            pushed = receiver.recv() => match pushed {
+                Ok(event) => {
+                    if write_push_event(stream, &event).await.is_err() {
+                        return;
+                    }
+                    last_write = tokio::time::Instant::now();
+                }
+                // A subscriber that fell behind by more than the channel
+                // capacity, or a shut-down sender, ends the stream.
+                Err(broadcast::error::RecvError::Lagged(_)) => return,
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+            _ = tokio::time::sleep_until(last_write + SSE_KEEPALIVE_PERIOD) => {
+                if stream.write_all(b": keepalive\n\n").await.is_err() {
+                    return;
+                }
+                if stream.flush().await.is_err() {
+                    return;
+                }
+                last_write = tokio::time::Instant::now();
+            }
+        }
+    }
+}
+
+// The SSE head is written once; the connection stays open while the
+// subscriber keeps up.
+async fn write_event_stream_head(stream: &mut tokio::net::TcpStream) -> Result<(), ()> {
+    use tokio::io::AsyncWriteExt;
+    let head = format!(
+        "{}content-type: text/event-stream\r\n\r\n",
+        status_line(StatusCode::OK)
+    );
+    stream.write_all(head.as_bytes()).await.map_err(|_| ())?;
+    stream.flush().await.map_err(|_| ())
+}
+
+async fn write_push_event(stream: &mut tokio::net::TcpStream, event: &PushEvent) -> Result<(), ()> {
+    use tokio::io::AsyncWriteExt;
+    let data = serde_json::to_string(&event.payload).map_err(|_| ())?;
+    let frame = format!("event: {}\ndata: {}\n\n", event.kind, data);
+    stream.write_all(frame.as_bytes()).await.map_err(|_| ())?;
+    stream.flush().await.map_err(|_| ())
 }
 
 fn status_line(status: StatusCode) -> String {
@@ -757,9 +906,29 @@ pub(crate) async fn start(
     config: ListenerConfig,
     status: McpStatusHandle,
 ) -> Result<Option<TransportHandle>, String> {
+    start_with_events(pool, deps, config, status, None).await
+}
+
+// The server binary's start: the same listener start path with the push
+// events also fanned out to SSE subscribers through the given channel.
+pub(crate) async fn start_with_events(
+    pool: SqlitePool,
+    deps: TransportDeps,
+    config: ListenerConfig,
+    status: McpStatusHandle,
+    events: Option<broadcast::Sender<PushEvent>>,
+) -> Result<Option<TransportHandle>, String> {
     status.reset_from_config(&config);
     let TransportDeps { data_dir, arrivals, refreshes, comment_changes, request_changes } = deps;
-    let state = TransportState { pool, arrivals, refreshes, comment_changes, request_changes, status: status.clone() };
+    let state = TransportState {
+        pool,
+        arrivals,
+        refreshes,
+        comment_changes,
+        request_changes,
+        status: status.clone(),
+        events,
+    };
     if !config.enabled {
         return Ok(None);
     }
@@ -806,10 +975,10 @@ pub(crate) async fn start(
     let shutdown = Arc::new(AtomicBool::new(false));
     let exit = Arc::clone(&shutdown);
     // The listener runs on its own single-thread runtime on a dedicated
-    // thread and serves connections INLINE (no spawned per-connection
-    // tasks): the endpoint is one write-only method whose deliveries are
-    // bounded by the body guard, so serial handling cannot queue behind
-    // scheduler wakeups, and a stalled client is cut by the stall limit.
+    // thread and serves connections as spawned tasks: every handler is
+    // IO-bound, so tasks interleave, and an open SSE stream never gates
+    // accepts or other connections. Per-connection caps (head size, header
+    // count, body guard, stall timeout) hold inside each task.
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -841,8 +1010,15 @@ pub(crate) async fn start(
                             break;
                         }
                         match tokio::time::timeout(ACCEPT_POLL, listener.accept()).await {
-                            Ok(Ok((mut stream, _))) => {
-                                serve_connection(&mut stream, state.clone()).await;
+                            Ok(Ok((stream, _))) => {
+                                // Each connection is its own task on this
+                                // single-threaded runtime: IO-bound work
+                                // interleaves, so one open SSE stream cannot
+                                // stall accepts or other connections.
+                                let state = state.clone();
+                                tokio::spawn(async move {
+                                    serve_connection(stream, state).await;
+                                });
                             }
                             // Timed out idle: re-check the flag. Accept errors
                             // mean the listener is gone.
@@ -953,6 +1129,7 @@ mod tests {
             comment_changes: noop_comment_changes(),
             request_changes: noop_request_changes(),
             status: dummy_status(),
+            events: None,
         };
         (state, secret)
     }
@@ -1599,6 +1776,184 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    // Reads the GET /events stream on its own blocking thread: signals
+    // through `head_landed` once the response head has arrived (the server
+    // has subscribed), keeps reading until `marker` appears or the read
+    // times out, and returns everything received.
+    fn read_events_stream(
+        port: u16,
+        bearer: Option<&str>,
+        marker: &'static str,
+        head_landed: std::sync::mpsc::Sender<()>,
+    ) -> std::thread::JoinHandle<String> {
+        let authorization = bearer
+            .map(|secret| format!("authorization: Bearer {secret}\r\n"))
+            .unwrap_or_default();
+        let request = format!(
+            "GET /events HTTP/1.1\r\nhost: 127.0.0.1\r\naccept: text/event-stream\r\n{authorization}\r\n"
+        );
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            use std::net::TcpStream;
+            use std::time::{Duration, Instant};
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut stream = loop {
+                match TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(socket) => break socket,
+                    Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+                    Err(error) => panic!("the endpoint never started listening: {error}"),
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut received = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let mut signaled = false;
+            loop {
+                if std::str::from_utf8(&received)
+                    .map(|text| text.contains(marker))
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        received.extend_from_slice(&chunk[..read]);
+                        if !signaled && received.windows(4).any(|window| window == b"\r\n\r\n") {
+                            signaled = true;
+                            let _ = head_landed.send(());
+                        }
+                    }
+                    // Read timeout: return what the stream delivered so the
+                    // assertion can name the miss.
+                    Err(_) => break,
+                }
+            }
+            String::from_utf8_lossy(&received).into_owned()
+        })
+    }
+
+    // An open SSE connection coexists with a concurrent request/response
+    // connection: the stream head lands (the server has subscribed), the
+    // POST completes while the stream stays open, and the frame the sink
+    // pushed arrives on the stream.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sse_stream_coexists_with_a_concurrent_request() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let dir = crate::testutil::test_path("transport-sse-coexist");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, _receiver) = tokio::sync::broadcast::channel::<PushEvent>(16);
+        let feed = events.clone();
+        let arrivals: ArrivalSink = Arc::new(move |arrival| {
+            let _ = feed.send(PushEvent {
+                kind: "submission-received",
+                payload: serde_json::to_value(&arrival).unwrap(),
+            });
+        });
+        let handle = start_with_events(
+            pool,
+            test_deps(&dir, arrivals, noop_refreshes(), noop_comment_changes()),
+            test_config(0),
+            McpStatusHandle::for_config(&test_config(0)),
+            Some(events),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let discovery: EndpointDiscovery =
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(&dir)).unwrap()).unwrap();
+
+        let (head_landed, head_received) = std::sync::mpsc::channel();
+        let streamed = read_events_stream(
+            discovery.port,
+            Some(&discovery.token),
+            "event: submission-received",
+            head_landed,
+        );
+        head_received
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("the stream head never landed");
+
+        let body = rpc_body(json!(1), "post_review", review_params("/demo"));
+        let response = send_over_socket(discovery.port, &discovery.token, body).join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "unexpected response: {response}");
+
+        let received = streamed.join().unwrap();
+        assert!(
+            received.contains("content-type: text/event-stream"),
+            "unexpected stream head: {received}"
+        );
+        let payload_text = received
+            .split("event: submission-received\ndata: ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no submission frame on the stream: {received}"))
+            .split("\n\n")
+            .next()
+            .unwrap_or("");
+        let payload: Value = serde_json::from_str(payload_text).unwrap();
+        assert!(payload["submission_id"].as_i64().unwrap() > 0);
+        assert_eq!(payload["agent_name"], "reviewer-bot");
+        handle.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The SSE route rides the same bearer evaluation: no token and a wrong
+    // token get the shared 401 shape, and the listener's own default token
+    // opens the stream.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sse_stream_refuses_missing_or_wrong_tokens_and_accepts_the_default() {
+        let pool = test_pool().await;
+        let dir = crate::testutil::test_path("transport-sse-auth");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, _receiver) = tokio::sync::broadcast::channel::<PushEvent>(16);
+        let handle = start_with_events(
+            pool,
+            test_deps(&dir, Arc::new(|_| {}), noop_refreshes(), noop_comment_changes()),
+            test_config(0),
+            McpStatusHandle::for_config(&test_config(0)),
+            Some(events),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let discovery: EndpointDiscovery =
+            serde_json::from_slice(&std::fs::read(endpoint_config_path(&dir)).unwrap()).unwrap();
+
+        // The body marker keeps the reader waiting until the refusal's
+        // body has landed, not just its head.
+        let (missing_head, _) = std::sync::mpsc::channel();
+        let missing = read_events_stream(discovery.port, None, "-32001", missing_head)
+            .join()
+            .unwrap();
+        assert!(missing.contains("HTTP/1.1 401"), "unexpected response: {missing}");
+        assert!(missing.contains("-32001"), "unexpected refusal: {missing}");
+
+        let (wrong_head, _) = std::sync::mpsc::channel();
+        let wrong = read_events_stream(discovery.port, Some("wrong-token"), "-32001", wrong_head)
+            .join()
+            .unwrap();
+        assert!(wrong.contains("HTTP/1.1 401"), "unexpected response: {wrong}");
+
+        let (opened_head, _) = std::sync::mpsc::channel();
+        let opened = read_events_stream(
+            discovery.port,
+            Some(&discovery.token),
+            "content-type: text/event-stream",
+            opened_head,
+        )
+        .join()
+        .unwrap();
+        assert!(opened.contains("HTTP/1.1 200 OK"), "unexpected response: {opened}");
+        assert!(
+            opened.contains("content-type: text/event-stream"),
+            "unexpected stream head: {opened}"
+        );
+        handle.stop();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // A restart stops the idle listener without any inbound connection,

@@ -136,8 +136,16 @@ normalized domain data through narrow, typed Tauri commands.
   responses on the current Windows host (upstream-report candidate). It
   owns transport concerns only: bearer auth, JSON-RPC 2.0 framing with
   the documented error-code matrix, and a coarse 3 MiB pre-parse body
-  guard. Connections are served serially; heads are capped at 64 KiB and
-  64 headers, and a stalled connection is dropped after 30 s. The methods
+  guard. Connections are served concurrently, one task each on the
+  listener's runtime, so an open event stream never gates other
+  connections; heads are capped at 64 KiB and 64 headers, and a stalled
+  request is dropped after 30 s. On the server (`server.rs`), `GET
+  /events` answers under the same bearer evaluation with the push
+  events as server-sent events, fanned out through a broadcast channel
+  the injected sinks feed; an event stream trades the whole-connection
+  stall limit for an idle deadline that every write (keepalive comments
+  included) resets, and the desktop listener, whose sinks feed the
+  webview instead, keeps its generic answer for the path. The methods
   `post_review` and `refresh_repo` delegate to the shared implementations
   (`ingest_submission_in_pool`, `refresh_repo`) with the authenticated
   actor; after a successful ingest the endpoint pushes a
@@ -156,6 +164,16 @@ normalized domain data through narrow, typed Tauri commands.
   then binds a fresh one from the settings as persisted right now
   through the same start path and the same shared status handle; the
   default token renews on every start.
+- `server.rs`: the headless server face behind the `worktreeview-server`
+  bin (a launcher; the desktop `run()` is never on its path). It
+  resolves its own home (`~/.worktreeview-server/`, relocated by
+  `WORKTREEVIEW_SERVER_HOME` or `--home`), opens `worktreeview-server.sqlite3`
+  there under the same migrations, wires the four push sinks to a
+  `tokio::sync::broadcast` channel where the desktop wires them to the
+  webview, and starts the listener through the same start path with a
+  loopback default of `127.0.0.1:9890`; a bind failure is fatal and
+  exits nonzero with the reason, since a headless server has nothing
+  else to do. Deployment and operations live in [server.md](server.md).
 - `cache.rs`: SQLite-backed history cache for commit pages and ancestry
   marks, keyed by resolved SHAs.
 - `retrospection.rs`: records reviewed worktree and branch identities
