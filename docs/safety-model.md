@@ -17,7 +17,10 @@ for every caller on every face.
 - Reviews are computed from read-only Git plumbing: diff, rev-parse,
   for-each-ref, log, ls-files, ls-tree, cat-file, merge-base, worktree
   list. The per-worktree change-count probe runs status with
-  --no-optional-locks so it can never refresh or lock the index.
+  --no-optional-locks so it can never refresh or lock the index, and
+  with the filter neutralizations below so re-hashing a stat-dirty
+  tracked file cannot run its clean filter; the same neutralized probe
+  shape runs on a remote project's host through the allowlist.
 - The Git writes sit outside review computation, and all of them are
   bounded fetch paths. The project fetch runs `git fetch --all --prune`,
   which updates remote-tracking refs only. The review-content fetch

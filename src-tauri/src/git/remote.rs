@@ -1410,6 +1410,23 @@ pub(crate) fn batch_fake_spawner(
                 "--untracked-files=all",
                 "-z",
             ],
+            // The change-count probe with its filter neutralizations: the
+            // lock flag leads, the -c pairs follow, exactly as the parser
+            // above strips them.
+            &[
+                "--no-optional-locks",
+                "-c",
+                "filter.x.clean=cat",
+                "-c",
+                "filter.x.process=cat",
+                "-c",
+                "filter.x.required=false",
+                "status",
+                "--porcelain=v1",
+                "--no-renames",
+                "--untracked-files=all",
+                "-z",
+            ],
             &["-c", "core.quotePath=false", "worktree", "list", "--porcelain"],
             &[
                 "-c",
@@ -1458,6 +1475,14 @@ pub(crate) fn batch_fake_spawner(
             &["fetch", "--all", "--prune", "--quiet", "refs/heads/main"],
             &["check-attr", "-z", "diff", "--", "file"],
             &["-c", "core.fsmonitor=true", "status", "--porcelain=v1"],
+            &[
+                "--no-optional-locks",
+                "-c",
+                "filter.x.clean=evil",
+                "status",
+                "--porcelain=v1",
+            ],
+            &["--no-optional-locks", "-c", "filter.x.clean=cat", "status"],
             &["-c", "filter.x.clean=evil", "diff", "--no-ext-diff", "--no-textconv"],
             &["-c", "filter.x.clean", "diff", "--no-ext-diff", "--no-textconv"],
             &["status"],

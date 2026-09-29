@@ -3,11 +3,13 @@ use crate::agents::{
     AgentToken, CreatedAgentToken,
 };
 use crate::git::{
-    batch_fragment, fetch_remote_branch, fetch_remotes, git_args, git_execution_error, new_nonce,
-    parse_status_count, parse_worktrees, read_target, read_worktree_target, repo_is_remote,
-    remote_branch_of_tracking_ref, run_git, run_remote_batch_with, run_remote_fetch_with,
-    run_remote_read_with, validate_fetch_name, validate_file, validate_ref,
-    validate_work_tree_with, BatchFragment, CommitPage, ReadTarget, RemoteTarget, Worktree,
+    batch_fragment, configured_filter_names, fetch_remote_branch, fetch_remotes,
+    filter_override_args, git_args, git_execution_error, new_nonce,
+    parse_configured_filter_names, parse_status_count, parse_worktrees, read_target,
+    read_worktree_target, repo_is_remote, remote_branch_of_tracking_ref, run_git,
+    run_remote_batch_with, run_remote_fetch_with, run_remote_read_with, validate_fetch_name,
+    validate_file, validate_ref, validate_work_tree_with, CommitPage, ReadTarget,
+    RemoteTarget, Worktree,
 };
 use crate::overview::{branch_inventory, BranchInventory};
 use crate::portal::{
@@ -311,9 +313,9 @@ async fn list_worktree_status_local(path: std::path::PathBuf) -> Result<Vec<Work
     Ok(statuses)
 }
 
-// The worktree statuses batch into one invocation after the enumeration:
-// the probes depend on the listed host paths, so the group is two round
-// trips regardless of worktree count.
+// The worktree statuses batch into three invocations: the enumeration, the
+// per-worktree configured-filter read the probes depend on, and the probes
+// themselves. Every batch is one round trip regardless of worktree count.
 async fn list_worktree_status_remote(
     target: &RemoteTarget,
 ) -> Result<Vec<WorktreeStatus>, CommandError> {
@@ -330,19 +332,60 @@ async fn list_worktree_status_remote_with(
     if worktrees.is_empty() {
         return Ok(statuses);
     }
-    let probes: Vec<BatchFragment> = worktrees
-        .iter()
-        .map(|worktree| crate::git::batch_fragment_at(&worktree.path, change_count_args()))
-        .collect();
-    let probed = run_remote_batch_with(spawner, target, &probes).await?;
+    let config_batch = run_remote_batch_with(
+        spawner,
+        target,
+        &worktrees
+            .iter()
+            .map(|worktree| {
+                crate::git::batch_fragment_at(
+                    &worktree.path,
+                    vec![
+                        "config".into(),
+                        "--get-regexp".into(),
+                        r"^filter\..*\.(clean|process)$".into(),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    // Exit 1 means no configured filters, mirroring the local read. A failed
+    // config read degrades that worktree's count to unknown instead of
+    // sinking every badge, and never falls back to an unneutralized probe.
+    let mut probes = Vec::new();
+    let mut probe_slots = Vec::with_capacity(worktrees.len());
     for (index, worktree) in worktrees.iter().enumerate() {
-        let changes = match probed.ok(index) {
-            Ok(fragment) => Some(parse_status_count(&fragment.stdout)),
-            // A count beyond the output bound is itself the signal; other
-            // failures leave that worktree's count unknown without sinking
-            // the badges of every healthy worktree.
-            Err(error) if error.code == "git_output_too_large" => Some(u32::MAX),
-            Err(_) => None,
+        let filters = match config_batch.code(index) {
+            1 => Vec::new(),
+            0 => parse_configured_filter_names(&config_batch.fragments[index].stdout),
+            _ => {
+                probe_slots.push(None);
+                continue;
+            }
+        };
+        probe_slots.push(Some(probes.len()));
+        probes.push(crate::git::batch_fragment_at(
+            &worktree.path,
+            change_count_args(&filter_override_args(&filters)),
+        ));
+    }
+    let probed = if probes.is_empty() {
+        None
+    } else {
+        Some(run_remote_batch_with(spawner, target, &probes).await?)
+    };
+    for (index, worktree) in worktrees.iter().enumerate() {
+        let changes = match (probe_slots[index], probed.as_ref()) {
+            (Some(slot), Some(output)) => match output.ok(slot) {
+                Ok(fragment) => Some(parse_status_count(&fragment.stdout)),
+                // A count beyond the output bound is itself the signal; other
+                // failures leave that worktree's count unknown without sinking
+                // the badges of every healthy worktree.
+                Err(error) if error.code == "git_output_too_large" => Some(u32::MAX),
+                Err(_) => None,
+            },
+            _ => None,
         };
         statuses.push(WorktreeStatus {
             path: worktree.path.clone(),
@@ -352,24 +395,34 @@ async fn list_worktree_status_remote_with(
     Ok(statuses)
 }
 
-fn change_count_args() -> Vec<String> {
-    [
-        "--no-optional-locks",
-        "status",
-        "--porcelain=v1",
-        "--no-renames",
-        "--untracked-files=all",
-        "-z",
-    ]
-    .iter()
-    .map(|arg| arg.to_string())
-    .collect()
+fn change_count_args(filter_overrides: &[String]) -> Vec<String> {
+    // --no-optional-locks leads so the remote allowlist's leading-globals
+    // parse (one lock flag, then -c pairs) accepts the composed shape.
+    let mut args = Vec::with_capacity(6 + filter_overrides.len());
+    args.push("--no-optional-locks".to_string());
+    args.extend(filter_overrides.iter().cloned());
+    args.extend(
+        [
+            "status",
+            "--porcelain=v1",
+            "--no-renames",
+            "--untracked-files=all",
+            "-z",
+        ]
+        .iter()
+        .map(|arg| arg.to_string()),
+    );
+    args
 }
 
 async fn worktree_change_count(worktree_path: &Path) -> Result<u32, CommandError> {
     // --no-optional-locks keeps the status probe from taking the index lock
-    // or refreshing the index, so the read-only guarantee holds.
-    let args = change_count_args();
+    // or refreshing the index, so the read-only guarantee holds. Status runs
+    // clean filters whenever it re-hashes a stat-dirty tracked file, and
+    // --no-optional-locks keeps the file stat-dirty, so the neutralized
+    // filters are what keep repository-defined code out of the probe.
+    let filters = configured_filter_names(worktree_path).await?;
+    let args = change_count_args(&filter_override_args(&filters));
     let args = git_args(&args);
     let (exit_code, stdout, stderr) = run_git(worktree_path, &args).await?;
     if exit_code != 0 {
@@ -1621,6 +1674,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
+    // Status runs clean filters whenever it re-hashes a stat-dirty tracked
+    // file, and --no-optional-locks keeps the file stat-dirty, so an
+    // unneutralized probe would execute the repository's filter on every
+    // change-count refresh. The helper and marker live outside the repo so
+    // the only counted change is the modified tracked file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn change_count_probe_neutralizes_clean_filters() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = test_repo("probe-filter-neutralized");
+        let helper = test_path("probe-filter-helper.sh");
+        let marker = test_path("probe-filter-marker");
+        std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        test_git(&repo, &["add", "tracked.txt"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "tracked"]);
+        test_git(
+            &repo,
+            &["config", "filter.marker.clean", helper.to_str().unwrap()],
+        );
+        std::fs::write(repo.join(".gitattributes"), "*.txt filter=marker\n").unwrap();
+        test_git(&repo, &["add", ".gitattributes"]);
+        test_git(&repo, &["commit", "--quiet", "-m", "attributes"]);
+        std::fs::write(
+            &helper,
+            format!("#!/bin/sh\n: > '{}'\ncat\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
+
+        // A plain status proves the trap is armed: it runs the filter.
+        let _ = StdCommand::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["status", "--porcelain=v1"])
+            .output()
+            .unwrap();
+        assert!(marker.exists());
+        std::fs::remove_file(&marker).unwrap();
+
+        let count = worktree_change_count(&repo).await.unwrap();
+        assert_eq!(count, 1);
+        assert!(!marker.exists());
+
+        std::fs::remove_dir_all(repo).unwrap();
+        let _ = std::fs::remove_file(&helper);
+        let _ = std::fs::remove_file(&marker);
+    }
+
     // The human header's update: typed routing through the shared
     // transitions with Actor::Human, the update-time note bound, and the
     // re-request-only head rule.
@@ -1736,24 +1839,54 @@ mod tests {
                 0,
                 b"worktree /srv/main\nHEAD a\nbranch refs/heads/main\n\nworktree /srv/fe ature\nHEAD b\ndetached\n\n".to_vec(),
             )],
-            vec![(0, Vec::new()), (1, Vec::new())],
+            vec![
+                (0, b"filter.lfs.clean git-lfs clean -- %f\n".to_vec()),
+                (0, Vec::new()),
+            ],
+            vec![(0, Vec::new()), (0, Vec::new())],
         ]);
         let target =
             RemoteTarget::from_parts(Some("dev"), "host.example", None, "/srv/repo").unwrap();
         let statuses = list_worktree_status_remote_with(&spawner, &target)
             .await
             .unwrap();
-        // Two round trips regardless of worktree count, each probe its own
-        // frame with the host path quoted.
-        assert_eq!(scripts.lock().unwrap().len(), 2);
-        let probes = scripts.lock().unwrap()[1].clone();
+        // Three round trips regardless of worktree count: enumeration, the
+        // per-worktree configured-filter read, then the probes, each probe
+        // its own frame with the host path quoted. The configured filter's
+        // neutralizations ride the first probe only.
+        assert_eq!(scripts.lock().unwrap().len(), 3);
+        let probes = scripts.lock().unwrap()[2].clone();
         assert_eq!(probes.matches("-begin").count(), 2);
         assert!(probes.contains("'/srv/fe ature'"));
+        assert!(probes.contains("'-c' 'filter.lfs.clean=cat'"));
+        assert!(probes.contains("'filter.lfs.required=false'"));
         assert!(probes.contains("--no-optional-locks"));
         assert_eq!(statuses.len(), 2);
         assert_eq!(statuses[0].path, "/srv/main");
         assert_eq!(statuses[0].changes, Some(0));
-        assert_eq!(statuses[1].changes, None);
+        assert_eq!(statuses[1].changes, Some(0));
+    }
+
+    #[tokio::test]
+    async fn worktree_status_degrades_when_a_config_read_fails() {
+        let (spawner, scripts) = batch_fake_spawner(vec![
+            vec![(
+                0,
+                b"worktree /srv/main\nHEAD a\nbranch refs/heads/main\n\n".to_vec(),
+            )],
+            vec![(2, Vec::new())],
+        ]);
+        let target =
+            RemoteTarget::from_parts(Some("dev"), "host.example", None, "/srv/repo").unwrap();
+        let statuses = list_worktree_status_remote_with(&spawner, &target)
+            .await
+            .unwrap();
+        // A failed filter read leaves that worktree's count unknown and skips
+        // the probe round entirely; it never runs an unneutralized probe.
+        assert_eq!(scripts.lock().unwrap().len(), 2);
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].path, "/srv/main");
+        assert_eq!(statuses[0].changes, None);
     }
 
     // The backend-owned taxonomy: connection-level failures carry the

@@ -67,7 +67,11 @@ commit. The status chips answer "what is happening here" at a glance:
 ![Worktree rows with status chips](images/guide-overview-status.webp)
 
 - **Clean** or **N changed**: uncommitted working changes; click the
-  changed chip to review them immediately.
+  changed chip to review them immediately. In a repository that
+  configures Git conversion filters (clean or process, such as LFS),
+  the count may exceed what `git status` reports: the app computes it
+  without ever running those filters, and reviewing the affected files
+  refuses with an explicit error instead.
 - **↑N / ↓N**: commits ahead of or behind the branch's upstream (or the
   default branch when there is no upstream); click to review those
   commits.
