@@ -20,7 +20,7 @@ Your agents join as first-class reviewers over a local API: they submit reviews,
 ## Install
 
 - **GitHub Releases**: [latest release](https://github.com/peteretelej/WorktreeView/releases/latest)
-- **Microsoft Store**: _coming soon_
+- **Microsoft Store**: [WorktreeView](https://apps.microsoft.com/detail/9PM1BN0JZDB3)
 
 ## Use it yourself
 

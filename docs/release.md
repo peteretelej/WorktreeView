@@ -15,9 +15,8 @@ consent, so third-party code only enters under Apache-2.0 terms.
   packaging/msix/Package.appxmanifest --output devcert.pfx`, then
   `winapp cert install devcert.pfx` from an elevated shell) and run
   `npm run package:store -- --cert devcert.pfx`. The manifest in
-  `packaging/msix/` carries the identity Partner Center assigned and must
-  match it verbatim. The README carries a placeholder to replace with the
-  listing link at submission time.
+`packaging/msix/` carries the identity Partner Center assigned and must
+match it verbatim. The README links to the live listing.
 - npm: the `worktreeview` package name and org are claimed. The published
   v0.0.1 exists to hold the name (prerelease tag; see
   `npm/worktreeview/PUBLISHING.md`) and is not the desktop app. Tauri
