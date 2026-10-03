@@ -460,7 +460,7 @@ const THREAD_ROW_LIMIT: usize = 500;
 // aggregates ride as correlated subqueries, so grouping across bases under
 // one change stays a single bounded query (no new index or migration).
 const THREAD_ROOTS_QUERY: &str = "SELECT c.id AS root_id, c.body, c.author_kind, c.author_name, \
-     c.file_path, c.start_line, c.severity, c.resolved_at, c.created_at, \
+     c.file_path, c.start_line, c.severity, c.resolved_at, c.created_at, c.kind, \
      rv.repo_path, rv.base_sha, rv.target_key, rv.target_kind, \
      (SELECT COUNT(*) FROM comments AS r WHERE r.parent_id = c.id) AS reply_count, \
      (SELECT MAX(r.created_at) FROM comments AS r WHERE r.parent_id = c.id) AS last_reply_at \
@@ -490,6 +490,7 @@ pub(crate) struct PortalThreadRow {
     pub(crate) head_sha: Option<String>,
     pub(crate) excerpt: String,
     pub(crate) severity: Option<String>,
+    pub(crate) kind: Option<String>,
     pub(crate) anchor: Option<String>,
     pub(crate) participants: Vec<PortalParticipant>,
     pub(crate) reply_count: i64,
@@ -685,6 +686,7 @@ pub(crate) async fn list_portal_threads_in_pool(
                 .trim_end()
                 .to_string(),
             severity: row.try_get("severity")?,
+            kind: row.try_get("kind")?,
             anchor: anchor_label(
                 row.try_get::<Option<String>, _>("file_path")?.as_deref(),
                 row.try_get("start_line")?,

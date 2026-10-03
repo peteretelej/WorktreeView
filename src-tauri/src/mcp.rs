@@ -12,7 +12,8 @@ use crate::requests::{
 };
 use crate::reviews::{
     create_unbound_comment_in_pool, delete_comment_in_pool, edit_comment_in_pool,
-    list_comments_in_pool, list_submissions_in_pool, reply_comment_in_pool,
+    list_canvas_docs_in_pool, list_comments_in_pool, list_submissions_in_pool, reply_comment_in_pool,
+    validate_kind,
     MAX_AGENT_MODEL_CHARS,
     review_identity_of_comment, set_comment_resolved_in_pool, Actor,
 };
@@ -184,6 +185,7 @@ struct CreateCommentArgs {
     side: Option<String>,
     start_line: Option<u32>,
     end_line: Option<u32>,
+    kind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -474,6 +476,14 @@ fn tool_descriptors() -> Value {
             schema(review_identity(), &["repo_path", "base_sha", "target_key", "target_kind"]),
         ),
         tool(
+            "list_canvas_docs",
+            "List a repository's canvas documents: kind-marked root comments (walkthroughs, notes) newest first, each with the pinned review identity its references resolve against.",
+            schema(
+                json!({ "repo_path": path_arg("Exact repository path as listed by list_repos.") }),
+                &["repo_path"],
+            ),
+        ),
+        tool(
             "list_review_requests",
             "List review requests with their stored fields and derived triage fields (age, comment count, unresolved finding counts by severity, requester). With no filters this is the open cross-repo queue: poll it on a sparse cadence to pick up work.",
             schema(
@@ -531,7 +541,7 @@ fn tool_descriptors() -> Value {
         ),
         tool(
             "create_comment",
-            "Create a comment on a review; the author is your agent token, so you can edit and delete it later. Anchor shapes: no file for review-level, file only for file-level, file with side and start_line for line-level.",
+            "Create a comment on a review; the author is your agent token, so you can edit and delete it later. Anchor shapes: no file for review-level, file only for file-level, file with side and start_line for line-level. A kind marks the comment as a canvas document (a rich, replyable post in the app's Canvas tab).",
             schema(
                 json!({
                     "repo_path": path_arg("Exact repository path as listed by list_repos."),
@@ -540,8 +550,13 @@ fn tool_descriptors() -> Value {
                         "Worktree path for target_kind \"worktree\"; resolved target SHA for \"head\".",
                     ),
                     "target_kind": { "type": "string", "enum": ["worktree", "head"] },
-                    "body": { "type": "string", "description": "Non-empty comment body." },
+                    "body": { "type": "string", "description": "Non-empty comment body. Canvas documents support markdown, ```mermaid fences (rendered as diagrams), and code references written as `path:line`, `path:start-end`, or `path:line@sha` for another revision." },
                     "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+                    "kind": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9-]{0,31}$",
+                        "description": "Optional canvas-document kind slug (e.g. \"walkthrough\", \"notes\"). Marking a comment makes it a canvas document; omit for ordinary comments.",
+                    },
                     "author_model": {
                         "type": "string",
                         "maxLength": 200,
@@ -753,6 +768,10 @@ async fn handle_tools_call(
         "list_submissions" => {
             let args = tool_args(id, &arguments)?;
             list_submissions(state, args).await
+        }
+        "list_canvas_docs" => {
+            let args = tool_args(id, &arguments)?;
+            list_canvas_docs(state, args).await
         }
         "list_review_requests" => {
             let args = tool_args(id, &arguments)?;
@@ -1225,6 +1244,7 @@ async fn create_comment(
         .await
         .map_err(|error| error.message)?;
     let author_model = normalize_model_label(args.author_model.as_deref())?;
+    let kind = validate_kind(&args.kind).map_err(|error| error.message)?;
     let comment = create_unbound_comment_in_pool(
         &state.pool,
         &args.repo_path,
@@ -1239,6 +1259,7 @@ async fn create_comment(
         args.end_line,
         &Actor::Agent(identity.clone()),
         author_model.as_deref(),
+        kind,
     )
     .await
     .map_err(|error| error.message)?;
@@ -1252,6 +1273,26 @@ async fn create_comment(
         agent_name: identity.name.clone(),
     });
     payload(comment)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListCanvasDocsArgs {
+    repo_path: String,
+}
+
+async fn list_canvas_docs(
+    state: &TransportState,
+    args: ListCanvasDocsArgs,
+) -> ToolOutcome {
+    ensure_repo_open(state, &args.repo_path)
+        .await
+        .map_err(|error| error.message)?;
+    payload(
+        list_canvas_docs_in_pool(&state.pool, &args.repo_path)
+            .await
+            .map_err(|error| error.message)?,
+    )
 }
 
 async fn reply_comment(
@@ -1385,11 +1426,12 @@ mod tests {
     const OWNERSHIP_MESSAGE: &str =
         "Only the agent token that authored a comment can edit or delete it.";
     const UNKNOWN_REPO_MESSAGE: &str = "No repository with that path is open in WorktreeView.";
-    const TOOL_NAMES: [&str; 17] = [
+    const TOOL_NAMES: [&str; 18] = [
         "list_repos",
         "list_review_targets",
         "list_comments",
         "list_submissions",
+        "list_canvas_docs",
         "list_review_requests",
         "list_threads",
         "list_activity",

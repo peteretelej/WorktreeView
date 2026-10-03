@@ -31,10 +31,10 @@ use crate::requests::{
     withdraw_request_in_pool, RequestDraft, RequestRow,
 };
 use crate::reviews::{
-    create_comment_in_pool, delete_comment_in_pool, edit_comment_in_pool, list_comments_in_pool,
-    list_submissions_in_pool, match_comment_anchors_in_pool, reply_comment_in_pool,
-    set_comment_resolved_in_pool, Actor, AnchorStatus, Comment, CommentDraft, PatchLine,
-    Submission,
+    create_comment_in_pool, delete_comment_in_pool, edit_comment_in_pool, list_canvas_docs_in_pool,
+    list_comments_in_pool, list_submissions_in_pool, match_comment_anchors_in_pool,
+    reply_comment_in_pool, set_comment_resolved_in_pool, Actor, AnchorStatus, Comment,
+    CommentDraft, PatchLine, Submission,
 };
 use crate::store::{
     add_server_project_in_pool, delete_server_connection_in_pool, get_settings_in_pool,
@@ -1441,6 +1441,14 @@ pub(crate) async fn list_comments(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Comment>, CommandError> {
     list_comments_in_pool(&state.pool, &repo_path, &base_sha, &target_key, &target_kind).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_canvas_docs(
+    repo_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<crate::reviews::CanvasDoc>, CommandError> {
+    list_canvas_docs_in_pool(&state.pool, &repo_path).await
 }
 
 #[tauri::command]

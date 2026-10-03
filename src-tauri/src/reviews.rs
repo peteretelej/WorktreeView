@@ -57,6 +57,7 @@ pub struct Comment {
     resolved_at: Option<i64>,
     edited_at: Option<i64>,
     created_at: i64,
+    kind: Option<String>,
 }
 
 impl Comment {
@@ -78,6 +79,9 @@ pub struct CommentDraft {
     // Marker-free text of the anchored lines, top to bottom. Hash and
     // snippet are derived from it server-side.
     lines: Vec<String>,
+    // Canvas documents carry a kind slug ("walkthrough", "notes"); plain
+    // conversation comments leave it absent.
+    kind: Option<String>,
 }
 
 // Marker-free patch line with LOGICAL line numbers: the frontend swaps
@@ -337,6 +341,7 @@ fn comment_from_row(row: &sqlx::sqlite::SqliteRow) -> sqlx::Result<Comment> {
         resolved_at: row.try_get("resolved_at")?,
         edited_at: row.try_get("edited_at")?,
         created_at: row.try_get("created_at")?,
+        kind: row.try_get("kind")?,
     })
 }
 
@@ -344,7 +349,7 @@ async fn load_comment(pool: &SqlitePool, id: i64) -> Result<Option<Comment>, sql
     sqlx::query(
         "SELECT id, review_id, parent_id, author_kind, author_name, author_model, body, \
                 file_path, side, start_line, end_line, anchor_hash, snippet, severity, \
-                submission_id, resolved_at, edited_at, created_at \
+                submission_id, resolved_at, edited_at, created_at, kind \
          FROM comments WHERE id = ?",
     )
     .bind(id)
@@ -453,6 +458,29 @@ async fn emit_comment_event(
     Ok(())
 }
 
+const MAX_KIND_CHARS: usize = 32;
+
+// Canvas documents carry a kind slug ("walkthrough", "notes"); unknown
+// values stay forward-compatible, so validation is shape-only: a short
+// lowercase slug the library can badge and group on.
+pub(crate) fn validate_kind(kind: &Option<String>) -> Result<Option<String>, CommandError> {
+    match kind.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(slug)
+            if slug.len() <= MAX_KIND_CHARS
+                && slug.chars().enumerate().all(|(index, ch)| {
+                    ch.is_ascii_lowercase() || ch.is_ascii_digit() || (index > 0 && ch == '-')
+                }) =>
+        {
+            Ok(Some(slug.to_string()))
+        }
+        Some(_) => Err(CommandError::new(
+            "invalid_comment",
+            "The comment kind must be 1-32 lowercase letters, digits, or inner dashes.",
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_comment(
     pool: &SqlitePool,
@@ -467,6 +495,7 @@ async fn insert_comment(
     start_line: Option<u32>,
     end_line: Option<u32>,
     anchor: Option<Anchor>,
+    kind: Option<String>,
 ) -> Result<Comment, CommandError> {
     let (hash, snippet) = match anchor {
         Some(Anchor::Line { content: Some(content), .. }) => (
@@ -481,8 +510,8 @@ async fn insert_comment(
     };
     let result = sqlx::query(
         "INSERT INTO comments (review_id, parent_id, author_kind, author_name, author_model, author_token_id, \
-                body, file_path, side, start_line, end_line, anchor_hash, snippet, severity, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                body, file_path, side, start_line, end_line, anchor_hash, snippet, severity, kind, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(review_id)
     .bind(parent_id)
@@ -498,6 +527,7 @@ async fn insert_comment(
     .bind(hash)
     .bind(snippet)
     .bind(severity)
+    .bind(kind)
     .bind(now_millis())
     .execute(pool)
     .await?;
@@ -547,6 +577,7 @@ async fn create_comment_with_anchor(
         start_line,
         end_line,
         Some(anchor),
+        validate_kind(&draft.kind)?,
     )
     .await?;
     let identity = ReviewIdentity {
@@ -601,6 +632,7 @@ pub(crate) async fn create_unbound_comment_in_pool(
     end_line: Option<u32>,
     actor: &Actor,
     author_model: Option<&str>,
+    kind: Option<String>,
 ) -> Result<Comment, CommandError> {
     let draft = CommentDraft {
         body: body.to_string(),
@@ -610,6 +642,7 @@ pub(crate) async fn create_unbound_comment_in_pool(
         start_line,
         end_line,
         lines: Vec::new(),
+        kind,
     };
     let anchor = validate_anchor_with(&draft, AnchorLines::Absent)?;
     create_comment_with_anchor(pool, repo_path, base_sha, target_key, target_kind, &draft, anchor, actor, author_model)
@@ -631,7 +664,7 @@ pub(crate) async fn list_comments_in_pool(
     let rows = sqlx::query(
         "SELECT id, review_id, parent_id, author_kind, author_name, author_model, body, \
                 file_path, side, start_line, end_line, anchor_hash, snippet, severity, \
-                submission_id, resolved_at, edited_at, created_at \
+                submission_id, resolved_at, edited_at, created_at, kind \
          FROM comments WHERE review_id = ? ORDER BY created_at, id",
     )
     .bind(review_id)
@@ -641,6 +674,49 @@ pub(crate) async fn list_comments_in_pool(
         .map(comment_from_row)
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+// Canvas documents: kind-marked root comments across a repo's reviews,
+// newest first. The identity rides along so the app can open the pinned
+// surface a document's references resolve against.
+#[derive(Debug, Serialize)]
+pub struct CanvasDoc {
+    #[serde(flatten)]
+    pub comment: Comment,
+    pub repo_path: String,
+    pub base_sha: String,
+    pub target_key: String,
+    pub target_kind: String,
+}
+
+pub(crate) async fn list_canvas_docs_in_pool(
+    pool: &SqlitePool,
+    repo_path: &str,
+) -> Result<Vec<CanvasDoc>, CommandError> {
+    let rows = sqlx::query(
+        "SELECT c.id, c.review_id, c.parent_id, c.author_kind, c.author_name, c.author_model, c.body, \
+                c.file_path, c.side, c.start_line, c.end_line, c.anchor_hash, c.snippet, c.severity, \
+                c.submission_id, c.resolved_at, c.edited_at, c.created_at, c.kind, \
+                r.repo_path, r.base_sha, r.target_key, r.target_kind \
+         FROM comments c \
+         JOIN reviews r ON c.review_id = r.id \
+         WHERE r.repo_path = ? AND c.kind IS NOT NULL AND c.parent_id IS NULL \
+         ORDER BY c.created_at DESC, c.id DESC",
+    )
+    .bind(repo_path)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(CanvasDoc {
+                comment: comment_from_row(row)?,
+                repo_path: row.try_get("repo_path")?,
+                base_sha: row.try_get("base_sha")?,
+                target_key: row.try_get("target_key")?,
+                target_kind: row.try_get("target_kind")?,
+            })
+        })
+        .collect()
 }
 
 // Threads stay one root plus flat replies: replying to a reply is refused.
@@ -670,6 +746,7 @@ pub(crate) async fn reply_comment_in_pool(
         author_model,
         body,
         severity.as_deref(),
+        None,
         None,
         None,
         None,
@@ -917,6 +994,7 @@ fn finding_anchor(
         start_line: finding.start,
         end_line: finding.end.or(finding.start),
         lines: Vec::new(),
+        kind: None,
     };
     let anchor = validate_anchor_with(&draft, AnchorLines::Absent).map_err(recode_submission)?;
     Ok(match anchor {
@@ -1178,6 +1256,18 @@ mod tests {
         Actor::Human("human".into())
     }
 
+    #[test]
+    fn kind_validation_accepts_short_slugs_and_rejects_the_rest() {
+        assert_eq!(validate_kind(&None).unwrap(), None);
+        assert_eq!(validate_kind(&Some("  ".into())).unwrap(), None);
+        assert_eq!(validate_kind(&Some(" walkthrough ".into())).unwrap(), Some("walkthrough".into()));
+        assert_eq!(validate_kind(&Some("auth-notes2".into())).unwrap(), Some("auth-notes2".into()));
+        assert!(validate_kind(&Some("Walkthrough".into())).is_err());
+        assert!(validate_kind(&Some("-leading".into())).is_err());
+        assert!(validate_kind(&Some("has space".into())).is_err());
+        assert!(validate_kind(&Some("a".repeat(33).into())).is_err());
+    }
+
     fn agent(token_id: i64) -> Actor {
         Actor::Agent(AgentIdentity { token_id, name: "reviewer-bot".into() })
     }
@@ -1191,6 +1281,7 @@ mod tests {
             start_line: None,
             end_line: None,
             lines: Vec::new(),
+            kind: None,
         }
     }
 
@@ -1203,6 +1294,7 @@ mod tests {
             start_line: Some(start),
             end_line: Some(end),
             lines: lines.iter().map(|line| line.to_string()).collect(),
+            kind: None,
         }
     }
 

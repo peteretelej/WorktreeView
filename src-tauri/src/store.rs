@@ -109,7 +109,8 @@ pub struct Settings {
     pub inline_comments_visible: bool,
     pub files_pane_visible: bool,
     pub comments_pane_visible: bool,
-    pub comments_pane_wide: bool,
+    pub comments_pane_width: u32,
+    pub canvas_pane_width: u32,
     pub changed_files_view: ChangedFilesView,
     pub zoom: f64,
     pub mcp_enabled: bool,
@@ -130,13 +131,20 @@ pub struct Settings {
     pub skill_prompt_key: String,
 }
 
-// Bounds cover the frontend's zoom level set (src/zoom.ts); stored values
-// outside them are clamped on both read and write.
+// Bounds cover the zoom level set (src/zoom.ts) and the pane width drag
+// handles; stored values outside them are clamped on both read and write.
 const MIN_ZOOM: f64 = 0.5;
 const MAX_ZOOM: f64 = 2.0;
 
 fn clamp_zoom(zoom: f64) -> f64 {
     if zoom.is_finite() { zoom.clamp(MIN_ZOOM, MAX_ZOOM) } else { Settings::default().zoom }
+}
+
+const MIN_PANE_WIDTH: u32 = 240;
+const MAX_PANE_WIDTH: u32 = 2000;
+
+fn clamp_pane_width(width: u32) -> u32 {
+    width.clamp(MIN_PANE_WIDTH, MAX_PANE_WIDTH)
 }
 
 impl Default for Settings {
@@ -150,7 +158,8 @@ impl Default for Settings {
             inline_comments_visible: true,
             files_pane_visible: true,
             comments_pane_visible: true,
-            comments_pane_wide: false,
+            comments_pane_width: 300,
+            canvas_pane_width: 560,
             changed_files_view: ChangedFilesView::Tree,
             zoom: 1.0,
             mcp_enabled: true,
@@ -470,9 +479,14 @@ pub(crate) async fn get_settings_in_pool(pool: &SqlitePool) -> Result<Settings, 
                     settings.comments_pane_visible = flag;
                 }
             }
-            "comments_pane_wide" => {
-                if let Some(flag) = settings_bool_from_value(&value) {
-                    settings.comments_pane_wide = flag;
+            "comments_pane_width" => {
+                if let Ok(width) = value.parse::<u32>() {
+                    settings.comments_pane_width = clamp_pane_width(width);
+                }
+            }
+            "canvas_pane_width" => {
+                if let Ok(width) = value.parse::<u32>() {
+                    settings.canvas_pane_width = clamp_pane_width(width);
                 }
             }
             "changed_files_view" => {
@@ -548,10 +562,8 @@ pub(crate) async fn set_settings_in_pool(
             "comments_pane_visible",
             settings_bool_value(settings.comments_pane_visible).to_string(),
         ),
-        (
-            "comments_pane_wide",
-            settings_bool_value(settings.comments_pane_wide).to_string(),
-        ),
+        ("comments_pane_width", settings.comments_pane_width.to_string()),
+        ("canvas_pane_width", settings.canvas_pane_width.to_string()),
         (
             "changed_files_view",
             settings.changed_files_view.as_value().to_string(),
@@ -985,7 +997,8 @@ mod tests {
             inline_comments_visible: false,
             files_pane_visible: false,
             comments_pane_visible: false,
-            comments_pane_wide: true,
+            comments_pane_width: 420,
+            canvas_pane_width: 700,
             changed_files_view: ChangedFilesView::List,
             zoom: 1.25,
             mcp_enabled: false,

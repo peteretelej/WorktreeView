@@ -26,7 +26,7 @@ use commands::{
     delete_agent_token, delete_comment, delete_server_connection, describe_commit, edit_comment,
     fetch_project, fetch_review_objects, get_autostart_enabled, get_branch_inventory,
     get_mcp_status, get_portal_thread, get_settings, install_skill_target, list_agent_tokens,
-    list_attention, list_comments, list_commits, list_portal_activity,
+    list_attention, list_canvas_docs, list_comments, list_commits, list_portal_activity,
     list_portal_reviews, list_portal_threads, list_refs, list_repos, list_requests,
     list_review_changes, list_server_connections, list_skill_targets, list_submissions,
     list_surfaces, list_worktree_status, list_worktrees, mark_activity_seen,
@@ -372,6 +372,7 @@ pub fn run() {
             set_skill_prompt,
             create_comment,
             list_comments,
+            list_canvas_docs,
             list_submissions,
             reply_comment,
             set_comment_resolved,
@@ -711,8 +712,8 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        // The embedded set: the consolidated baseline plus 0002 through 0008.
-        assert_eq!(versions.len(), 8);
+        // The embedded set: the consolidated baseline plus 0002 through 0009.
+        assert_eq!(versions.len(), 9);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await
@@ -773,7 +774,7 @@ mod tests {
                 .unwrap();
         // The overwritten backup held the first rebuilt store: the full
         // embedded migration set.
-        assert_eq!(preserved.0, 8);
+        assert_eq!(preserved.0, 9);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -848,7 +849,7 @@ mod tests {
                 .await
                 .unwrap();
         // The rebuilt store carries the full embedded migration set.
-        assert_eq!(versions.len(), 8);
+        assert_eq!(versions.len(), 9);
         sqlx::query("SELECT path, name, last_opened_at, created_at FROM repos LIMIT 1")
             .fetch_all(&pool)
             .await
