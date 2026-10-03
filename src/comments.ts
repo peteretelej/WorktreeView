@@ -26,6 +26,9 @@ export type ReviewComment = {
   resolved_at: number | null;
   edited_at: number | null;
   created_at: number;
+  // Canvas documents carry a kind slug ("walkthrough", "notes"); plain
+  // conversation comments leave it absent.
+  kind?: string | null;
 };
 export type CommentDraft = {
   body: string;
@@ -46,6 +49,21 @@ export type ReviewIndexSummary = { base_sha: string; target_sha: string };
 export type RowSelection = { displaySide: DisplaySide; start: number; end: number };
 export type AuthorFilter = "all" | "human" | "agent";
 export type CommentThread = { comment: ReviewComment; replies: ReviewComment[] };
+
+// A code reference is a file-like path (dot or slash in the path part) plus
+// line numbers, optionally pinned to another revision; bare host:port
+// strings never match because the path must look like a path.
+const CODE_REF_PATTERN = /^([\w./\\-]*(?:[./][\w./\\-]+)?):(\d+)(?:-(\d+))?(?:@([0-9a-fA-F]{7,40}))?$/;
+
+export type CodeRef = { path: string; start: number; end: number | null; sha: string | null };
+
+export function parseCodeRef(text: string): CodeRef | null {
+  const match = CODE_REF_PATTERN.exec(text.trim());
+  if (!match) return null;
+  const path = match[1];
+  if (!/[./]/.test(path) || path.endsWith(".")) return null;
+  return { path, start: parseInt(match[2], 10), end: match[3] ? parseInt(match[3], 10) : null, sha: match[4] ?? null };
+}
 
 // The comment session keys on resolved SHAs from the loaded index, never
 // the symbolic base: a moved branch starts a new session by construction.

@@ -208,7 +208,7 @@ describe("desktop app against a worktreeview-server", () => {
     await worktreeRow.waitForDisplayed();
     await worktreeRow.$(".branch-title").click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
-    await $('aside[aria-label="Comments"]').waitForDisplayed();
+    await $('aside[aria-label="Review panel"]').waitForDisplayed();
     const fileRow = await $('//button[contains(@class, "file-row")][.//span[normalize-space()="reviewed.txt"]]');
     await fileRow.click();
     await expect($('code[title="reviewed.txt"]')).toBeDisplayed();
@@ -254,10 +254,10 @@ describe("desktop app against a worktreeview-server", () => {
     // The open review updates live over the event stream; the session is
     // never reloaded between the post and the assertion.
     await browser.waitUntil(async () => {
-      const text = await browser.execute(() => document.querySelector('aside[aria-label="Comments"]')?.textContent ?? "");
+      const text = await browser.execute(() => document.querySelector('aside[aria-label="Review panel"]')?.textContent ?? "");
       return text.includes("server-mode agent finding");
     }, { timeoutMsg: "the agent comment did not arrive over the server event stream" });
-    const threads = await browser.execute(() => Array.from(document.querySelectorAll('aside[aria-label="Comments"] .comment-thread .comment-author')).map((node) => node.textContent?.trim() ?? ""));
+    const threads = await browser.execute(() => Array.from(document.querySelectorAll('aside[aria-label="Review panel"] .comment-thread .comment-author')).map((node) => node.textContent?.trim() ?? ""));
     assert.ok(threads.includes("agent"), "the agent comment carries the agent's name");
 
     // A full submission delivered on the raw face raises the arrival cue

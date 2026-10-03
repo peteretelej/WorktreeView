@@ -2302,11 +2302,22 @@ button:disabled {
 .request-rounds button { padding: 0 10px; font-size: 10.5px; }
 .request-form-error { margin: 0; color: var(--danger); font-size: 11px; }
 .request-form-actions { display: flex; justify-content: flex-start; gap: 6px; }
-/* Collapsed panes leave a slim reopen rail in their grid column. */
-.review-body { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: var(--files-col, 300px) minmax(0, 1fr) var(--comments-col, 300px); }
+/* Collapsed panes leave a slim reopen rail in their grid column; the
+   resize handle owns the 5px track between the diff and the right pane.
+   Children are placed explicitly so the collapsed and narrow variants,
+   which drop or hide the handle, cannot shift a pane into the wrong
+   track. */
+.review-body { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: var(--files-col, 300px) minmax(0, 1fr) 5px var(--comments-col, 300px); }
+.review-body > .file-index, .review-body > .pane-rail.left { grid-column: 1; }
+.review-body > .patch-pane { grid-column: 2; }
+.review-body > .pane-handle { grid-column: 3; }
+.review-body > .comment-stream, .review-body > .pane-rail.right { grid-column: 4; }
 .review-body.files-collapsed { --files-col: 44px; }
-.review-body.comments-collapsed { --comments-col: 44px; }
-.review-body.comments-wide { --comments-col: 460px; }
+.review-body.comments-collapsed { --comments-col: 44px; grid-template-columns: var(--files-col, 300px) minmax(0, 1fr) var(--comments-col, 44px); }
+.review-body.comments-collapsed > .comment-stream, .review-body.comments-collapsed > .pane-rail.right { grid-column: 3; }
+.pane-handle { cursor: col-resize; background: var(--surface-2); border-left: 1px solid var(--border); }
+.pane-handle:hover, .pane-handle.dragging { background: var(--primary-soft); }
+.pane-handle:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
 .pane-rail { display: flex; min-height: 0; flex-direction: column; align-items: center; padding: 4px 0; border-right: 1px solid var(--border); background: var(--surface); }
 .pane-rail.right { border-right: 0; border-left: 1px solid var(--border); }
 .file-index { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--border); background: var(--surface); }
@@ -2460,7 +2471,8 @@ button:disabled {
 }
 
 @media (max-width: 760px) {
-  .review-body { --files-col: minmax(180px, 38%); --comments-col: 44px; }
+  .review-body { --files-col: minmax(180px, 38%); --comments-col: 44px; grid-template-columns: var(--files-col) minmax(0, 1fr) 0 var(--comments-col); }
+  .review-body .pane-handle { display: none; }
   .review-bar { flex-wrap: wrap; }
 }
 
@@ -2536,9 +2548,19 @@ button:disabled {
   .settings-content { padding: 18px 16px 32px; }
 }
 
-/* Comment layer: merged stream, inline threads, and composers. */
+/* Comment layer: merged stream, inline threads, and composers. The right
+   pane carries Comments and Canvas tabs; each tab reads its own width. */
 .comment-stream { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-left: 1px solid var(--border); background: var(--surface); }
 .comment-stream-body { min-height: 0; flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+.pane-tabs { display: flex; flex: none; align-items: center; gap: 2px; padding: 5px 6px 0; border-bottom: 1px solid var(--border); background: var(--surface); }
+.pane-tab { display: inline-flex; align-items: center; gap: 6px; padding: 7px 9px 8px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); cursor: pointer; font-size: 11px; }
+.pane-tab:hover { color: var(--foreground); }
+.pane-tab.active { border-bottom-color: var(--primary); color: var(--foreground); }
+.pane-tab-static { cursor: default; }
+.tab-count { padding: 1px 5px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 9px; }
+.pane-tools { display: flex; flex: none; align-items: center; gap: 3px; margin-left: auto; padding-bottom: 4px; }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 20px; border: 1px solid var(--border); border-radius: 4px; background: var(--elevated, var(--background)); color: var(--muted); cursor: pointer; font-size: 11px; }
+.icon-btn:hover { border-color: var(--surface-3); color: var(--foreground); }
 .pane-heading-actions { display: flex; align-items: center; gap: 6px; }
 .pane-heading-tools { display: flex; align-items: center; gap: 2px; }
 .comment-filter { display: flex; height: 26px; flex: none; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
@@ -2547,7 +2569,11 @@ button:disabled {
 .comment-filter button:hover { color: var(--foreground); }
 .comment-filter button.active { background: var(--primary-soft); color: var(--foreground); }
 .comment-empty { padding: 16px 12px; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-size: 11px; line-height: 1.6; text-align: center; }
-.comment-thread { display: flex; flex-direction: column; gap: 6px; }
+.comment-thread { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+/* Replies read as replies: one indent level under the root with a rail,
+   however deep the flat conversation runs (storage stays one root plus
+   flat replies). */
+.reply-block { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin: 2px 0 0 14px; padding-left: 10px; border-left: 2px solid var(--surface-3); }
 .comment-card { padding: 9px 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--elevated, var(--background)); color: var(--foreground); font: 12px/1.55 var(--font-sans); }
 .comment-card:hover { border-color: var(--surface-3); }
 .comment-card.comment-state-outdated { border-color: var(--danger); }
@@ -2561,28 +2587,49 @@ button:disabled {
 .comment-badge.severity-P0 { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
 .comment-badge.severity-P1 { border-color: var(--danger); color: var(--danger); }
 .comment-state-badge { border-color: var(--warn); color: var(--warn); }
+.comment-kind-badge { border-color: var(--primary); color: var(--primary); }
 .comment-resolved-badge { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
 .comment-time { margin-left: auto; }
 .comment-copy { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
 .comment-copy:hover { background: var(--surface-2); color: var(--foreground); }
 .comment-copy.copied { color: var(--ok); }
 
-/* Markdown bodies: comments and agent submissions share the renderer, so
-   the typography lives on .comment-body and holds up at 12px in a narrow
-   stream column. */
-.comment-body { overflow-wrap: anywhere; font-size: 12px; line-height: 1.55; }
-.comment-body p { margin: 0 0 5px; }
+/* Markdown bodies: comments and agent submissions share the renderer.
+   Reading text uses the system UI stack at 13px with roomier leading and
+   full contrast (D10): the readability fix was family and measure, not
+   more Inter at a smaller size. */
+.comment-body { overflow-wrap: anywhere; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 13px; line-height: 1.6; }
+.comment-body p { margin: 0 0 6px; }
 .comment-body p:last-child { margin-bottom: 0; }
-.comment-body h1, .comment-body h2, .comment-body h3, .comment-body h4, .comment-body h5, .comment-body h6 { margin: 8px 0 4px; font-size: 12px; font-weight: 650; line-height: 1.35; }
+.comment-body h1, .comment-body h2, .comment-body h3, .comment-body h4, .comment-body h5, .comment-body h6 { margin: 10px 0 4px; font-size: 13px; font-weight: 650; line-height: 1.35; }
 .comment-body h1:first-child, .comment-body h2:first-child, .comment-body h3:first-child { margin-top: 0; }
-.comment-body h1 { font-size: 13px; }
-.comment-body ul, .comment-body ol { margin: 0 0 5px; padding-left: 18px; }
-.comment-body li { margin: 1px 0; }
-.comment-body li > input[type="checkbox"] { width: 11px; height: 11px; margin-right: 4px; vertical-align: -1px; accent-color: var(--primary); }
-.comment-body blockquote { margin: 0 0 5px; padding: 2px 0 2px 9px; border-left: 2px solid var(--primary); color: var(--muted); }
+.comment-body h1 { font-size: 14px; }
+.comment-body ul, .comment-body ol { margin: 0 0 6px; padding-left: 18px; }
+.comment-body li { margin: 2px 0; }
+.comment-body li > input[type="checkbox"] { width: 12px; height: 12px; margin-right: 5px; vertical-align: -1px; accent-color: var(--primary); }
+.comment-body blockquote { margin: 0 0 6px; padding: 2px 0 2px 9px; border-left: 2px solid var(--primary); color: var(--muted); }
 .comment-body blockquote p:last-child { margin-bottom: 0; }
-.comment-body code { padding: 0 3px; border: 1px solid var(--border); border-radius: 3px; background: var(--code-surface); font: 10.5px var(--font-mono); }
-.comment-body pre { overflow-x: auto; margin: 0 0 5px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--code-surface); }
+.comment-body code { padding: 0 3px; border: 1px solid var(--border); border-radius: 3px; background: var(--code-surface); font: 11px var(--font-mono); overflow-wrap: anywhere; }
+.comment-body pre { overflow-x: auto; margin: 0 0 6px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--code-surface); }
+.comment-body pre code { border: 0; padding: 0; background: transparent; overflow-wrap: normal; }
+/* Jump chips: `path:line` code spans that resolve to a file revision. */
+.comment-body .code-ref { padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--code-surface); color: var(--primary); cursor: pointer; font: 11px var(--font-mono); }
+.comment-body .code-ref:hover { border-color: var(--primary); }
+
+/* Canvas documents: kind-marked threads the app renders in the wide
+   reading layout; the same comment components render them. */
+.canvas-pane { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 10px; overflow-y: auto; padding: 10px; }
+.canvas-library { display: flex; flex: none; flex-direction: column; gap: 5px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--elevated, var(--background)); }
+.canvas-library .eyebrow { margin: 0 0 2px; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; }
+.canvas-doc-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; background: transparent; color: var(--foreground); cursor: pointer; text-align: left; }
+.canvas-doc-row:hover { border-color: var(--surface-3); background: var(--surface-2); }
+.canvas-doc-row.active { border-color: var(--primary); background: var(--primary-soft); }
+.canvas-doc-title { flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-doc-meta { flex: none; margin-left: auto; color: var(--muted); font: 10px var(--font-mono); }
+.mermaid-figure { display: flex; justify-content: center; margin: 6px 0; padding: 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--code-surface); }
+.mermaid-figure svg { max-width: 100%; height: auto; }
+.mermaid-loading { margin: 6px 0; color: var(--muted); font-size: 11px; }
+.mermaid-fallback { overflow-x: auto; }
 .comment-body pre:last-child { margin-bottom: 0; }
 .comment-body pre code { padding: 0; border: 0; background: transparent; font: 10.5px/1.55 var(--font-mono); }
 .comment-body table { display: block; max-width: 100%; margin: 0 0 5px; overflow-x: auto; border-collapse: collapse; font-size: 11px; }

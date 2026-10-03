@@ -111,7 +111,7 @@ export function reviewEventText(row: Pick<PortalReviewRow, "last_event" | "age_b
 // ===== Threads tab =====
 
 export type ThreadsStateFilter = "open" | "resolved" | "all";
-export type ThreadsVoiceFilter = "all" | "human" | "agents";
+export type ThreadsVoiceFilter = "all" | "human" | "agents" | "docs";
 
 export type PortalParticipant = { author_kind: "human" | "agent"; author_name: string };
 
@@ -128,6 +128,7 @@ export type PortalThreadRow = {
   head_sha: string | null;
   excerpt: string;
   severity: "P0" | "P1" | "P2" | "P3" | null;
+  kind: string | null;
   anchor: string | null;
   participants: PortalParticipant[];
   reply_count: number;
@@ -175,6 +176,7 @@ export const THREADS_VOICE_FILTERS: Array<{ id: ThreadsVoiceFilter; label: strin
   { id: "all", label: "All" },
   { id: "human", label: "Human" },
   { id: "agents", label: "Agents" },
+  { id: "docs", label: "Docs" },
 ];
 
 // The threads text needle narrows server-side like the reviews search;
@@ -199,6 +201,8 @@ export function rowsForThreadsState(rows: PortalThreadRow[], filter: ThreadsStat
 // voice id is plural ("agents"); the stored author_kind is singular.
 export function rowsForThreadsVoice(rows: PortalThreadRow[], voice: ThreadsVoiceFilter): PortalThreadRow[] {
   if (voice === "all") return rows;
+  // "Docs" narrows to canvas documents: threads whose root carries a kind.
+  if (voice === "docs") return rows.filter((row) => Boolean(row.kind));
   const kind = voice === "human" ? "human" : "agent";
   return rows.filter((row) => row.participants.some((participant) => participant.author_kind === kind));
 }

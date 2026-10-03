@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { call, type RemoteSource, type SourceResolver } from "./remote.ts";
-import { Check, Copy, FoldHorizontal, PanelRightClose, Trash2, UnfoldHorizontal } from "lucide-react";
+import { Check, Copy, PanelRightClose, Trash2 } from "lucide-react";
 import type { DiffLine } from "./diff.ts";
 import type { ReviewIdentity } from "./navigation.ts";
 import { copyText } from "./clipboard.ts";
-import { CommentBody } from "./markdown.tsx";
+import { CommentBody, type CodeRef } from "./markdown.tsx";
 import { MarkdownComposer } from "./composer.tsx";
 import {
   anchorLabel,
@@ -173,13 +173,14 @@ function CopyMark({ copied }: { copied: boolean }) {
   return copied ? <Check size={12} /> : <Copy size={12} />;
 }
 
-function CommentCard({ comment, status, reversed = false, actions }: { comment: ReviewComment; status: AnchorStatus | null; reversed?: boolean; actions?: ReactNode }) {
+function CommentCard({ comment, status, reversed = false, actions, onCodeRef }: { comment: ReviewComment; status: AnchorStatus | null; reversed?: boolean; actions?: ReactNode; onCodeRef?: (ref: CodeRef, raw: string) => void }) {
   const state = comment.parent_id === null ? status?.state ?? null : null;
   const { copied, copy } = useCopied();
   return <article className={`comment-card comment-state-${state ?? "none"} ${comment.resolved_at !== null ? "comment-resolved" : ""}`}>
     <header className="comment-head">
       <span className="comment-author" title={comment.author_name}>{comment.author_name}</span>
       {comment.author_kind === "agent" && <span className="comment-badge">agent</span>}
+      {comment.kind && <span className="comment-badge comment-kind-badge">{comment.kind}</span>}
       {comment.author_model && <span className="comment-model" title={comment.author_model}>{comment.author_model}</span>}
       {comment.severity && <span className={`comment-badge comment-severity severity-${comment.severity}`} title={severityLabel(comment.severity)}>{comment.severity}</span>}
       {state === "moved" && <span className="comment-badge comment-state-badge">moved</span>}
@@ -187,7 +188,7 @@ function CommentCard({ comment, status, reversed = false, actions }: { comment: 
       {comment.resolved_at !== null && <span className="comment-badge comment-resolved-badge">resolved</span>}
       <button className="comment-copy" type="button" aria-label="Copy comment as markdown" title="Copy as markdown" onClick={() => copy(formatCommentForCopy(comment, reversed))}>{<CopyMark copied={copied} />}</button>
     </header>
-    <CommentBody text={comment.body} />
+    <CommentBody text={comment.body} onCodeRef={onCodeRef} />
     {state === "outdated" && comment.snippet && <pre className="comment-snippet"><code>{comment.snippet}</code></pre>}
     <div className="comment-foot">
       {actions}
@@ -232,7 +233,7 @@ export function DraftComposer({ placeholder, submitLabel, initialBody = "", onSu
 // inline cards the patch panes render at anchored rows. An open-anchor
 // handler turns the root's anchor label into a jump-to-diff button; inline
 // cards omit it because they already sit in the diff.
-export function CommentThreadView({ thread, status, comments, reversed = false, onOpenAnchor }: { thread: CommentThread; status: AnchorStatus | null; comments: CommentsApi; reversed?: boolean; onOpenAnchor?: (comment: ReviewComment) => void }) {
+export function CommentThreadView({ thread, status, comments, reversed = false, onOpenAnchor, onCodeRef }: { thread: CommentThread; status: AnchorStatus | null; comments: CommentsApi; reversed?: boolean; onOpenAnchor?: (comment: ReviewComment) => void; onCodeRef?: (ref: CodeRef, raw: string) => void }) {
   const [replying, setReplying] = useState(false);
   const [editing, setEditing] = useState<number | null>(null);
   const root = thread.comment;
@@ -261,40 +262,114 @@ export function CommentThreadView({ thread, status, comments, reversed = false, 
         <button type="button" onClick={() => setReplying(!replying)}>{replying ? "Cancel" : "Reply"}</button>
       </div>
       {editControls(root)}
-    </>} />
-    {thread.replies.map((reply) => <CommentCard key={reply.id} comment={reply} status={null} reversed={reversed} actions={editControls(reply)} />)}
+    </>} onCodeRef={onCodeRef} />
+    {thread.replies.length > 0 && <div className="reply-block">
+      {thread.replies.map((reply) => <CommentCard key={reply.id} comment={reply} status={null} reversed={reversed} actions={editControls(reply)} onCodeRef={onCodeRef} />)}
+    </div>}
     {replying && <MiniComposer placeholder="Reply" submitLabel="Reply" busy={false} onSubmit={(body) => { setReplying(false); void comments.reply(root.id, body); }} onCancel={() => setReplying(false)} />}
   </div>;
 }
 
-export function CommentStream({ comments, reversed = false, strip, onCollapse, wide = false, onToggleWide, onOpenAnchor }: { comments: CommentsApi; reversed?: boolean; strip?: ReactNode; onCollapse?: () => void; wide?: boolean; onToggleWide?: () => void; onOpenAnchor?: (comment: ReviewComment) => void }) {
+// A canvas document is a kind-marked root comment plus the review identity
+// it was posted against (a head-pinned snapshot by convention), so its
+// code references resolve against the exact revision it explains.
+export type CanvasDocRow = {
+  repo_path: string;
+  base_sha: string;
+  target_key: string;
+  target_kind: string;
+} & ReviewComment;
+
+export type CanvasPaneContext = {
+  docs: CanvasDocRow[];
+  onCodeRef(doc: CanvasDocRow, ref: CodeRef, raw: string): void;
+  resolve: SourceResolver;
+};
+
+export type PaneTab = "comments" | "canvas";
+
+export function canvasDocIdentity(doc: CanvasDocRow): ReviewIdentity {
+  return {
+    repoPath: doc.repo_path,
+    base: doc.base_sha,
+    // The recorded key decides the stored conversation, so the stand-in
+    // target only has to be well-formed.
+    target: { kind: "commit", sha: doc.target_key, parents: [], defaultBaseAncestor: false },
+    scope: "committed",
+    reversed: false,
+    recordedKey: { targetKey: doc.target_key, targetKind: doc.target_kind === "worktree" ? "worktree" : "head" },
+  };
+}
+
+export function canvasDocTitle(body: string): string {
+  const heading = body.split("\n").find((line) => line.startsWith("#"));
+  if (heading) return heading.replace(/^#+\s*/, "").trim();
+  const first = body.trim().split("\n")[0] ?? "";
+  return first.length > 64 ? `${first.slice(0, 64)}…` : first || "Untitled document";
+}
+
+// The palette's needle match: titles plus the kind, case-insensitive.
+export function canvasDocMatches(doc: { body: string; kind?: string | null }, needle: string): boolean {
+  const haystack = `${canvasDocTitle(doc.body)}\n${doc.kind ?? ""}`.toLowerCase();
+  return haystack.includes(needle.toLowerCase());
+}
+
+function CanvasPane({ canvas, reversed }: { canvas: CanvasPaneContext; reversed: boolean }) {
+  const [activeDocId, setActiveDocId] = useState<number | null>(null);
+  const activeDoc = canvas.docs.find((doc) => doc.id === activeDocId) ?? canvas.docs[0] ?? null;
+  const identity = useMemo(() => (activeDoc ? canvasDocIdentity(activeDoc) : null), [activeDoc]);
+  const docComments = useReviewComments(identity, null, null, reversed, canvas.resolve);
+  const thread = activeDoc ? docComments.threads.find((candidate) => candidate.comment.id === activeDoc.id) ?? null : null;
+  return <div className="canvas-pane">
+    <div className="canvas-library">
+      <p className="eyebrow">Canvas docs · this repo</p>
+      {canvas.docs.map((doc) => (
+        <button key={doc.id} type="button" className={`canvas-doc-row ${doc.id === activeDoc?.id ? "active" : ""}`} onClick={() => setActiveDocId(doc.id)}>
+          <span className="canvas-doc-title" title={canvasDocTitle(doc.body)}>{canvasDocTitle(doc.body)}</span>
+          <span className="comment-badge">{doc.kind}</span>
+          <span className="canvas-doc-meta">{doc.target_kind === "head" ? `${doc.target_key.slice(0, 8)} · ` : ""}{new Date(doc.created_at).toLocaleDateString()}</span>
+        </button>
+      ))}
+    </div>
+    {activeDoc && (thread
+      ? <CommentThreadView thread={thread} status={null} comments={docComments} reversed={reversed} onCodeRef={(ref, raw) => canvas.onCodeRef(activeDoc, ref, raw)} />
+      : <CommentCard comment={activeDoc} status={null} reversed={reversed} onCodeRef={(ref, raw) => canvas.onCodeRef(activeDoc, ref, raw)} />)}
+  </div>;
+}
+
+export function CommentStream({ comments, reversed = false, strip, onCollapse, onReset, onOpenAnchor, paneTab, onPaneTab, canvas }: { comments: CommentsApi; reversed?: boolean; strip?: ReactNode; onCollapse?: () => void; onReset?: () => void; onOpenAnchor?: (comment: ReviewComment) => void; paneTab?: PaneTab; onPaneTab?: (tab: PaneTab) => void; canvas?: CanvasPaneContext }) {
   const { copied, copy } = useCopied();
   if (!comments.key) return null;
-  return <aside className="comment-stream" aria-label="Comments">
-    <div className="pane-heading">
-      <span className="pane-heading-tools">
-        {onCollapse && <button className="comment-copy" type="button" aria-label="Hide Comments" title="Hide Comments" onClick={onCollapse}><PanelRightClose size={12} /></button>}
-        {onToggleWide && <button className="comment-copy" type="button" aria-label={wide ? "Narrow Comments" : "Widen Comments"} title={wide ? "Narrow Comments" : "Widen Comments"} onClick={onToggleWide}>{wide ? <FoldHorizontal size={12} /> : <UnfoldHorizontal size={12} />}</button>}
-      </span>
-      <span className="pane-heading-actions">
-        <strong>Comments</strong>
-        <span>{comments.threads.length}</span>
-        <button className="comment-copy" type="button" aria-label="Copy all comments as markdown" title="Copy all comments as markdown" disabled={comments.visibleThreads.length === 0} onClick={() => copy(exportThreadsMarkdown(comments.visibleThreads, reversed))}>{<CopyMark copied={copied} />}</button>
+  const docs = canvas?.docs ?? [];
+  const showTabs = Boolean(docs.length > 0 && onPaneTab);
+  const activeTab: PaneTab = showTabs ? paneTab ?? "comments" : "comments";
+  return <aside className="comment-stream" aria-label="Review panel">
+    <div className="pane-tabs" role="tablist" aria-label="Panel tabs">
+      {showTabs ? <>
+        <button className={`pane-tab ${activeTab === "comments" ? "active" : ""}`} role="tab" aria-selected={activeTab === "comments"} type="button" onClick={() => onPaneTab?.("comments")}>Comments <span className="tab-count">{comments.threads.length}</span></button>
+        <button className={`pane-tab ${activeTab === "canvas" ? "active" : ""}`} role="tab" aria-selected={activeTab === "canvas"} type="button" onClick={() => onPaneTab?.("canvas")}>Canvas <span className="tab-count">{docs.length}</span></button>
+      </> : <span className="pane-tab pane-tab-static">Comments <span className="tab-count">{comments.threads.length}</span></span>}
+      <span className="pane-tools">
+        {(activeTab === "comments" || !showTabs) && <button className="comment-copy" type="button" aria-label="Copy all comments as markdown" title="Copy all comments as markdown" disabled={comments.visibleThreads.length === 0} onClick={() => copy(exportThreadsMarkdown(comments.visibleThreads, reversed))}>{<CopyMark copied={copied} />}</button>}
+        {onCollapse && <button className="icon-btn" type="button" aria-label="Hide Comments" title="Hide Comments" onClick={onCollapse}><PanelRightClose size={12} /></button>}
+        {onReset && <button className="icon-btn" type="button" aria-label="Reset pane width" title="Reset pane width" onClick={onReset}>⟲</button>}
       </span>
     </div>
-    <div className="comment-stream-body">
-      {strip}
-      <div className="comment-filter" role="group" aria-label="Filter comments by author">
-        {(["all", "human", "agent"] as const).map((option) => <button key={option} type="button" className={comments.author === option ? "active" : ""} onClick={() => comments.setAuthor(option)}>{option}</button>)}
-      </div>
-      {comments.composer?.kind === "review" && <div className="comment-composer-panel">
-        <p className="eyebrow">New review comment</p>
-        <DraftComposer placeholder="Summary, question, or finding…" submitLabel="Comment" onSubmit={({ body, severity }) => { void comments.create({ body, severity, file_path: null, side: null, start_line: null, end_line: null, lines: [] }).then(comments.closeComposer); }} onCancel={comments.closeComposer} />
-      </div>}
-      {comments.visibleThreads.length === 0
-        ? <div className="comment-empty">No comments{comments.author === "all" ? " yet" : ` from ${comments.author} authors`}. Click a diff line to comment; shift-click or drag the line numbers for a range.</div>
-        : comments.visibleThreads.map((thread) => <CommentThreadView key={thread.comment.id} thread={thread} status={comments.statuses[thread.comment.id] ?? null} comments={comments} reversed={reversed} onOpenAnchor={onOpenAnchor} />)}
-    </div>
+    {showTabs && activeTab === "canvas" && canvas
+      ? <CanvasPane canvas={canvas} reversed={reversed} />
+      : <div className="comment-stream-body">
+          {strip}
+          <div className="comment-filter" role="group" aria-label="Filter comments by author">
+            {(["all", "human", "agent"] as const).map((option) => <button key={option} type="button" className={comments.author === option ? "active" : ""} onClick={() => comments.setAuthor(option)}>{option}</button>)}
+          </div>
+          {comments.composer?.kind === "review" && <div className="comment-composer-panel">
+            <p className="eyebrow">New review comment</p>
+            <DraftComposer placeholder="Summary, question, or finding…" submitLabel="Comment" onSubmit={({ body, severity }) => { void comments.create({ body, severity, file_path: null, side: null, start_line: null, end_line: null, lines: [] }).then(comments.closeComposer); }} onCancel={comments.closeComposer} />
+          </div>}
+          {comments.visibleThreads.length === 0
+            ? <div className="comment-empty">No comments{comments.author === "all" ? " yet" : ` from ${comments.author} authors`}. Click a diff line to comment; shift-click or drag the line numbers for a range.</div>
+            : comments.visibleThreads.map((thread) => <CommentThreadView key={thread.comment.id} thread={thread} status={comments.statuses[thread.comment.id] ?? null} comments={comments} reversed={reversed} onOpenAnchor={onOpenAnchor} />)}
+        </div>}
   </aside>;
 }
 

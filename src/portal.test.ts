@@ -134,6 +134,7 @@ function thread(overrides: Partial<PortalThreadRow> = {}): PortalThreadRow {
     head_sha: "recorded-head",
     excerpt: "first line",
     severity: null,
+    kind: null,
     anchor: null,
     participants: [{ author_kind: "human", author_name: "dana" }],
     reply_count: 0,
@@ -174,7 +175,7 @@ test("the state and voice filters narrow threads without re-deriving rules", () 
 
 test("the chip vocabularies are the filter sets the tab renders", () => {
   assert.deepEqual(THREADS_STATE_FILTERS.map((chip) => chip.id), ["open", "resolved", "all"]);
-  assert.deepEqual(THREADS_VOICE_FILTERS.map((chip) => chip.id), ["all", "human", "agents"]);
+  assert.deepEqual(THREADS_VOICE_FILTERS.map((chip) => chip.id), ["all", "human", "agents", "docs"]);
 });
 
 test("threads text normalization trims and empties whitespace-only needles", () => {

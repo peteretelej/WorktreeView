@@ -9,7 +9,7 @@ import { createNavigationHistory, DEFAULT_PORTAL_FILTERS, sameReviewTarget, type
 import { autoReviewBase, workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
 import { arrivalChangeLabel, arrivalProjectLabel, arrivalSentenceBody, olderArrivalsSuffix } from "./arrivals";
 import { call, connectEventStream, connectionLabel, connectionSources, mergeAttention, mergePortalActivity, mergePortalReviews, mergePortalThreadGroups, mergeSearchMatches, repoNameFromPath, resolveSource, sourceForConnection, type RemoteSource, type ServerConnectionRow, type SourceResolver } from "./remote";
-import { SettingsPage, addServerProject, applyTheme, defaultSettings, getSettings, installSkillTarget, listServerConnections, listSkillTargets, persistSettings, removeServerProject, setServerProjectPinned, setSkillPrompt, type ChangedFilesView, type Settings } from "./settings";
+import { SettingsPage, addServerProject, applyTheme, defaultSettings, getSettings, installSkillTarget, listServerConnections, listSkillTargets, persistSettings, removeServerProject, setServerProjectPinned, setSkillPrompt, MAX_PANE_WIDTH, MIN_PANE_WIDTH, type ChangedFilesView, type Settings } from "./settings";
 import { skillPromptOf, type SkillTarget } from "./skillTargets";
 import { DEFAULT_ZOOM, snapZoom, stepZoom, zoomShortcut } from "./zoom";
 import { imageMimeForPath } from "./stream";
@@ -17,7 +17,8 @@ import { filterGoneSurfaces, goneSurfaceLabel, pinnedSurfaces, surfacePinIndex, 
 import { ATTENTION_TABS, attentionAge, attentionPreview, attentionRows, attentionStatus, attentionTabCounts, groupedChangeLabel, isNarrowAttention, requestStatusLabel, reviewsBackLabel, rowsForAttentionTab, type AttentionCategory, type AttentionQueue, type AttentionRow, type RequestChange, } from "./requests.ts";
 import { normalizeReviewsSearch, normalizeThreadsText, threadIdentityRef, type PortalActivityEvent, type PortalReviewRow, type PortalSearchMatches, type PortalThreadGroup, type ReviewIdentityRef } from "./portal.ts";
 import { PortalActivityTab, PortalReviewsTab, PortalThreadDetail, PortalThreadsTab, useNow, usePaneWidth, type PortalActivityPayload, type PortalReviewsPayload, type PortalThreadPayload, type PortalThreadsPayload } from "./portal.tsx";
-import { useReviewComments } from "./comments.tsx";
+import { useReviewComments, canvasDocMatches, canvasDocTitle, type CanvasDocRow, type CanvasPaneContext, type PaneTab } from "./comments.tsx";
+import type { CodeRef } from "./markdown.tsx";
 import { copyText } from "./clipboard";
 import { BrandMark, CopyButton, Empty, Pager, TopBar, UpdatedStamp } from "./ui";
 import { BRANCH_PAGE_SIZE, parseHunks, patchIdentityOf, sameReview, DiffToggles, ReviewView, type DiffPreferences, type FileContent, type FilePatch, type ReviewIndex } from "./review";
@@ -36,8 +37,8 @@ type RepoError = { message: string; code: string };
 type RemoteHealth = { state: RemoteLoadState; message: string | null };
 // One palette row: the in-memory repo/worktree search or a store-search
 // match; sections render as labels between the rows of one paged list.
-type PaletteRow = { section: "repos"; result: SearchResult } | { section: "comments"; match: PortalSearchMatches["comments"][number] } | { section: "requests"; match: PortalSearchMatches["requests"][number] } | { section: "commits"; match: PortalSearchMatches["commits"][number] };
-const PALETTE_SECTION_LABELS: Record<PaletteRow["section"], string> = { repos: "Repositories and worktrees", comments: "Threads and comments", requests: "Requests", commits: "Commits" };
+type PaletteRow = { section: "repos"; result: SearchResult } | { section: "comments"; match: PortalSearchMatches["comments"][number] } | { section: "requests"; match: PortalSearchMatches["requests"][number] } | { section: "commits"; match: PortalSearchMatches["commits"][number] } | { section: "docs"; doc: CanvasDocRow };
+const PALETTE_SECTION_LABELS: Record<PaletteRow["section"], string> = { repos: "Repositories and worktrees", comments: "Threads and comments", requests: "Requests", commits: "Commits", docs: "Canvas docs (opened repos)" };
 type WorktreeStatus = { path: string; changes: number | null };
 type OverviewTab = "worktrees" | "branches" | "remote" | "archived";
 // Mirrors the payload of the Rust `submission-received` event.
@@ -148,6 +149,48 @@ function App() {
   // review-request change for the open review.
   const [reviewRefreshTick, setReviewRefreshTick] = useState(0);
   const [requestRefreshTick, setRequestRefreshTick] = useState(0);
+  // One landing for opening a canvas document's pinned surface: resolve the
+  // live worktree when the doc pins one, else open the pinned head as a
+  // recorded identity; optionally focus the document's own comment.
+  function openCanvasDoc(doc: CanvasDocRow, focusedCommentId: number | null = null) {
+    const preset = { base: doc.base_sha, scope: "committed" as ReviewScope, recordedKey: { targetKey: doc.target_key, targetKind: doc.target_kind === "worktree" ? ("worktree" as const) : ("head" as const) } };
+    if (doc.target_kind === "worktree") {
+      const repo = allRepos.find((item) => item.path === doc.repo_path);
+      const worktree = repo?.worktrees.find((item) => item.path === doc.target_key);
+      if (worktree) {
+        void openReview({ kind: "worktree", worktree }, doc.repo_path, { ...preset, recordedKey: { targetKey: doc.target_key, targetKind: "worktree" } }, undefined, focusedCommentId);
+        return;
+      }
+      // The pinned worktree is gone; open its recorded head when one was
+      // stored, else there is no surface to land on.
+      const fallback = doc.target_key;
+      if (!/^[0-9a-f]{40}$/i.test(fallback)) return;
+      void openReview({ kind: "commit", sha: fallback, parents: [], defaultBaseAncestor: false }, doc.repo_path, { base: doc.base_sha, scope: "committed", recordedKey: { targetKey: doc.target_key, targetKind: "worktree" } }, undefined, focusedCommentId);
+      return;
+    }
+    void openReview({ kind: "commit", sha: doc.target_key, parents: [], defaultBaseAncestor: false }, doc.repo_path, preset, undefined, focusedCommentId);
+  }
+  // A canvas document's code reference opens the document's pinned surface
+  // at that file and line; a cross-commit reference opens the cited
+  // revision instead. The jump lands after the review loads: the effect
+  // below selects the file, and the patch pane consumes the anchor.
+  function openCanvasCodeRef(doc: CanvasDocRow, reference: CodeRef) {
+    const sha = reference.sha ?? (doc.target_kind === "head" ? doc.target_key : null);
+    if (!sha) { openCanvasDoc(doc); return; }
+    setCanvasJump({ filePath: reference.path, line: reference.start, sha, doc, nonce: Date.now() });
+    void openReview({ kind: "commit", sha, parents: [], defaultBaseAncestor: false }, doc.repo_path, { base: reference.sha ? "empty-tree" : doc.base_sha, scope: "committed", recordedKey: { targetKey: sha, targetKind: "head" } });
+  }  const [paneDragWidth, setPaneDragWidth] = useState<number | null>(null);
+  const [paneTab, setPaneTab] = useState<PaneTab>("comments");
+  // Canvas documents per repo, and an in-flight reference jump: opening one
+  // navigates to the document's pinned surface, selects the cited file, and
+  // hands the line to the patch pane's anchor consumer.
+  const [canvasDocs, setCanvasDocs] = useState<Record<string, CanvasDocRow[]>>({});
+  const [canvasJump, setCanvasJump] = useState<{ doc: CanvasDocRow; filePath: string; line: number; sha: string | null; nonce: number } | null>(null);
+  // Once the pinned surface is open and the cited file selected, the jump
+  // hands its line to the patch pane's anchor consumer and clears itself,
+  // so later manual file selections are never fought by the effect.
+  const [canvasAnchorJump, setCanvasAnchorJump] = useState<{ filePath: string; line: number; nonce: number } | null>(null);
+  const canvasDocsNonce = useRef(0);
   // When each project's local overview data was last re-read, in epoch
   // milliseconds: the header's freshness stamp reads from this.
   const [refreshedAt, setRefreshedAt] = useState<Record<string, number>>({});
@@ -205,6 +248,43 @@ function App() {
   const commentIdentity: ReviewIdentity | null = reviewLocation?.identity ?? (historyLocation?.selectedCommit ? { repoPath: historyLocation.repoPath, base: historyLocation.selectedCommit.parents[0] ?? "empty-tree", target: commitTargetOf(historyLocation.selectedCommit), scope: "committed", reversed: false } : null);
   const commentPatchLines = useMemo(() => (patch && !patch.binary ? parseHunks(patch.text).flatMap((hunk) => hunk.lines) : []), [patch]);
   const commentFile = selectedFile && patch && !patch.binary ? { path: selectedFile.path, lines: commentPatchLines } : null;
+  // The right pane: each tab reads its own remembered width, a drag holds
+  // the live value, and canvas docs are repo-scoped so either surface can
+  // list them.
+  const paneWidth = paneDragWidth ?? (paneTab === "canvas" ? settings.canvas_pane_width : settings.comments_pane_width);
+  const reviewCanvasContext = canvasContextFor(reviewLocation?.identity.repoPath);
+  const historyCanvasContext = canvasContextFor(historyLocation?.repoPath);
+  const reviewCanvasJump = canvasAnchorJump;
+  // A reference jump lands in two steps: open the pinned surface, then
+  // select the cited file; the patch pane consumes the line once its rows
+  // render.
+  useEffect(() => {
+    const jump = canvasJump;
+    if (!jump || !reviewLocation || reviewLoading || !reviewIndex || reviewIndex.error) return;
+    const recorded = reviewLocation.identity.recordedKey;
+    if (reviewLocation.identity.repoPath !== jump.doc.repo_path || recorded?.targetKey !== jump.sha) return;
+    if (selectedFile?.path !== jump.filePath) {
+      // selectFile loads the patch into state; the nav entry carries the
+      // selection across reloads, exactly like a manual file click.
+      nav.replace({ ...reviewLocation, selectedFile: { path: jump.filePath, status: "added", untracked: false } });
+      void selectFile({ path: jump.filePath, status: "added", untracked: false }, reviewLocation.identity);
+      return;
+    }
+    // Landed: hand the line to the patch pane once and release the jump, so
+    // the effect never fights a later manual file selection.
+    setCanvasAnchorJump({ filePath: jump.filePath, line: jump.line, nonce: jump.nonce });
+    setCanvasJump(null);
+  }, [canvasJump, reviewLocation, reviewLoading, reviewIndex, selectedFile?.path]);
+  // Canvas docs load per repo on first open and refresh when a comment
+  // event for that repo arrives (documents are comments).
+  useEffect(() => {
+    const repoPath = reviewLocation?.identity.repoPath ?? historyLocation?.repoPath;
+    if (!repoPath || canvasDocs[repoPath]) return;
+    const nonce = ++canvasDocsNonce.current;
+    void call<CanvasDocRow[]>("list_canvas_docs", { repoPath }, resolveRepoSource(repoPath))
+      .then((docs) => { if (nonce === canvasDocsNonce.current) setCanvasDocs((current) => ({ ...current, [repoPath]: docs })); })
+      .catch(() => { if (nonce === canvasDocsNonce.current) setCanvasDocs((current) => ({ ...current, [repoPath]: [] })); });
+  }, [reviewLocation?.identity.repoPath, historyLocation?.repoPath]);
   const comments = useReviewComments(commentIdentity, reviewIndex, commentFile, reversed, resolveRepoSource);
   // The event listeners read the live comment layer and open repo path
   // through refs, so they subscribe once and never hold stale closures.
@@ -502,6 +582,9 @@ function App() {
       if (disposed) return;
       const key = commentsRef.current.key;
       const change = event.payload;
+      // Canvas documents are repo-scoped comments, so any comment change in
+      // the open repo also refreshes the document library.
+      void refreshCanvasDocs(change.repo_path);
       if (!key || key.repoPath !== change.repo_path || key.baseSha !== change.base_sha || key.targetKey !== change.target_key || key.targetKind !== change.target_kind) return;
       void commentsRef.current.refresh();
     });
@@ -1220,7 +1303,26 @@ function App() {
   async function updateSettings(next: Settings) { setSettingsSaveError(""); applyTheme(next.theme); try { setSettings(await persistSettings(next)); } catch (error) { applyTheme(settings.theme); setSettingsSaveError(errorMessage(error)); } }
   function changeFileView(changed_files_view: ChangedFilesView) { void updateSettings({ ...settings, changed_files_view }); }
   function changePaneVisibility(next: { files: boolean; comments: boolean }) { void updateSettings({ ...settings, files_pane_visible: next.files, comments_pane_visible: next.comments }); }
-  function changeCommentsWide(comments_pane_wide: boolean) { void updateSettings({ ...settings, comments_pane_wide }); }
+  function changePaneWidth(width: number) {
+    const clamped = Math.min(MAX_PANE_WIDTH, Math.max(MIN_PANE_WIDTH, Math.round(width)));
+    void updateSettings({ ...settings, [paneTab === "canvas" ? "canvas_pane_width" : "comments_pane_width"]: clamped });
+    setPaneDragWidth(null);
+  }  function commitPaneWidth(width: number) { changePaneWidth(width); }
+  function resetPaneWidth() {
+    void updateSettings({ ...settings, [paneTab === "canvas" ? "canvas_pane_width" : "comments_pane_width"]: paneTab === "canvas" ? defaultSettings.canvas_pane_width : defaultSettings.comments_pane_width });
+    setPaneDragWidth(null);
+  }
+  async function refreshCanvasDocs(repoPath: string) {
+    try {
+      const docs = await call<CanvasDocRow[]>("list_canvas_docs", { repoPath }, resolveRepoSource(repoPath));
+      setCanvasDocs((current) => ({ ...current, [repoPath]: docs }));
+    } catch { /* keep the last listing; the next open retries */ }
+  }
+  function canvasContextFor(repoPath: string | undefined): CanvasPaneContext | undefined {
+    const docs = repoPath ? canvasDocs[repoPath] : undefined;
+    if (!docs || docs.length === 0 || !repoPath) return undefined;
+    return { docs, onCodeRef: (doc, reference) => openCanvasCodeRef(doc, reference), resolve: resolveRepoSource };
+  }
   function navigate(delta: number) { if (delta < 0) nav.back(); else nav.forward(); }
   function handleReviewBack() { const previous = nav.peekBack(); if (previous?.kind === "commit-history" || previous?.kind === "portal" || previous?.kind === "thread") nav.back(); else goInbox(); }
   function selectHistoryCommit(commit: CommitInfo) { const current = nav.current(); if (current.kind !== "commit-history") return; nav.replace({ ...current, selectedCommit: commit, selectedFile: null }); }
@@ -1324,7 +1426,7 @@ function App() {
     : undefined;
   return <>{pinned.map(surfaceRow)}{currentWorktree && !pinnedWorktrees.has(worktreeKey(currentWorktree.path)) && surfaceRow({ kind: "worktree", identityKey: currentWorktree.path, label: shortToken(currentWorktree.branch), startRef: null, worktreePath: currentWorktree.path, pinnedAt: null, gone: false })}</>;
 };
-  const statusMessage = loadError || (loading ? "Loading repositories..." : hydrating ? "Loading worktrees..." : ""); const paletteRows: PaletteRow[] = [...matchingResults.map((result): PaletteRow => ({ section: "repos", result })), ...(portalSearch?.comments.map((match): PaletteRow => ({ section: "comments", match })) ?? []), ...(portalSearch?.requests.map((match): PaletteRow => ({ section: "requests", match })) ?? []), ...(portalSearch?.commits.map((match): PaletteRow => ({ section: "commits", match })) ?? [])]; const palettePageCount = Math.max(1, Math.ceil(paletteRows.length / SEARCH_PAGE_SIZE)); const visiblePalettePage = Math.min(searchPage, palettePageCount - 1); const visiblePaletteRows = paletteRows.slice(visiblePalettePage * SEARCH_PAGE_SIZE, (visiblePalettePage + 1) * SEARCH_PAGE_SIZE);
+  const statusMessage = loadError || (loading ? "Loading repositories..." : hydrating ? "Loading worktrees..." : ""); const paletteNeedle = query.trim(); const paletteDocs = Object.values(canvasDocs).flat().filter((doc) => paletteNeedle && canvasDocMatches(doc, paletteNeedle)).map((doc): PaletteRow => ({ section: "docs", doc })); const paletteRows: PaletteRow[] = [...matchingResults.map((result): PaletteRow => ({ section: "repos", result })), ...(portalSearch?.comments.map((match): PaletteRow => ({ section: "comments", match })) ?? []), ...(portalSearch?.requests.map((match): PaletteRow => ({ section: "requests", match })) ?? []), ...(portalSearch?.commits.map((match): PaletteRow => ({ section: "commits", match })) ?? []), ...paletteDocs]; const palettePageCount = Math.max(1, Math.ceil(paletteRows.length / SEARCH_PAGE_SIZE)); const visiblePalettePage = Math.min(searchPage, palettePageCount - 1); const visiblePaletteRows = paletteRows.slice(visiblePalettePage * SEARCH_PAGE_SIZE, (visiblePalettePage + 1) * SEARCH_PAGE_SIZE);
   // The cue's sentence names the newest entry's moment; older entries only
   // count into the stacking suffix.
   const latestArrival = arrivals[arrivals.length - 1];
@@ -1559,9 +1661,9 @@ function App() {
       <PortalThreadDetail payload={portalThread} groups={portalThreads?.groups ?? []} repoNames={repoNames} onOpenThread={openPortalThread} onOpenReview={openThreadInReview} onChanged={() => setThreadsNonce((nonce) => nonce + 1)} source={threadLocation ? sourceForConnection(threadLocation.connectionId, connections) : undefined} />
       : reviewLocation ?
       goneReview && !comments.key ?
-      <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} repoName={reviewRepo?.name ?? reviewLocation.identity.repoPath} liveWorktree={reviewRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={reviewRepo?.worktrees} resolveSource={resolveRepoSource} readOnly={reviewRemote} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}focusedCommentId={reviewLocation.focusedCommentId}reviewRefreshTick={reviewRefreshTick}requestRefreshTick={requestRefreshTick}commentsWide={settings.comments_pane_wide}onCommentsWide={changeCommentsWide}onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file }); void selectFile(file, reviewLocation.identity); }} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[reviewLocation.identity.repoPath] ? reviewLocation.identity.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[reviewLocation.identity.repoPath])} onOsOpenFailure={() => setOsOpenUnavailable((current) => ({ ...current, [reviewLocation.identity.repoPath]: true }))} />
+      <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} repoName={reviewRepo?.name ?? reviewLocation.identity.repoPath} liveWorktree={reviewRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={reviewRepo?.worktrees} resolveSource={resolveRepoSource} readOnly={reviewRemote} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}focusedCommentId={reviewLocation.focusedCommentId}reviewRefreshTick={reviewRefreshTick}requestRefreshTick={requestRefreshTick}paneWidth={paneWidth}onPaneWidth={setPaneDragWidth}onPaneWidthCommit={commitPaneWidth}onPaneReset={resetPaneWidth}paneTab={paneTab}onPaneTab={setPaneTab}canvas={reviewCanvasContext}externalJump={reviewCanvasJump}onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file }); void selectFile(file, reviewLocation.identity); }} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[reviewLocation.identity.repoPath] ? reviewLocation.identity.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[reviewLocation.identity.repoPath])} onOsOpenFailure={() => setOsOpenUnavailable((current) => ({ ...current, [reviewLocation.identity.repoPath]: true }))} />
       : historyLocation ?
-      <HistoryView readOnly={historyRemote} resolveSource={resolveRepoSource} history={history ?? { repoPath: historyLocation.repoPath, startPointLabel: historyLocation.startPointLabel, worktreePath: historyLocation.worktreePath ?? undefined, startRef: historyLocation.startRef ?? undefined, commits: [], hasMore: false, loading: true, error: "" }} historyRefs={historyRefs} index={reviewIndex} loading={reviewLoading} selectedCommit={historyLocation.selectedCommit} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { const selected = historyLocation.selectedCommit; if (selectedFile && selected) void ensureFileContent(selectedFile, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false }); }} onBack={goInbox} onBasePick={(value) => { const selected = historyLocation.selectedCommit; if (selected) void openReview(commitTargetOf(selected), historyLocation.repoPath, { base: value }, historyLocation.startRef ?? undefined); }} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}commentsWide={settings.comments_pane_wide}onCommentsWide={changeCommentsWide}onFile={(file) => { const selected = historyLocation.selectedCommit; if (selected) { nav.replace({ ...historyLocation, selectedFile: file }); void selectFile(file, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false, originRef: historyLocation.startRef ?? undefined }); } }} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[historyLocation.repoPath] ? historyLocation.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[historyLocation.repoPath])} onOsOpenFailure={() => setOsOpenUnavailable((current) => ({ ...current, [historyLocation.repoPath]: true }))} />
+      <HistoryView readOnly={historyRemote} resolveSource={resolveRepoSource} history={history ?? { repoPath: historyLocation.repoPath, startPointLabel: historyLocation.startPointLabel, worktreePath: historyLocation.worktreePath ?? undefined, startRef: historyLocation.startRef ?? undefined, commits: [], hasMore: false, loading: true, error: "" }} historyRefs={historyRefs} index={reviewIndex} loading={reviewLoading} selectedCommit={historyLocation.selectedCommit} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { const selected = historyLocation.selectedCommit; if (selectedFile && selected) void ensureFileContent(selectedFile, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false }); }} onBack={goInbox} onBasePick={(value) => { const selected = historyLocation.selectedCommit; if (selected) void openReview(commitTargetOf(selected), historyLocation.repoPath, { base: value }, historyLocation.startRef ?? undefined); }} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}paneWidth={paneWidth}onPaneWidth={setPaneDragWidth}onPaneWidthCommit={commitPaneWidth}onPaneReset={resetPaneWidth}paneTab={paneTab}onPaneTab={setPaneTab}canvas={historyCanvasContext}externalJump={reviewCanvasJump}onFile={(file) => { const selected = historyLocation.selectedCommit; if (selected) { nav.replace({ ...historyLocation, selectedFile: file }); void selectFile(file, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false, originRef: historyLocation.startRef ?? undefined }); } }} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[historyLocation.repoPath] ? historyLocation.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[historyLocation.repoPath])} onOsOpenFailure={() => setOsOpenUnavailable((current) => ({ ...current, [historyLocation.repoPath]: true }))} />
       : <section className="inbox-pane" aria-labelledby="inbox-heading" aria-busy={loading || activeRepoHydrating}>
 <div className="section-heading">
 <div className="project-heading">
@@ -1621,6 +1723,7 @@ function App() {
           if (row.section === "repos") { const result = row.result; return <Fragment key={`repos:${result.repo.path}:${result.worktree?.path ?? "repo"}`}>{sectionLabel}<button type="button" title={result.worktree?.path ?? result.repo.path} onClick={() => { activateRepo(result.repo); if (!result.worktree) { closePalette(); } else { setSelectedWorktreePath(result.worktree.path); void openReview({ kind: "worktree", worktree: result.worktree }, result.repo.path); closePalette(); } }}>{result.worktree ? <GitBranch size={16} /> : <FolderGit2 size={16} />}<span><strong>{result.worktree ? shortToken(result.worktree.branch) : result.repo.name}</strong>{result.worktree && <small>{result.repo.name}</small>}</span><kbd>Enter</kbd></button></Fragment>; }
           if (row.section === "comments") { const match = row.match; return <Fragment key={`comments:${match.comment_id}`}>{sectionLabel}<button type="button" title={match.excerpt} onClick={() => { closePalette(); openPortalThread(match.root_comment_id, match.connection_id ?? null); }}><MessageSquare size={16} /><span><strong>{match.excerpt}</strong><small>{match.change_label} · {repoNames.get(match.repo_path) ?? match.repo_path}</small></span></button></Fragment>; }
           if (row.section === "requests") { const match = row.match; return <Fragment key={`requests:${match.repo_path}:${match.base_sha}:${match.target_key}`}>{sectionLabel}<button type="button" title={match.note || match.change_label} onClick={() => { closePalette(); openReviewIdentity(match); }}><MessagesSquare size={16} /><span><strong>{match.change_label}</strong><small>{requestStatusLabel(match.status)} · {repoNames.get(match.repo_path) ?? match.repo_path}</small></span></button></Fragment>; }
+          if (row.section === "docs") { const doc = row.doc; return <Fragment key={`docs:${doc.id}`}>{sectionLabel}<button type="button" title={doc.kind ?? "canvas document"} onClick={() => { closePalette(); openCanvasDoc(doc, doc.id); }}><FileCheck size={16} /><span><strong>{canvasDocTitle(doc.body)}</strong><small>{doc.kind} · {repoNames.get(doc.repo_path) ?? doc.repo_path}</small></span></button></Fragment>; }
           const match = row.match; return <Fragment key={`commits:${match.repo_path}:${match.sha}`}>{sectionLabel}<button type="button" title={match.subject} onClick={() => { closePalette(); void openReview({ kind: "commit", sha: match.sha, parents: match.parents, defaultBaseAncestor: false }, match.repo_path); }}><GitCommitHorizontal size={16} /><span><strong>{match.subject}</strong><small><code>{shortToken(match.sha)}</code> · {repoNames.get(match.repo_path) ?? match.repo_path}</small></span></button></Fragment>;
         })}{paletteRows.length === 0 && <p>No repositories, worktrees, or conversations match "{query}".</p>}{palettePageCount > 1 && <Pager label="Search result pages" page={visiblePalettePage} pages={palettePageCount} total={paletteRows.length} size={SEARCH_PAGE_SIZE} onPage={setSearchPage} />}</div></div></dialog>}{removeTarget && <dialog className="palette-backdrop" ref={confirmRef} aria-label="Remove project" onClose={() => setRemoveTarget(null)} onMouseDown={(event) => { if (event.target === event.currentTarget) setRemoveTarget(null); }}><div className="confirm-dialog" onMouseDown={(event) => event.stopPropagation()}><h2>Remove {removeTarget.name}?</h2><p>{resolveRepoSource(removeTarget.path).kind === "server" ? "Removes the project from this app only. The server keeps its own store." : "Removes the project from WorktreeView only. Your repository, worktrees, and history on disk are never touched."}</p><div className="confirm-actions"><button className="secondary-button" type="button" onClick={() => setRemoveTarget(null)}>Cancel</button><button className="danger-button" type="button" disabled={removing} onClick={() => void removeProject(removeTarget)}>{removing ? "Removing..." : "Remove project"}</button></div></div></dialog>}{addRemoteOpen && <dialog className="palette-backdrop" ref={addRemoteRef} aria-label="Add remote project" onClose={() => setAddRemoteOpen(false)} onMouseDown={(event) => { if (event.target === event.currentTarget) setAddRemoteOpen(false); }}><form className="confirm-dialog remote-form" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); void openRemoteProject(); }}>
 <h2>Add remote project</h2>

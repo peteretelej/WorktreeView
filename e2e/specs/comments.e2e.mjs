@@ -96,8 +96,8 @@ describe("desktop comments", () => {
     await browser.waitUntil(async () => (await $$(".inline-comment .comment-card")).length >= 1, { timeoutMsg: "inline comment did not render" });
     const inlineCard = await $(".inline-comment .comment-card");
     assert.ok((await inlineCard.getText()).includes(body));
-    await browser.waitUntil(async () => (await $$('aside[aria-label="Comments"] .comment-thread')).length >= 1, { timeoutMsg: "stream entry did not render" });
-    const stream = await $('aside[aria-label="Comments"]');
+    await browser.waitUntil(async () => (await $$('aside[aria-label="Review panel"] .comment-thread')).length >= 1, { timeoutMsg: "stream entry did not render" });
+    const stream = await $('aside[aria-label="Review panel"]');
     assert.ok((await stream.getText()).includes(body));
 
     // The comment survives an app restart: the store persists it under the
@@ -112,7 +112,7 @@ describe("desktop comments", () => {
     await browser.waitUntil(async () => (await $$(".inline-comment .comment-card")).length >= 1, { timeoutMsg: "comment did not persist across restart" });
     const persisted = await $(".inline-comment .comment-card");
     assert.ok((await persisted.getText()).includes(body));
-    const streamAfterRestart = await $('aside[aria-label="Comments"]');
+    const streamAfterRestart = await $('aside[aria-label="Review panel"]');
     assert.ok((await streamAfterRestart.getText()).includes(body));
   });
 });

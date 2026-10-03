@@ -237,7 +237,7 @@ describe("desktop review request lifecycle", () => {
     await expect(featureRow).toBeDisplayed();
     await featureRow.$(".branch-title").click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
-    await $('aside[aria-label="Comments"]').waitForDisplayed();
+    await $('aside[aria-label="Review panel"]').waitForDisplayed();
 
     const created = await callTool(endpoint, shared.token, "request_review", {
       ...shared.identity,

@@ -32,7 +32,7 @@ export type PortalTab = "inbox" | "reviews" | "threads" | "activity";
 // replace the current entry in place.
 export type ReviewsStateFilter = "open" | "settled" | "stale" | "no_request" | "all";
 export type ThreadsStateFilter = "open" | "resolved" | "all";
-export type ThreadsVoiceFilter = "all" | "human" | "agents";
+export type ThreadsVoiceFilter = "all" | "human" | "agents" | "docs";
 export type PortalFilters = {
   category: AttentionCategory;
   reviewsState: ReviewsStateFilter;

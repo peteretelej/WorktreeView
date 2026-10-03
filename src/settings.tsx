@@ -10,14 +10,18 @@ import { type SkillTarget } from "./skillTargets.ts";
 export type Theme = "system" | "light" | "dark";
 export type DiffLayout = "unified" | "split";
 export type ChangedFilesView = "tree" | "list" | "details";
-export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; syntax_visible: boolean; inline_comments_visible: boolean; files_pane_visible: boolean; comments_pane_visible: boolean; comments_pane_wide: boolean; changed_files_view: ChangedFilesView; zoom: number; mcp_enabled: boolean; notifications_enabled: boolean; mcp_listen_address: string; mcp_port: number; activity_seen_id: number; skill_prompt_key: string };
+// Pane width bounds for the review pane's drag handle; the Rust store
+// clamps stored values to the same range.
+export const MIN_PANE_WIDTH = 240;
+export const MAX_PANE_WIDTH = 2000;
+export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; syntax_visible: boolean; inline_comments_visible: boolean; files_pane_visible: boolean; comments_pane_visible: boolean; comments_pane_width: number; canvas_pane_width: number; changed_files_view: ChangedFilesView; zoom: number; mcp_enabled: boolean; notifications_enabled: boolean; mcp_listen_address: string; mcp_port: number; activity_seen_id: number; skill_prompt_key: string };
 
 // Mirrors the server's identity rows; the secret exists only in the
 // create response and is shown once.
 export type ServerUser = { id: number; name: string; is_admin: boolean; created_at: number };
 export type CreatedServerUser = { user: ServerUser; secret: string };
 
-export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false, syntax_visible: true, inline_comments_visible: true, files_pane_visible: true, comments_pane_visible: true, comments_pane_wide: false, changed_files_view: "tree", zoom: 1, mcp_enabled: true, notifications_enabled: true, mcp_listen_address: "127.0.0.1", mcp_port: 9888, activity_seen_id: 0, skill_prompt_key: "" };
+export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false, syntax_visible: true, inline_comments_visible: true, files_pane_visible: true, comments_pane_visible: true, comments_pane_width: 300, canvas_pane_width: 560, changed_files_view: "tree", zoom: 1, mcp_enabled: true, notifications_enabled: true, mcp_listen_address: "127.0.0.1", mcp_port: 9888, activity_seen_id: 0, skill_prompt_key: "" };
 
 export function getSettings() { return invoke<Settings>("get_settings"); }
 export function persistSettings(settings: Settings) { return invoke<Settings>("set_settings", { settings }); }

@@ -191,7 +191,7 @@ describe("desktop agent submissions", () => {
     // Activating the cue opens the targeted review; the reviews strip shows
     // the agent card with its section cards.
     await $(".arrival-open").click();
-    await $('aside[aria-label="Comments"] section[aria-label="Agent reviews"]').waitForDisplayed();
+    await $('aside[aria-label="Review panel"] section[aria-label="Agent reviews"]').waitForDisplayed();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await waitText(".submission-agent", "e2e-agent", "agent name");
     await $(".submission-toggle").click();
@@ -219,7 +219,7 @@ describe("desktop agent submissions", () => {
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await expect($('section[aria-label="Agent reviews"]')).toBeDisplayed();
     await waitText(".submission-agent", "e2e-agent", "agent name after view");
-    const stream = await textOf('aside[aria-label="Comments"]');
+    const stream = await textOf('aside[aria-label="Review panel"]');
     assert.ok(stream?.includes("Review-level finding."), `review-level finding missing: ${stream?.slice(0, 300)}`);
     assert.ok(stream?.includes("Line finding on the changed line."), `line finding missing: ${stream?.slice(0, 300)}`);
 
@@ -230,7 +230,7 @@ describe("desktop agent submissions", () => {
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
     await $('section[aria-label="Agent reviews"]').waitForDisplayed();
     await waitText(".submission-agent", "e2e-agent", "agent name after restart");
-    const persistedStream = await textOf('aside[aria-label="Comments"]');
+    const persistedStream = await textOf('aside[aria-label="Review panel"]');
     assert.ok(persistedStream?.includes("Review-level finding."), `review-level finding lost: ${persistedStream?.slice(0, 300)}`);
     assert.ok(persistedStream?.includes("Line finding on the changed line."), `line finding lost: ${persistedStream?.slice(0, 300)}`);
     await expect($(".comment-severity.severity-P0")).toBeDisplayed();

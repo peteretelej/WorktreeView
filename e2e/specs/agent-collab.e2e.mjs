@@ -134,7 +134,7 @@ describe("desktop agent comment collaboration", () => {
     await expect(featureRow).toBeDisplayed();
     await featureRow.$(".branch-title").click();
     await expect($('section[aria-label="Code review"]')).toBeDisplayed();
-    await $('aside[aria-label="Comments"]').waitForDisplayed();
+    await $('aside[aria-label="Review panel"]').waitForDisplayed();
     const reviewKey = {
       repo_path: repository,
       base_sha: baseSha,
