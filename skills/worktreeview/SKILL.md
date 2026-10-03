@@ -1,6 +1,6 @@
 ---
 name: worktreeview
-description: Set up and drive WorktreeView, a local desktop app where developers review Git worktrees and AI agents collaborate as first-class reviewers. Use when the user asks to install, start, or configure WorktreeView; to add a repository or project to it; to fetch or refresh projects; to read reviews, comments, or submissions; to post, reply to, resolve, or edit review comments through its MCP endpoint; or to request a review of changes or pick up and work review requests in its Pulse inbox.
+description: Set up and drive WorktreeView, a local desktop app where developers review Git worktrees and AI agents collaborate as first-class reviewers. Use when the user asks to install, start, or configure WorktreeView; to add a repository or project to it; to fetch or refresh projects; to read reviews, comments, or submissions; to post, reply to, resolve, or edit review comments through its MCP endpoint; to request a review of changes or pick up and work review requests in its Pulse inbox; or to explain, walk through, or document code, changes, or subsystems as canvas documents (walkthroughs, notes, diagrams) published into the app - including when the user asks "explain how this works" or wants an explanation of code flows worth keeping.
 ---
 
 # WorktreeView
@@ -107,7 +107,8 @@ All tools are stateless `tools/call`s carrying
 | `list_repos` | Repositories the app knows. |
 | `list_review_targets` | A repo's worktrees, branches, and remote branches. |
 | `list_comments` / `list_submissions` | Stored comments / submissions for one review identity. |
-| `create_comment` | Post a comment: review-level, file-level, or line-anchored (`file_path`, `side` `LEFT`/`RIGHT`, `start_line`, optional `end_line`), optional `severity` `P0`-`P3`, optional self-reported `author_model`. |
+| `list_canvas_docs` | A repository's canvas documents (kind-marked walkthroughs, notes) newest first, each with its pinned identity. |
+| `create_comment` | Post a comment: review-level, file-level, or line-anchored (`file_path`, `side` `LEFT`/`RIGHT`, `start_line`, optional `end_line`), optional `severity` `P0`-`P3`, optional self-reported `author_model`. A `kind` slug (`walkthrough`, `notes`, ...) marks it as a canvas document. |
 | `reply_comment` | Reply to a thread's root; optional `author_model`. |
 | `resolve_thread` | Resolve or reopen a thread (any agent may). |
 | `edit_own_comment` / `delete_own_comment` | Only comments authored by your token. |
@@ -135,6 +136,10 @@ Workflows:
   [requesting-review.md](requesting-review.md).
 - **Pick up and perform a review** (the reviewer side: pickup, claim,
   submitting, etiquette): follow [performing-review.md](performing-review.md).
+- **Publish a canvas document** (explain code, record notes, walk a flow):
+  follow [publishing-canvas.md](publishing-canvas.md). Publish when asked,
+  when a chat explanation is worth keeping, or after landing a
+  non-trivial change; when unsure, offer rather than post.
 - **Respond in threads**: read the thread with `list_comments`,
   `reply_comment` on the root, `resolve_thread` when the point is
   addressed. Only edit or delete comments your own token authored.

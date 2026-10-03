@@ -22,6 +22,10 @@ pub(crate) const SKILL_BUNDLE: &[(&str, &str)] = &[
         include_str!("../../skills/worktreeview/performing-review.md"),
     ),
     (
+        "publishing-canvas.md",
+        include_str!("../../skills/worktreeview/publishing-canvas.md"),
+    ),
+    (
         "requesting-review.md",
         include_str!("../../skills/worktreeview/requesting-review.md"),
     ),

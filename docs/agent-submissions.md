@@ -410,9 +410,10 @@ the transport layer (HTTP 401, `-32001`).
 | --- | --- | --- | --- |
 | `list_repos` | none | array of repo rows: `path`, `name`, `created_at`, `last_opened_at`, `pinned_at` | - |
 | `list_review_targets` | `repo_path` | `worktrees` (`path`, `branch`, `head`), `branches` and `remote_branches` (`ref_name`, `head`, `author`, `subject`, `commit_date`, `upstream`, `ahead`, `behind`) | unknown repo |
-| `list_comments` | `repo_path`, `base_sha`, `target_key`, `target_kind` | array of stored comments with anchor fields as stored | - |
+| `list_comments` | `repo_path`, `base_sha`, `target_key`, `target_kind` | array of stored comments with anchor fields as stored (canvas documents carry their `kind` slug) | - |
 | `list_submissions` | `repo_path`, `base_sha`, `target_key`, `target_kind` | array of stored submissions with typed `sections` | - |
-| `create_comment` | `repo_path`, `base_sha`, `target_key`, `target_kind`, `body`; optional `severity` (`P0`-`P3`), `author_model`, `file_path`, `side` (`LEFT`/`RIGHT`), `start_line`, `end_line` | the stored comment | unknown repo; shape violations (empty body, bad severity, malformed anchor) |
+| `list_canvas_docs` | `repo_path` | array of canvas documents: kind-marked root comments (`walkthrough`, `notes`, ...) newest first, each flattened with the pinned review identity (`base_sha`, `target_key`, `target_kind`) its references resolve against | unknown repo |
+| `create_comment` | `repo_path`, `base_sha`, `target_key`, `target_kind`, `body`; optional `severity` (`P0`-`P3`), `author_model`, `file_path`, `side` (`LEFT`/`RIGHT`), `start_line`, `end_line`, `kind` | the stored comment | unknown repo; shape violations (empty body, bad severity, malformed anchor, invalid kind) |
 | `reply_comment` | `parent_comment_id`, `body`; optional `author_model` | the stored reply | unknown comment; replying to a reply |
 | `resolve_thread` | `root_comment_id`, `resolved` | the updated root comment | unknown comment; resolving a reply |
 | `edit_own_comment` | `comment_id`, `body` | the updated comment | unknown comment; not your comment |
@@ -422,7 +423,7 @@ the transport layer (HTTP 401, `-32001`).
 | `announce_review` | `repo_path`, `base_sha`, `target_key`, `target_kind`, `head_sha`; optional `note` (no lenses, reviewers, or round budget: the announce is not an ask) | the stored request row with a `requester` display, entered `in_review` with your token as requester | unknown repo; over-2000-character note; empty `head_sha`; same-head announce against a `changes_requested` request |
 | `list_review_requests` | optional `repo_path`, `status` | array of request rows plus derived `age_ms`, `comment_count`, `unresolved_finding_counts` (per severity), and `requester` | unknown `status` value |
 | `update_review_request` | `id`, `action` (`claim`/`approve`/`request_changes`/`withdraw`/`re_request`); optional `note` and `head_sha`, both only with `re_request` (`head_sha` is required there) | the updated request row | unknown request id; actor-rule violations (claim gating, requester-only withdraw and re-request); round budget exhausted; `re_request` with the same `head_sha`; invalid refreshed `note` |
-| `list_threads` | optional `repo_path`, `state` (`open`/`resolved`), `since` (epoch ms on last activity), `participant` (exact name) | array of thread groups, one per change (`repo_path`, `target_key`, `target_kind`, `change_label`, `open_count`), each with its thread rows: `root_comment_id`, `excerpt`, `severity`, `anchor`, `participants`, `reply_count`, `resolved_at`, `last_activity_at`, `head_moved` | unknown `state` value; unknown repo |
+| `list_threads` | optional `repo_path`, `state` (`open`/`resolved`), `since` (epoch ms on last activity), `participant` (exact name) | array of thread groups, one per change (`repo_path`, `target_key`, `target_kind`, `change_label`, `open_count`), each with its thread rows: `root_comment_id`, `excerpt`, `severity`, `kind` (canvas-document slug when the root is one), `anchor`, `participants`, `reply_count`, `resolved_at`, `last_activity_at`, `head_moved` | unknown `state` value; unknown repo |
 | `list_activity` | optional `since_id` (event-id cursor, default 0), `repo_path`, `limit` (default 100, capped) | `{ "events": [...], "next_cursor": <last answered id> }`, events ascending by id: each carries `id`, `repo_path`, `kind`, optional `base_sha`, `target_key`, `target_kind`, `request_id`, `comment_id`, `actor_kind` (`human`/`agent`), `actor_name`, a short human-readable `summary`, and `created_at` | unknown repo |
 | `refresh_repo` | `repo_path` | `{ "ok": true }` | unknown repo; fetch failure |
 
@@ -440,6 +441,20 @@ follows the same rule: anchors and snippets are reported as stored, and
 request head against the surface's last recorded head, never a Git
 recomputation. Omitting `state` answers open threads; group membership
 keys on the change, so threads survive base changes.
+
+### Canvas documents
+
+A comment created with a `kind` slug (1-32 lowercase letters, digits, or
+inner dashes; e.g. `walkthrough`, `notes`) is a canvas document: the app
+collects them per repository in the Canvas tab, rendered wide with
+sanitized markdown, ```mermaid fences drawn as diagrams, and jump chips
+for `path:line`, `path:start-end`, and `path:line@sha` references.
+Documents are pinned: their references resolve against the review
+identity they were posted with, so post a codebase tour against the
+current head (`target_kind: "head"` with `base_sha` set to the empty
+tree) and serve a moved-on codebase with a fresh document instead of
+editing the old one. `list_canvas_docs` enumerates a repository's
+documents newest first; replies on a document are ordinary comments.
 
 ### Review requests
 

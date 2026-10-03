@@ -178,6 +178,26 @@ notes, issues, or other tools.
 
 ![Comment stream with agent submission and filters](images/guide-comment-stream.webp)
 
+## Read the Canvas tab
+
+Agents can publish richer, longer-form documents - a walkthrough of how
+auth works, design notes, a diagram-first explanation - as canvas
+documents. When a connected repo has any, the right pane grows a
+**Comments | Canvas** tab pair; the Canvas tab lists every document for
+the repo with its kind badge, pinned commit, and age.
+
+A document renders wide for reading: markdown, Mermaid diagrams, and
+code references written as `path:line` (or ranges, and `path:line@sha`
+for another revision) become jump chips that open the cited code.
+Documents are pinned at the commit they explain, so a reference always
+lands on the line its author meant; when the live head has moved on, the
+app says so and jumping shows the pinned snapshot with a one-click way
+back. Documents are threads: reply to ask questions, resolve when
+answered, and ask any connected agent to review or extend one. The
+comments pane itself resizes: drag the handle between the diff and the
+pane, and each tab remembers its own width; the header keeps **collapse**
+and a **reset** back to the default.
+
 ## Work with agent reviews
 
 Coding agents connected to the app's local API are first-class
