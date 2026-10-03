@@ -2514,6 +2514,8 @@ button:disabled {
 .settings-token-copy span { color: var(--muted); font-size: 10px; }
 .settings-badge { display: inline-block; margin-left: 7px; padding: 1px 6px; border-radius: 999px; font-size: 9.5px; font-weight: 500; vertical-align: 1px; }
 .settings-badge.default { border: 1px solid var(--primary); color: var(--primary); }
+.settings-badge.warn { border: 1px solid var(--warn); color: var(--warn); }
+.settings-badge.muted { border: 1px solid var(--border); color: var(--muted); }
 .settings-inline-error { max-width: 680px; margin: 0 auto; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 5px; background: var(--danger-soft); color: var(--foreground); font-size: 11px; }
 
 @media (max-width: 760px) {
@@ -2672,3 +2674,12 @@ button.comment-anchor:hover code { text-decoration: underline; text-underline-of
 .arrival-open strong { font-weight: 600; }
 .arrival-dismiss { flex: none; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
 .arrival-dismiss:hover { background: var(--surface-2); color: var(--foreground); }
+
+/* Skill install cue: the app's one-click offer to copy the bundled agent
+   skill into the detected agent skills folders; dismissing persists until
+   the target state changes. Mirrors the arrival cue on the opposite side. */
+.skill-cue { position: fixed; left: 16px; bottom: 16px; z-index: 60; display: flex; align-items: center; gap: 12px; max-width: 520px; padding: 10px 10px 10px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--elevated); box-shadow: 0 4px 16px oklch(0 0 0 / 0.18); font-size: 12px; }
+.skill-cue-icon { flex: none; color: var(--primary); }
+.skill-cue-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; text-align: left; }
+.skill-cue-copy strong { font-weight: 600; }
+.skill-cue-copy span { color: var(--muted); }

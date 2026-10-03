@@ -7,7 +7,7 @@ normalized domain data through narrow, typed Tauri commands.
 
 ## Backend (`src-tauri/src`)
 
-- `commands.rs`: thin typed IPC adapters. The full command surface is 52
+- `commands.rs`: thin typed IPC adapters. The full command surface is 55
   commands: `open_repo`, `open_remote_repo`, `list_repos`, `list_worktrees`,
   `list_worktree_status`, `remove_repo`, `get_branch_inventory`,
   `fetch_project`, `fetch_review_objects`, `set_repo_pinned`,
@@ -22,9 +22,11 @@ normalized domain data through narrow, typed Tauri commands.
   `delete_server_connection`, `add_server_project`,
   `remove_server_project`, `set_server_project_pinned`,
   `list_agent_tokens`, `create_agent_token`, `delete_agent_token`,
-  `get_mcp_status`, `restart_mcp`, `create_comment`, `list_comments`,
-  `list_submissions`, `reply_comment`, `set_comment_resolved`,
-  `edit_comment`, `delete_comment`, `match_comment_anchors`. The shared
+  `get_mcp_status`, `restart_mcp`, `list_skill_targets`,
+  `install_skill_target`, `set_skill_prompt`, `create_comment`,
+  `list_comments`, `list_submissions`, `reply_comment`,
+  `set_comment_resolved`, `edit_comment`, `delete_comment`,
+  `match_comment_anchors`. The shared
   implementations behind these adapters run without the app and are what
   the command API dispatches to. The six server-connection commands are
   purely local store operations (connection rows and project references
@@ -245,6 +247,15 @@ normalized domain data through narrow, typed Tauri commands.
   keyed on the path on the server host, with a local presentation pin),
   plus path canonicalization and normalization of stored Windows verbatim
   paths. Migrations live in `src-tauri/migrations`.
+- `skill_targets.rs`: installs the bundled agent skill into agents' skill
+  directories under the user profile (the shared `~/.agents/skills/` and
+  Claude Code's `~/.claude/skills/`; a folder only counts once the agent
+  app created it). Detection and staleness are pure content comparisons
+  against the embedded bundle, and installs write only the target's own
+  `worktreeview` folder on the user's explicit click; this is the app's
+  one write surface outside its home. The companion `set_skill_prompt`
+  command records the dismissed prompt state under the same sole-writer
+  rule as the activity watermark.
 
 ## Git as the semantic authority
 
@@ -258,12 +269,13 @@ locale to C.
 ## Frontend (`src/`)
 
 A flat React + Vite app: `App.tsx` (shell, project overview, state and
-effects, and the agent submission arrival cue and endpoint event listeners:
+effects, the agent submission arrival cue and endpoint event listeners:
 `submission-received` queues the arrival cue, `comment-changed` refetches
 the loaded review's comments when the change names it, and
 `project-refreshed` re-lists the open repository's surfaces; the same
 four handler paths are fed per connection by the webview's server event
-streams),
+streams, and the shell also renders the skill-install prompt from the
+`skillTargets.ts` target-state helper),
 `remote.ts` (the one dispatch seam: an invoke-shaped `call` that routes a
 command to the local backend or, for a server-backed repo path resolved
 from the local `server_projects` rows, to that server's command API with

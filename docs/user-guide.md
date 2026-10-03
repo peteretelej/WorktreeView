@@ -434,7 +434,12 @@ line wrap), and notifications (the arrival cue and desktop toasts).
 members and agent tokens (see [Work against a server](#work-against-a-server)).
 **Agent API** controls the local endpoint your coding agents
 connect through; saved address and port changes apply through that
-section's Restart action, no app restart needed. **About** names the app
+section's Restart action, no app restart needed. The same section
+installs the bundled agent skill into the agent skills folders it
+detects on your machine (one click per folder, with an update offer
+whenever a release changes the skill), so your agents follow the
+documented workflows; see [connect-an-agent.md](connect-an-agent.md).
+**About** names the app
 and its version (the same value agents see from the endpoint), and its
 Logs row opens the diagnostic log folder.
 

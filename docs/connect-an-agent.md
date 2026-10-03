@@ -102,9 +102,15 @@ npx skills add peteretelej/WorktreeView
 
 The app also publishes its own version-matched copy of the skill folder
 into the app home at `~/.worktreeview/skills/worktreeview/`, refreshed on
-every launch, and the Settings Agent API section shows the path with a
-copy button. Copying that folder into your agents' skills directory (for
-example `~/.agents/skills/worktreeview/`) is the same as installing from
-the repository, and it always matches the app version you run. The MCP
-endpoint remains fully usable without the skill; it only removes the
-guesswork.
+every launch. Installing it into your agents is a click: Settings'
+Agent API section lists the agent skills folders it detected on this
+machine with Install and Update buttons, and a prompt in the main window
+offers the same whenever nothing is installed yet or an app release
+changed the skill. Installs are copies compared against the bundled
+files, so copies made other ways (`npx skills add`, manual copies) are
+classified the same way, and the app writes nothing outside the target's
+own skill folder without that click. Copying the home folder into an
+agent's skills directory by hand (for example
+`~/.agents/skills/worktreeview/`) remains equivalent, and it always
+matches the app version you run. The MCP endpoint remains fully usable
+without the skill; it only removes the guesswork.

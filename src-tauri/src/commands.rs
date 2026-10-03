@@ -24,6 +24,7 @@ use crate::review::{
     ReviewIndex,
 };
 use crate::retrospection::{list_surfaces_in_pool, set_surface_pinned_in_pool, SurfaceListing};
+use crate::skill_targets::{self, SkillTarget};
 use crate::requests::{
     create_request_in_pool, list_requests_in_pool, refresh_request_note, request_row_by_id,
     re_request_in_pool, set_request_verdict_in_pool, validate_request_note,
@@ -40,7 +41,8 @@ use crate::store::{
     list_server_connections_in_pool, load_repos, mark_activity_seen_in_pool, now_millis,
     open_remote_repo_path, open_repo_path, remove_repo_in_pool, remove_server_project_in_pool,
     save_server_connection_in_pool, set_repo_pinned_in_pool, set_server_project_pinned_in_pool,
-    set_settings_in_pool, Repo, ServerConnection, ServerProject, Settings,
+    set_settings_in_pool, set_skill_prompt_key_in_pool, Repo, ServerConnection, ServerProject,
+    Settings,
 };
 use crate::transport::{
     restart, ListenerConfig, ListenerOwner, ListenerStatus, McpStatusHandle, TransportDeps,
@@ -703,6 +705,59 @@ pub(crate) async fn restart_mcp(
     restart(state.pool.clone(), &deps, config, (*status).clone(), &listener)
         .await
         .map_err(|message| CommandError::new("transport", message))
+}
+
+// The skill-install commands are the app's one write surface outside its
+// home: detection only ever names the known skills folders that exist
+// under the user profile, and installing refuses any path detection did
+// not just name, so a click can reach only a bundled-skill folder.
+fn skill_home_root(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
+    app.path().home_dir().map_err(|error| {
+        CommandError::new(
+            "skill_target",
+            format!("Could not resolve the user home directory: {error}"),
+        )
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn list_skill_targets(
+    app: tauri::AppHandle,
+) -> Result<Vec<SkillTarget>, CommandError> {
+    let root = skill_home_root(&app)?;
+    Ok(skill_targets::detect(&root))
+}
+
+#[tauri::command]
+pub(crate) async fn install_skill_target(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<SkillTarget, CommandError> {
+    let root = skill_home_root(&app)?;
+    let known = skill_targets::detect(&root)
+        .into_iter()
+        .find(|target| target.path == path)
+        .ok_or_else(|| CommandError::new("skill_target", "Unknown skill install target"))?;
+    skill_targets::install(Path::new(&path)).map_err(|error| {
+        CommandError::new(
+            "skill_target",
+            format!("Could not install the skill: {error}"),
+        )
+    })?;
+    Ok(SkillTarget {
+        status: skill_targets::status_of(Path::new(&path)),
+        ..known
+    })
+}
+
+// Records the dismissed skill-install prompt state; the write twin of the
+// activity_seen_id pattern, so the bulk settings save never carries it.
+#[tauri::command]
+pub(crate) async fn set_skill_prompt(
+    key: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    set_skill_prompt_key_in_pool(&state.pool, &key).await
 }
 
 #[tauri::command]

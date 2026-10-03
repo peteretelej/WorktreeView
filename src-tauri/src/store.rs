@@ -123,6 +123,11 @@ pub struct Settings {
     // advances it, so an unrelated settings save cannot round-trip a stale
     // value and re-fire Recent comments after a mark.
     pub activity_seen_id: i64,
+    // The dismissed state of the skill-install prompt: the detected
+    // targets' path:status key at dismiss time. Deliberately absent from
+    // the bulk save's write set too: only set_skill_prompt writes it, so
+    // a prompt stays dismissed until the target state actually changes.
+    pub skill_prompt_key: String,
 }
 
 // Bounds cover the frontend's zoom level set (src/zoom.ts); stored values
@@ -153,6 +158,7 @@ impl Default for Settings {
             mcp_listen_address: "127.0.0.1".into(),
             mcp_port: 9888,
             activity_seen_id: 0,
+            skill_prompt_key: String::new(),
         }
     }
 }
@@ -504,6 +510,9 @@ pub(crate) async fn get_settings_in_pool(pool: &SqlitePool) -> Result<Settings, 
                     settings.activity_seen_id = seen.max(0);
                 }
             }
+            "skill_prompt_key" => {
+                settings.skill_prompt_key = value;
+            }
             _ => {}
         }
     }
@@ -560,6 +569,8 @@ pub(crate) async fn set_settings_in_pool(
         ("mcp_port", settings.mcp_port.to_string()),
         // activity_seen_id is intentionally absent: the bulk save's payload
         // may carry a stale watermark, and only mark_activity_seen writes it.
+        // skill_prompt_key is absent for the same reason; set_skill_prompt
+        // is its sole writer.
     ];
     let mut transaction = pool.begin().await?;
     for (key, value) in values {
@@ -594,6 +605,24 @@ pub(crate) async fn mark_activity_seen_in_pool(pool: &SqlitePool) -> Result<i64,
     .execute(pool)
     .await?;
     Ok(max_id)
+}
+
+// Records the dismissed state of the skill-install prompt (the detected
+// targets' path:status key at dismiss time) in one settings write. The
+// sole write path for skill_prompt_key, so an unrelated settings save can
+// never resurrect a dismissed prompt or clobber a fresh one.
+pub(crate) async fn set_skill_prompt_key_in_pool(
+    pool: &SqlitePool,
+    key: &str,
+) -> Result<(), CommandError> {
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('skill_prompt_key', ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(key)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 // Desktop-client rows for the server tier: one row per configured server

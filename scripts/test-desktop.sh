@@ -127,8 +127,8 @@ finalize_evidence() {
         if size=$(stat -c %s -- "$file"); then
           case "$name" in
             # The runner log carries the webdriver protocol transcript; it
-            # grows with the suite, so it is bounded at 2 MiB.
-            runner.log) (( size <= 2097152 )) || status=1 ;;
+            # grows with the suite, so it is bounded at 3 MiB.
+            runner.log) (( size <= 3145728 )) || status=1 ;;
             backend.log) (( size <= 1048576 )) || status=1 ;;
             timings.json|container-inspect.json) (( size <= 262144 )) || status=1 ;;
             worktreeview.png) (( size > 0 && size <= 5242880 )) || status=1 ;;
@@ -393,25 +393,25 @@ bounded_stream() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     printf '%s\n' "$line" || return
     count=$((${#line} + 1))
-    if (( count > 2097152 )); then
-      printf '%s\n' "$line" | tail -c 2097152 >"$tail_file" || return
+    if (( count > 3145728 )); then
+      printf '%s\n' "$line" | tail -c 3145728 >"$tail_file" || return
       mv -- "$tail_file" "$runner_log" || return
-      bytes=2097152
+      bytes=3145728
       overflow=1
-    elif (( bytes + count <= 2097152 )); then
+    elif (( bytes + count <= 3145728 )); then
       printf '%s\n' "$line" >>"$runner_log" || return
       bytes=$((bytes + count))
     else
       printf '%s\n' "$line" >>"$runner_log" || return
-      tail -c 2097152 -- "$runner_log" >"$tail_file" || return
+      tail -c 3145728 -- "$runner_log" >"$tail_file" || return
       mv -- "$tail_file" "$runner_log" || return
-      bytes=2097152
+      bytes=3145728
       overflow=1
     fi
   done
   bytes=$(stat -c %s -- "$runner_log") || return
-  if (( bytes > 2097152 )); then
-    tail -c 2097152 -- "$runner_log" >"$tail_file" || return
+  if (( bytes > 3145728 )); then
+    tail -c 3145728 -- "$runner_log" >"$tail_file" || return
     mv -- "$tail_file" "$runner_log" || return
     overflow=1
   fi

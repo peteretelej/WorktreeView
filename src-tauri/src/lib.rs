@@ -14,6 +14,7 @@ mod retrospection;
 mod review;
 mod reviews;
 pub mod server;
+mod skill_targets;
 mod store;
 #[cfg(test)]
 mod testutil;
@@ -23,14 +24,15 @@ use commands::{
     add_server_project, create_agent_token, create_comment, create_review_request,
     delete_agent_token, delete_comment, delete_server_connection, describe_commit, edit_comment,
     fetch_project, fetch_review_objects, get_branch_inventory, get_mcp_status, get_portal_thread,
-    get_settings, list_agent_tokens, list_attention, list_comments, list_commits,
-    list_portal_activity, list_portal_reviews, list_portal_threads, list_refs, list_repos,
-    list_requests, list_review_changes, list_server_connections, list_submissions, list_surfaces,
-    list_worktree_status, list_worktrees, mark_activity_seen, match_comment_anchors, open_log_dir,
-    open_remote_repo, open_repo, open_review_file, read_review_file, read_review_file_bytes,
-    read_review_patch, remove_repo, remove_server_project, reply_comment, restart_mcp,
-    save_server_connection, search_portal, set_server_project_pinned, set_comment_resolved,
-    set_repo_pinned, set_settings, set_surface_pinned, update_review_request,
+    get_settings, install_skill_target, list_agent_tokens, list_attention, list_comments,
+    list_commits, list_portal_activity, list_portal_reviews, list_portal_threads, list_refs,
+    list_repos, list_requests, list_review_changes, list_server_connections, list_skill_targets,
+    list_submissions, list_surfaces, list_worktree_status, list_worktrees, mark_activity_seen,
+    match_comment_anchors, open_log_dir, open_remote_repo, open_repo, open_review_file,
+    read_review_file, read_review_file_bytes, read_review_patch, remove_repo,
+    remove_server_project, reply_comment, restart_mcp, save_server_connection, search_portal,
+    set_comment_resolved, set_repo_pinned, set_server_project_pinned, set_settings,
+    set_skill_prompt, set_surface_pinned, update_review_request,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -321,6 +323,9 @@ pub fn run() {
             delete_agent_token,
             get_mcp_status,
             restart_mcp,
+            list_skill_targets,
+            install_skill_target,
+            set_skill_prompt,
             create_comment,
             list_comments,
             list_submissions,

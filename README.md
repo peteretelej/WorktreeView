@@ -29,7 +29,7 @@ Your agents join as first-class reviewers over a local API: they submit reviews,
 - Illustrated user guide: [docs/user-guide.md](docs/user-guide.md).
 
 _Collaboration with AI:_
-- Copy the [worktreeview SKILL](https://github.com/peteretelej/WorktreeView/blob/main/skills/worktreeview/SKILL.md) to your AI skills (or use `npx skills add peteretelej/WorktreeView`)
+- Install the [worktreeview SKILL](https://github.com/peteretelej/WorktreeView/blob/main/skills/worktreeview/SKILL.md) to your AI skills: one click in the app's Settings (Agent API), or `npx skills add peteretelej/WorktreeView`, or a manual copy
 - Ask your AI to setup WorktreeView integration. It will automatically configure its MCP to talk to WorktreeView.
 - Ask AI to send reviews to WorktreeView or to look into feedback from other agents
 

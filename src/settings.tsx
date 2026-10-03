@@ -4,18 +4,19 @@ import { getVersion } from "@tauri-apps/api/app";
 import { ArrowLeft } from "lucide-react";
 import { ZOOM_LEVELS, snapZoom } from "./zoom.ts";
 import { connectionLabel, call, probeConnection, type RemoteSource, type ServerConnectionRow } from "./remote.ts";
+import { type SkillTarget } from "./skillTargets.ts";
 
 export type Theme = "system" | "light" | "dark";
 export type DiffLayout = "unified" | "split";
 export type ChangedFilesView = "tree" | "list" | "details";
-export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; syntax_visible: boolean; inline_comments_visible: boolean; files_pane_visible: boolean; comments_pane_visible: boolean; comments_pane_wide: boolean; changed_files_view: ChangedFilesView; zoom: number; mcp_enabled: boolean; notifications_enabled: boolean; mcp_listen_address: string; mcp_port: number; activity_seen_id: number };
+export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; syntax_visible: boolean; inline_comments_visible: boolean; files_pane_visible: boolean; comments_pane_visible: boolean; comments_pane_wide: boolean; changed_files_view: ChangedFilesView; zoom: number; mcp_enabled: boolean; notifications_enabled: boolean; mcp_listen_address: string; mcp_port: number; activity_seen_id: number; skill_prompt_key: string };
 
 // Mirrors the server's identity rows; the secret exists only in the
 // create response and is shown once.
 export type ServerUser = { id: number; name: string; is_admin: boolean; created_at: number };
 export type CreatedServerUser = { user: ServerUser; secret: string };
 
-export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false, syntax_visible: true, inline_comments_visible: true, files_pane_visible: true, comments_pane_visible: true, comments_pane_wide: false, changed_files_view: "tree", zoom: 1, mcp_enabled: true, notifications_enabled: true, mcp_listen_address: "127.0.0.1", mcp_port: 9888, activity_seen_id: 0 };
+export const defaultSettings: Settings = { theme: "system", diff_layout: "unified", whitespace_visible: false, line_wrap: false, syntax_visible: true, inline_comments_visible: true, files_pane_visible: true, comments_pane_visible: true, comments_pane_wide: false, changed_files_view: "tree", zoom: 1, mcp_enabled: true, notifications_enabled: true, mcp_listen_address: "127.0.0.1", mcp_port: 9888, activity_seen_id: 0, skill_prompt_key: "" };
 
 export function getSettings() { return invoke<Settings>("get_settings"); }
 export function persistSettings(settings: Settings) { return invoke<Settings>("set_settings", { settings }); }
@@ -31,6 +32,11 @@ export function createAgentToken(name: string) { return invoke<CreatedAgentToken
 export function deleteAgentToken(id: number) { return invoke<void>("delete_agent_token", { id }); }
 export function getMcpStatus() { return invoke<McpStatus>("get_mcp_status"); }
 export function restartMcp() { return invoke<McpStatus>("restart_mcp"); }
+export function listSkillTargets() { return invoke<SkillTarget[]>("list_skill_targets"); }
+export function installSkillTarget(path: string) { return invoke<SkillTarget>("install_skill_target", { path }); }
+// The persisted write for a dismissed install prompt; the key rides the
+// Settings read but only this command writes it (the activity_seen_id pattern).
+export function setSkillPrompt(key: string) { return invoke<void>("set_skill_prompt", { key }); }
 
 // The server-connection commands are purely local store operations; every
 // server call itself runs from the webview through the remote seam (the
@@ -111,9 +117,10 @@ function StatusLine({ status }: { status: McpStatus | null }) {
 // tokens (secret revealed once, with a connection snippet while it is
 // visible) and deletes them; the status line surfaces the live listener,
 // including a non-fatal bind failure.
-function AgentApiSection({ settings, onChange }: { settings: Settings; onChange: (next: Settings) => void }) {
+function AgentApiSection({ settings, onChange, targets, onInstall }: { settings: Settings; onChange: (next: Settings) => void; targets: SkillTarget[]; onInstall: (path: string) => Promise<SkillTarget> }) {
   const [tokens, setTokens] = useState<AgentToken[]>([]);
   const [status, setStatus] = useState<McpStatus | null>(null);
+  const [installing, setInstalling] = useState("");
   const [newName, setNewName] = useState("");
   const [revealed, setRevealed] = useState<CreatedAgentToken | null>(null);
   const [error, setError] = useState("");
@@ -126,6 +133,21 @@ function AgentApiSection({ settings, onChange }: { settings: Settings; onChange:
     getMcpStatus().then((loaded) => { if (mounted) setStatus(loaded); }).catch((caught) => { if (mounted) setError(errorMessageOf(caught)); });
     return () => { mounted = false; };
   }, []);
+
+  // The targets list is owned by the app shell (the install prompt shares
+  // it), so installing only reports the outcome; the refreshed row state
+  // arrives through the shared prop.
+  async function install(path: string) {
+    setError("");
+    setInstalling(path);
+    try {
+      await onInstall(path);
+    } catch (caught) {
+      setError(errorMessageOf(caught));
+    } finally {
+      setInstalling("");
+    }
+  }
 
   async function mint() {
     setError("");
@@ -198,6 +220,18 @@ function AgentApiSection({ settings, onChange }: { settings: Settings; onChange:
           <CopyButton value={status.skill_dir} label="Copy skill path" />
         </span>
       </div>}
+      <div className="settings-row settings-row-flush">
+        <div className="settings-row-copy"><strong>Skill installs</strong><span>Copy the bundled skill into your agents' skills folders so they follow the documented workflows; a release that changes the skill marks copies here for update. Updating overwrites the folder's skill files, nothing else.</span></div>
+      </div>
+      {targets.length > 0 ? <div className="settings-token-list">
+        {targets.map((target) => <div className="settings-token" key={target.path}>
+          <div className="settings-token-copy">
+            <strong>{target.label}{target.status !== "up_to_date" && <span className={`settings-badge ${target.status === "differs" ? "warn" : "muted"}`} title={target.status === "differs" ? "The installed copy does not match the bundled skill." : undefined}>{target.status === "differs" ? "differs" : "not installed"}</span>}</strong>
+            <span><code>{target.path}</code></span>
+          </div>
+          {target.status !== "up_to_date" && <button className="settings-select settings-button" type="button" disabled={installing !== ""} onClick={() => void install(target.path)}>{installing === target.path ? "Installing..." : target.status === "differs" ? "Update" : "Install"}</button>}
+        </div>)}
+      </div> : <p className="request-form-hint">No agent skills folders detected under your user folder. The home copy above always travels with the app, and manual installs follow docs/connect-an-agent.md.</p>}
     </section>
     <section id="settings-tokens" className="settings-section" aria-labelledby="settings-tokens-heading">
       <h2 id="settings-tokens-heading">Agent tokens</h2>
@@ -538,7 +572,7 @@ const SETTINGS_PAGES: { id: SettingsPageId; label: string }[] = [
   { id: "about", label: "About" },
 ];
 
-export function SettingsPage({ settings, saveError, onBack, onChange, onConnectionsChanged }: { settings: Settings; saveError: string; onBack: () => void; onChange: (next: Settings) => void; onConnectionsChanged: () => void }) {
+export function SettingsPage({ settings, saveError, skillTargets, onInstallSkillTarget, onBack, onChange, onConnectionsChanged }: { settings: Settings; saveError: string; skillTargets: SkillTarget[]; onInstallSkillTarget: (path: string) => Promise<SkillTarget>; onBack: () => void; onChange: (next: Settings) => void; onConnectionsChanged: () => void }) {
   const [page, setPage] = useState<SettingsPageId>("general");
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -600,7 +634,7 @@ export function SettingsPage({ settings, saveError, onBack, onChange, onConnecti
         </section>
       </>}
       {page === "servers" && <ServerConnectionsSection onChanged={onConnectionsChanged} />}
-      {page === "agents" && <AgentApiSection settings={settings} onChange={onChange} />}
+      {page === "agents" && <AgentApiSection settings={settings} onChange={onChange} targets={skillTargets} onInstall={onInstallSkillTarget} />}
       {page === "about" && <AboutSection />}
       {saveError && <div className="settings-inline-error" role="status" aria-live="polite">{saveError}</div>}
     </div>
