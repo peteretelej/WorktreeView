@@ -152,7 +152,10 @@ function App() {
   // One landing for opening a canvas document's pinned surface: resolve the
   // live worktree when the doc pins one, else open the pinned head as a
   // recorded identity; optionally focus the document's own comment.
-  function openCanvasDoc(doc: CanvasDocRow, focusedCommentId: number | null = null) {
+  function openCanvasDoc(doc: CanvasDocRow, focusedCommentId: number | null = null, reference?: CodeRef) {
+    // The opened surface lands the reference jump itself (the effect below
+    // keys the recorded identity, which covers both worktree and head pins).
+    if (reference) setCanvasJump({ filePath: reference.path, line: reference.start, sha: doc.target_key, doc, nonce: Date.now() });
     const preset = { base: doc.base_sha, scope: "committed" as ReviewScope, recordedKey: { targetKey: doc.target_key, targetKind: doc.target_kind === "worktree" ? ("worktree" as const) : ("head" as const) } };
     if (doc.target_kind === "worktree") {
       const repo = allRepos.find((item) => item.path === doc.repo_path);
@@ -170,15 +173,34 @@ function App() {
     }
     void openReview({ kind: "commit", sha: doc.target_key, parents: [], defaultBaseAncestor: false }, doc.repo_path, preset, undefined, focusedCommentId);
   }
-  // A canvas document's code reference opens the document's pinned surface
-  // at that file and line; a cross-commit reference opens the cited
-  // revision instead. The jump lands after the review loads: the effect
-  // below selects the file, and the patch pane consumes the anchor.
+  // Does the open review surface carry the document's pinned revision?
+  function reviewIsDocSurface(doc: CanvasDocRow): boolean {
+    if (!reviewLocation || reviewLocation.identity.repoPath !== doc.repo_path || !reviewIndex || reviewIndex.error) return false;
+    if (reviewIndex.base_sha !== doc.base_sha) return false;
+    const target = reviewLocation.identity.target;
+    if (doc.target_kind === "worktree") return target.kind === "worktree" && target.worktree.path === doc.target_key;
+    return target.kind === "commit" && target.sha === doc.target_key;
+  }
+  // A canvas document's code reference resolves against the document's
+  // pinned revision: jump in place when this surface carries it, open the
+  // cited revision for a cross-commit reference, else open the pinned
+  // surface first and land the jump there.
   function openCanvasCodeRef(doc: CanvasDocRow, reference: CodeRef) {
-    const sha = reference.sha ?? (doc.target_kind === "head" ? doc.target_key : null);
-    if (!sha) { openCanvasDoc(doc); return; }
-    setCanvasJump({ filePath: reference.path, line: reference.start, sha, doc, nonce: Date.now() });
-    void openReview({ kind: "commit", sha, parents: [], defaultBaseAncestor: false }, doc.repo_path, { base: reference.sha ? "empty-tree" : doc.base_sha, scope: "committed", recordedKey: { targetKey: sha, targetKind: "head" } });
+    if (reference.sha) {
+      setCanvasJump({ filePath: reference.path, line: reference.start, sha: reference.sha, doc, nonce: Date.now() });
+      void openReview({ kind: "commit", sha: reference.sha, parents: [], defaultBaseAncestor: false }, doc.repo_path, { base: "empty-tree", scope: "committed", recordedKey: { targetKey: reference.sha, targetKind: "head" } });
+      return;
+    }
+    if (reviewIsDocSurface(doc)) {
+      const identity = reviewLocation!.identity;
+      if (selectedFile?.path !== reference.path) {
+        nav.replace({ ...reviewLocation!, selectedFile: { path: reference.path, status: "added", untracked: false } });
+        void selectFile({ path: reference.path, status: "added", untracked: false }, identity);
+      }
+      setCanvasAnchorJump({ filePath: reference.path, line: reference.start, nonce: Date.now() });
+      return;
+    }
+    openCanvasDoc(doc, null, reference);
   }  const [paneDragWidth, setPaneDragWidth] = useState<number | null>(null);
   const [paneTab, setPaneTab] = useState<PaneTab>("comments");
   // Canvas documents per repo, and an in-flight reference jump: opening one
