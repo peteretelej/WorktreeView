@@ -5,6 +5,9 @@ description = "Code review UI for Git worktrees"
 license = "Apache-2.0"
 authors = ["Peter Etelej"]
 edition = "2021"
+# Two binaries share the crate since the server tier; without this the
+# bare `cargo run` behind `tauri dev` refuses to pick between them.
+default-run = "worktreeview"
 
 [features]
 # default-on so cargo still builds the server bin; the Tauri CLI only sees
