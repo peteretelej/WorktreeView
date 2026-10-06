@@ -7,7 +7,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 
@@ -61,6 +61,29 @@ writeFileSync(overlayPath, JSON.stringify({
 if (port !== basePort) {
   console.log(`Port ${basePort} is busy; starting the dev server on ${port}.`);
 }
+
+// Tray residency keeps a dev app alive after its window closes, so a bare
+// restart would hand the launch to the stale binary instead of the new
+// build. Stop only this checkout's app, matched by its target-directory
+// path, so the installed app and other worktrees are never touched.
+function stopStaleApp() {
+  if (process.platform === "win32") {
+    const script = `Get-Process worktreeview -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '${root}\\*' } | ForEach-Object { $_.Id; Stop-Process -Force -Id $_.Id }`;
+    const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8" });
+    const pids = (result.stdout ?? "").split(/\s+/).filter(Boolean);
+    if (pids.length > 0) {
+      console.log(`Stopped this checkout's running dev app (pid ${pids.join(", ")}) so the new build takes over.`);
+    }
+    return;
+  }
+  const listed = spawnSync("pgrep", ["-f", `${root}/src-tauri/target/`], { encoding: "utf8" }).stdout ?? "";
+  if (listed.split(/\s+/).filter(Boolean).length > 0) {
+    spawnSync("pkill", ["-f", `${root}/src-tauri/target/`]);
+    console.log("Stopped this checkout's running dev app so the new build takes over.");
+  }
+}
+
+stopStaleApp();
 
 const child = spawn(
   process.execPath,
