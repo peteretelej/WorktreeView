@@ -90,7 +90,15 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: WorktreeView v__VERSION__
-          releaseBody: Installers for Windows, macOS, and Linux, plus headless server tarballs (worktreeview-server-<version>-<target>.tar.gz with a .sha256 beside it; see docs/server.md). Builds are unsigned, so Windows SmartScreen and macOS Gatekeeper warn on first launch; see CONTRIBUTING.md in case you'd prefer to build from source.
+          releaseBody: >-
+            Installers for Windows, macOS, and Linux, plus headless server
+            tarballs (worktreeview-server-<version>-<target>.tar.gz with a
+            .sha256 beside it; see docs/server.md). Builds are unsigned, so
+            Windows SmartScreen and macOS Gatekeeper warn on first launch;
+            see CONTRIBUTING.md in case you'd prefer to build from source.
+
+            Also on [Microsoft Store](https://apps.microsoft.com/detail/9PM1BN0JZDB3),
+            though it may be a few versions behind.
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true
