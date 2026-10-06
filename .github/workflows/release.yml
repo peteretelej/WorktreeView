@@ -99,6 +99,12 @@ jobs:
 
             Also on [Microsoft Store](https://apps.microsoft.com/detail/9PM1BN0JZDB3),
             though it may be a few versions behind.
+
+            Tip for upgrading on macOS: quit a running copy first (its menu
+            bar icon > Quit), then install the new dmg. An older copy keeps
+            running until quit, so starting the new one while it lives would
+            just bring the old window forward. Windows installers close the
+            running app for you.
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true
