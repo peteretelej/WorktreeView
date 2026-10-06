@@ -139,13 +139,48 @@ fn log_excerpt(bytes: &[u8]) -> String {
         .collect()
 }
 
+// One shared explanation for a stored folder that is gone: the project
+// page's recovery actions key off the code, and the message must read the
+// same wherever the check happens (path resolution or the spawn builder).
+pub(crate) fn project_missing_error(path: &str) -> CommandError {
+    CommandError::new(
+        "project_missing",
+        format!("The folder {path} no longer exists on disk. It may have been deleted or moved."),
+    )
+}
+
 pub(crate) fn git_execution_error(stderr: &[u8]) -> CommandError {
+    // A stored project whose repository identity is gone is a routine state
+    // (the folder was deleted or moved), not a command failure worth quoting
+    // Git's raw fatal over; the code drives the project page's recovery
+    // actions. Localized stderr does not match and keeps the raw diagnostic.
+    if is_not_a_repository_diagnostic(stderr) {
+        return CommandError::new(
+            "not_git_repository",
+            "This folder is no longer a Git repository. It may have been deleted or moved.",
+        );
+    }
+    raw_git_execution_error(stderr)
+}
+
+// Fetch failures relay the remote side's stderr, where "not a git
+// repository" describes a path on the host, not the local project; those
+// callers keep Git's own diagnostic.
+pub(crate) fn raw_git_execution_error(stderr: &[u8]) -> CommandError {
     let message = if stderr.is_empty() {
         "Git command failed.".to_string()
     } else {
         String::from_utf8_lossy(stderr).into_owned()
     };
     CommandError::new("git_execution", message)
+}
+
+// Git localizes this diagnostic, so only invocations whose stderr is
+// machine-parsed match reliably; everything else keeps Git's own text.
+pub(crate) fn is_not_a_repository_diagnostic(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr)
+        .to_ascii_lowercase()
+        .contains("not a git repository")
 }
 
 fn dir_git_command(
@@ -156,6 +191,12 @@ fn dir_git_command(
     let path = path.to_str().ok_or_else(|| {
         CommandError::new("invalid_path", "The selected path is not valid UTF-8.")
     })?;
+    // Git's own diagnostic for a vanished working directory is a localized
+    // spawn failure or "cannot change to"; checking the folder directly gives
+    // every command one deterministic, locale-independent explanation.
+    if !Path::new(path).is_dir() {
+        return Err(project_missing_error(path));
+    }
     let mut command = Command::new("git");
     command
         .args([
@@ -238,7 +279,7 @@ pub(crate) async fn fetch_remote_branch(path: &Path, remote: &str, branch: &str)
     command.env_remove("GIT_NO_LAZY_FETCH");
     let (exit_code, _, stderr) = run_bounded(command, FETCH_TIMEOUT).await?;
     if exit_code != 0 {
-        return Err(git_execution_error(&stderr));
+        return Err(raw_git_execution_error(&stderr));
     }
     Ok(())
 }
@@ -459,6 +500,42 @@ mod tests {
         assert!(acceptable_diff_exit(1, true));
         assert!(!acceptable_diff_exit(1, false));
         assert!(!acceptable_diff_exit(2, true));
+    }
+
+    #[test]
+    fn execution_errors_classify_a_vanished_repository() {
+        let error = git_execution_error(
+            b"fatal: not a git repository (or any of the parent directories): .git",
+        );
+        assert_eq!(error.code, "not_git_repository");
+        assert!(error.message.contains("no longer a Git repository"));
+        // Localized output does not match, which is why the probe pins the locale.
+        let error = git_execution_error(
+            b"fatal: kein Git-Repository (oder eines der \\303\\274bergeordneten Verzeichnisse): .git",
+        );
+        assert_eq!(error.code, "git_execution");
+        assert!(error.message.contains("kein Git-Repository"));
+        let error = git_execution_error(b"fatal: unable to access '.git': Permission denied");
+        assert_eq!(error.code, "git_execution");
+        let error = git_execution_error(b"");
+        assert_eq!(error.code, "git_execution");
+        assert_eq!(error.message, "Git command failed.");
+        // Fetch paths use the raw constructor: a relayed "not a git
+        // repository" describes the remote host, not the local folder.
+        let error = raw_git_execution_error(
+            b"fatal: not a git repository (or any of the parent directories): .git",
+        );
+        assert_eq!(error.code, "git_execution");
+        assert!(error.message.contains("fatal:"));
+    }
+
+    #[test]
+    fn dir_commands_refuse_a_missing_folder() {
+        let missing = std::env::temp_dir().join("worktreeview-missing-folder-probe");
+        let error = dir_git_command(&missing, &["status"], &[]).unwrap_err();
+        assert_eq!(error.code, "project_missing");
+        assert!(error.message.contains("no longer exists on disk"));
+        assert!(error.message.contains(missing.to_str().unwrap()));
     }
 
     #[test]

@@ -7,11 +7,11 @@ mod validate;
 use crate::canonical_path;
 use crate::CommandError;
 use sqlx::SqlitePool;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) use exec::{
     acceptable_diff_exit, fetch_remote_branch, fetch_remotes, git_args, git_execution_error,
-    run_git, run_git_with_stdin, stdin_git_command, MAX_OUTPUT,
+    raw_git_execution_error, run_git, run_git_with_stdin, stdin_git_command, MAX_OUTPUT,
 };
 #[cfg(test)]
 pub(crate) use exec::{read_bounded, spawn_counted};
@@ -130,6 +130,13 @@ pub(crate) async fn read_target(
     if repo_is_remote(pool, repo_path).await? {
         return Ok(ReadTarget::Remote(RemoteTarget::parse_identity(repo_path)?));
     }
+    // A stored project whose folder is gone is a routine state (deleted or
+    // moved), not a selection error: canonical_path's "does not exist"
+    // refusal is reserved for freshly picked paths, while this one carries
+    // the code the project page's recovery actions key off.
+    if !repo_path.trim().is_empty() && !Path::new(repo_path).is_dir() {
+        return Err(exec::project_missing_error(repo_path));
+    }
     Ok(ReadTarget::Local(canonical_path(repo_path)?))
 }
 
@@ -209,6 +216,20 @@ mod tests {
             ReadTarget::Local(_) => panic!("remote ref reads must stay remote"),
         }
         std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    // A stored local project whose folder was deleted reads as
+    // project_missing, the code the project page's recovery actions key
+    // off, rather than canonical_path's selection-error refusal.
+    #[tokio::test]
+    async fn vanished_stored_project_reads_as_project_missing() {
+        let pool = test_pool().await;
+        let repo = test_repo("target-vanished");
+        let path = repo.to_str().unwrap().to_string();
+        std::fs::remove_dir_all(repo).unwrap();
+        let error = read_target(&pool, &path).await.unwrap_err();
+        assert_eq!(error.code, "project_missing");
+        assert!(error.message.contains("no longer exists on disk"));
     }
 
     // Without a store row and with a real folder, the dispatch keeps

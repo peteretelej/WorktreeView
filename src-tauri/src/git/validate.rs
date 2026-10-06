@@ -1,6 +1,6 @@
 use super::exec::{
-    git_args, git_execution_error, repo_stdin_git_command, run_git, run_git_with_env,
-    run_git_with_stdin,
+    git_args, git_execution_error, is_not_a_repository_diagnostic, repo_stdin_git_command,
+    run_git, run_git_with_env, run_git_with_stdin,
 };
 use crate::CommandError;
 use std::path::Path;
@@ -88,12 +88,6 @@ pub(crate) async fn ensure_work_tree(canonical: &Path) -> Result<(), CommandErro
         ));
     }
     Ok(())
-}
-
-pub(crate) fn is_not_a_repository_diagnostic(stderr: &[u8]) -> bool {
-    String::from_utf8_lossy(stderr)
-        .to_ascii_lowercase()
-        .contains("not a git repository")
 }
 
 pub(crate) fn validate_scope_combination(
@@ -281,20 +275,6 @@ mod tests {
         assert!(validate_file("src/file.txt").is_ok());
     }
 
-    #[test]
-    fn matches_only_not_a_repository_diagnostics() {
-        assert!(is_not_a_repository_diagnostic(
-            b"fatal: not a git repository (or any of the parent directories): .git"
-        ));
-        // Localized output does not match, which is why the probe pins the locale.
-        assert!(!is_not_a_repository_diagnostic(
-            b"fatal: kein Git-Repository (oder eines der \\303\\274bergeordneten Verzeichnisse): .git"
-        ));
-        assert!(!is_not_a_repository_diagnostic(
-            b"fatal: unable to access '.git': Permission denied"
-        ));
-        assert!(!is_not_a_repository_diagnostic(b""));
-    }
     #[test]
     fn selects_main_then_master_as_primary_branch() {
         assert_eq!(

@@ -5,7 +5,7 @@ export type CommandError = { code: string; message: string };
 export function errorMessage(error: unknown) {
   if (typeof error === "object" && error !== null && "code" in error) {
     const commandError = error as CommandError;
-    if (commandError.code === "not_git_repository" || commandError.code === "invalid_path") return commandError.message;
+    if (commandError.code === "not_git_repository" || commandError.code === "invalid_path" || commandError.code === "project_missing") return commandError.message;
     if (commandError.code === "persistence") return "Repository storage is unavailable.";
     if (commandError.code === "git_timeout") return commandError.message;
     if (commandError.code === "git_output_too_large") return "Git returned too much worktree data.";
@@ -27,6 +27,12 @@ export function errorMessage(error: unknown) {
 
 export function errorCodeOf(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error ? String((error as CommandError).code) : "";
+}
+
+// A project whose folder is gone or no longer holds a Git repository gets
+// the project page's dedicated recovery state, not a generic failure line.
+export function isUnavailableProjectCode(code: string) {
+  return code === "project_missing" || code === "not_git_repository";
 }
 
 // Mirrors the Rust u32::MAX sentinel for status counts that exceeded the

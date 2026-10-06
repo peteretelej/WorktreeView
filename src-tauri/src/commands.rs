@@ -5,8 +5,8 @@ use crate::agents::{
 use crate::git::{
     batch_fragment, configured_filter_names, fetch_remote_branch, fetch_remotes,
     filter_override_args, git_args, git_execution_error, new_nonce,
-    parse_configured_filter_names, parse_status_count, parse_worktrees, read_target,
-    read_worktree_target, repo_is_remote, remote_branch_of_tracking_ref, run_git,
+    parse_configured_filter_names, parse_status_count, parse_worktrees, raw_git_execution_error,
+    read_target, read_worktree_target, repo_is_remote, remote_branch_of_tracking_ref, run_git,
     run_remote_batch_with, run_remote_fetch_with, run_remote_read_with, validate_fetch_name,
     validate_file, validate_ref, validate_work_tree_with, CommitPage, ReadTarget,
     RemoteTarget, Worktree,
@@ -506,7 +506,7 @@ async fn refresh_local_repo(path: &Path, refreshes: &RefreshSink) -> Result<(), 
     }
     let (exit_code, _, stderr) = fetch_remotes(path).await?;
     if exit_code != 0 {
-        return Err(git_execution_error(&stderr));
+        return Err(raw_git_execution_error(&stderr));
     }
     refreshes(&path.to_string_lossy());
     Ok(())

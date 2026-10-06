@@ -24,10 +24,13 @@ import { BRANCH_PAGE_SIZE, parseHunks, patchIdentityOf, sameReview, DiffToggles,
 import { HistoryView, type CommitPage, type HistoryEntry, type HistoryState } from "./history";
 import "./App.css";
 
-import { authorInitials, changesLabel, compactAge, errorCodeOf, errorMessage, originSlug, relativeTime, shortToken, STALE_AFTER_SECONDS, type CommandError } from "./format";
+import { authorInitials, changesLabel, compactAge, errorCodeOf, errorMessage, isUnavailableProjectCode, originSlug, relativeTime, shortToken, STALE_AFTER_SECONDS, type CommandError } from "./format";
 import { unwrapLoad, type RemoteLoad, type RemoteLoadState } from "./remoteLoads";
 type Repo = { path: string; name: string; worktrees: Worktree[]; pinned_at: number | null };
 type SearchResult = { repo: Repo; worktree?: Worktree };
+// One project's last read failure: the code separates an unavailable
+// project (recovery actions on the project page) from other failures.
+type RepoError = { message: string; code: string };
 // One remote project's health, from the phase-2 load envelope: badges
 // render from this recorded state and never from inferred errors.
 type RemoteHealth = { state: RemoteLoadState; message: string | null };
@@ -109,7 +112,7 @@ function tagEvents(events: PortalActivityEvent[], source: RemoteSource): PortalA
 
 function App() {
   const [repos, setRepos] = useState<Repo[]>([]); const [activeRepoPath, setActiveRepoPath] = useState(""); const [selectedWorktreePath, setSelectedWorktreePath] = useState("");
-  const [loading, setLoading] = useState(true); const [opening, setOpening] = useState(false); const [loadError, setLoadError] = useState(""); const [operationError, setOperationError] = useState(""); const [repoErrors, setRepoErrors] = useState<Record<string, string>>({}); const [hydratingRepos, setHydratingRepos] = useState<Record<string, number>>({});
+  const [loading, setLoading] = useState(true); const [opening, setOpening] = useState(false); const [loadError, setLoadError] = useState(""); const [operationError, setOperationError] = useState(""); const [repoErrors, setRepoErrors] = useState<Record<string, RepoError>>({}); const [hydratingRepos, setHydratingRepos] = useState<Record<string, number>>({});
   const [collapsed, setCollapsed] = useState(false); const [paletteOpen, setPaletteOpen] = useState(false); const [query, setQuery] = useState(""); const [searchPage, setSearchPage] = useState(0);
   const [refs, setRefs] = useState<RefInventory>({ heads: [], remotes: [], tags: [], default_base: null }); const [reviewIndex, setReviewIndex] = useState<ReviewIndex | null>(null); const [reviewLoading, setReviewLoading] = useState(false); const [patch, setPatch] = useState<FilePatch | null>(null); const [patchError, setPatchError] = useState(""); const [patchLoading, setPatchLoading] = useState(false); const [fetchingBranchObjects, setFetchingBranchObjects] = useState(false);
   const [fileContent, setFileContent] = useState<FileContent | null>(null); const [fileContentError, setFileContentError] = useState(""); const [fileContentLoading, setFileContentLoading] = useState(false); const [fileImageSrc, setFileImageSrc] = useState<string | null>(null); const [fileImageError, setFileImageError] = useState(""); const [fileImageLoading, setFileImageLoading] = useState(false);
@@ -188,6 +191,7 @@ function App() {
   const connectionsRef = useRef(connections); const localPathsRef = useRef(repos.map((repo) => repo.path));
   const resolveRepoSource: SourceResolver = (repoPath) => resolveSource(repoPath, localPathsRef.current, connectionsRef.current);
   const activeRepo = allRepos.find((repo) => repo.path === activeRepoPath); const hydrating = Object.keys(hydratingRepos).length > 0; const activeRepoHydrating = activeRepo ? Boolean(hydratingRepos[activeRepo.path]) : false;
+  const activeRepoError = activeRepo ? repoErrors[activeRepo.path] : undefined; const activeProjectUnavailable = activeRepoError !== undefined && isUnavailableProjectCode(activeRepoError.code);
   // Display names for cross-project rows; a project removed from the app
   // falls back to its path.
   const repoNames = useMemo(() => new Map(allRepos.map((repo) => [repo.path, repo.name])), [allRepos]);
@@ -206,7 +210,7 @@ function App() {
   // through refs, so they subscribe once and never hold stale closures.
   const commentsRef = useRef(comments); const activeRepoPathRef = useRef(activeRepoPath); const reposRef = useRef(repos); const settingsRef = useRef(settings);
 
-  useEffect(() => { let mounted = true; async function load() { try { const loaded = await invoke<Repo[]>("list_repos"); if (!mounted) return; setRepos(loaded); setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? ""); setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1]))); let nextSettings = defaultSettings; try { nextSettings = await getSettings(); } catch (error) { if (mounted) setOperationError(errorMessage(error)); } if (!mounted) return; nextSettings.zoom = snapZoom(nextSettings.zoom); applyTheme(nextSettings.theme); setSettings(nextSettings); try { const loadedConnections = await listServerConnections(); if (mounted) setConnections(loadedConnections); } catch { /* the app stays local; the Servers page surfaces the failure */ } setLoading(false); for (let start = 0; start < loaded.length; start += 4) await Promise.all(loaded.slice(start, start + 4).map(async (repo) => { try { const load = adoptLoad(repo.path, await invoke<Worktree[] | RemoteLoad<Worktree[]>>("list_worktrees", { path: repo.path })); if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees: load.data ?? [] } : item)); let listing: SurfaceListing = { gone: [], pinned: [] }; try { listing = adoptLoad(repo.path, await invoke<SurfaceListing | RemoteLoad<SurfaceListing>>("list_surfaces", { path: repo.path })).data ?? listing; } catch { listing = { gone: [], pinned: [] }; } if (mounted) setSurfaces((current) => ({ ...current, [repo.path]: listing })); } catch (error) { if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); } finally { if (mounted) setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } })); } catch (error) { if (mounted) { setLoadError(errorMessage(error)); setLoading(false); } } } void load(); return () => { mounted = false; }; }, []);
+  useEffect(() => { let mounted = true; async function load() { try { const loaded = await invoke<Repo[]>("list_repos"); if (!mounted) return; setRepos(loaded); setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? ""); setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1]))); let nextSettings = defaultSettings; try { nextSettings = await getSettings(); } catch (error) { if (mounted) setOperationError(errorMessage(error)); } if (!mounted) return; nextSettings.zoom = snapZoom(nextSettings.zoom); applyTheme(nextSettings.theme); setSettings(nextSettings); try { const loadedConnections = await listServerConnections(); if (mounted) setConnections(loadedConnections); } catch { /* the app stays local; the Servers page surfaces the failure */ } setLoading(false); for (let start = 0; start < loaded.length; start += 4) await Promise.all(loaded.slice(start, start + 4).map(async (repo) => { try { const load = adoptLoad(repo.path, await invoke<Worktree[] | RemoteLoad<Worktree[]>>("list_worktrees", { path: repo.path })); if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees: load.data ?? [] } : item)); let listing: SurfaceListing = { gone: [], pinned: [] }; try { listing = adoptLoad(repo.path, await invoke<SurfaceListing | RemoteLoad<SurfaceListing>>("list_surfaces", { path: repo.path })).data ?? listing; } catch { listing = { gone: [], pinned: [] }; } if (mounted) setSurfaces((current) => ({ ...current, [repo.path]: listing })); } catch (error) { if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: { message: errorMessage(error), code: errorCodeOf(error) } })); } finally { if (mounted) setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } })); } catch (error) { if (mounted) { setLoadError(errorMessage(error)); setLoading(false); } } } void load(); return () => { mounted = false; }; }, []);
   useEffect(() => {
     if (connections.length === 0) return;
     let cancelled = false;
@@ -644,7 +648,7 @@ function App() {
     return { data: load.data, failure: load.data === null ? load.message ?? "The remote project is currently unreachable." : "" };
   }
 
-  async function openRepository() { if (opening) return; let selected: string | null; try { selected = import.meta.env.MODE === "e2e" && import.meta.env.VITE_E2E_PICKER_PATH === "/tmp/worktreeview-e2e-selection" ? "/tmp/worktreeview-e2e-selection" : await open({ directory: true, multiple: false }); } catch (error) { setOperationError(errorMessage(error)); return; } if (!selected || Array.isArray(selected)) return; setOpening(true); setOperationError(""); try { const repo = await invoke<Repo>("open_repo", { path: selected }); goInbox(); setRepos((current) => [repo, ...current.filter((item) => item.path !== repo.path)]); setActiveRepoPath(repo.path); setSelectedWorktreePath(""); setRepoErrors((current) => { const next = { ...current }; delete next[repo.path]; return next; }); setHydratingRepos((current) => ({ ...current, [repo.path]: (current[repo.path] ?? 0) + 1 })); try { const load = adoptLoad(repo.path, await invoke<Worktree[] | RemoteLoad<Worktree[]>>("list_worktrees", { path: repo.path })); setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees: load.data ?? [] } : item)); } catch (error) { setRepoErrors((current) => ({ ...current, [repo.path]: errorMessage(error) })); } finally { setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } } catch (error) { setOperationError(errorMessage(error)); } finally { setOpening(false); } }
+  async function openRepository() { if (opening) return; let selected: string | null; try { selected = import.meta.env.MODE === "e2e" && import.meta.env.VITE_E2E_PICKER_PATH === "/tmp/worktreeview-e2e-selection" ? "/tmp/worktreeview-e2e-selection" : await open({ directory: true, multiple: false }); } catch (error) { setOperationError(errorMessage(error)); return; } if (!selected || Array.isArray(selected)) return; setOpening(true); setOperationError(""); try { const repo = await invoke<Repo>("open_repo", { path: selected }); goInbox(); setRepos((current) => [repo, ...current.filter((item) => item.path !== repo.path)]); setActiveRepoPath(repo.path); setSelectedWorktreePath(""); setRepoErrors((current) => { const next = { ...current }; delete next[repo.path]; return next; }); setHydratingRepos((current) => ({ ...current, [repo.path]: (current[repo.path] ?? 0) + 1 })); try { const load = adoptLoad(repo.path, await invoke<Worktree[] | RemoteLoad<Worktree[]>>("list_worktrees", { path: repo.path })); setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees: load.data ?? [] } : item)); } catch (error) { setRepoErrors((current) => ({ ...current, [repo.path]: { message: errorMessage(error), code: errorCodeOf(error) } })); } finally { setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } } catch (error) { setOperationError(errorMessage(error)); } finally { setOpening(false); } }
 
   // The remote half of the add-project flow: typed fields in, the backend
   // owns identity normalization and host-side validation, and the stored
@@ -808,7 +812,16 @@ function App() {
     try {
       const load = adoptLoad(repoPath, await call<SurfaceListing | RemoteLoad<SurfaceListing>>("list_surfaces", { path: repoPath }, resolveRepoSource(repoPath)));
       setSurfaces((current) => ({ ...current, [repoPath]: load.data ?? { gone: [], pinned: [] } }));
-    } catch (error) { setOperationError(errorMessage(error)); }
+    } catch (error) {
+      // An unavailable project is the project page's standing state, not a
+      // banner: unattended reloads (agent pings) would otherwise re-pop a
+      // banner no one can permanently clear.
+      if (isUnavailableProjectCode(errorCodeOf(error))) {
+        setRepoErrors((current) => ({ ...current, [repoPath]: { message: errorMessage(error), code: errorCodeOf(error) } }));
+        return;
+      }
+      setOperationError(errorMessage(error));
+    }
   }
   async function toggleSurfacePin(repoPath: string, kind: SurfaceRow["kind"], identityKey: string, pinned: boolean) {
     try {
@@ -1036,7 +1049,7 @@ function App() {
       else setRepos((current) => current.map((item) => item.path === repoPath ? { ...item, worktrees: load.data ?? [] } : item));
       // Success clears a prior failure: the unattended reloads must self-heal.
       setRepoErrors((current) => { if (!(repoPath in current)) return current; const next = { ...current }; delete next[repoPath]; return next; });
-    } catch (error) { setRepoErrors((current) => ({ ...current, [repoPath]: errorMessage(error) })); }
+    } catch (error) { setRepoErrors((current) => ({ ...current, [repoPath]: { message: errorMessage(error), code: errorCodeOf(error) } })); }
     void refreshSurfaces(repoPath);
     setStatusNonce((nonce) => nonce + 1);
   }
@@ -1524,7 +1537,7 @@ function App() {
 </div>
 </aside>
 <section className="workspace">
-<div className="live-error" role="status" aria-live="polite">{statusMessage}</div>{operationError && <div className="operation-error" role="status">{operationError}</div>}{topBarLabel && <TopBar label={topBarLabel} canBack={nav.canBack()} canForward={nav.canForward()} onBack={() => nav.back()} onForward={() => nav.forward()} onSearch={openPalette} />}<main className="content">{portalLocation ?
+<div className="live-error" role="status" aria-live="polite">{statusMessage}</div>{operationError && <div className="operation-error" role="status"><span className="operation-error-message">{operationError}</span><button className="error-dismiss" type="button" aria-label="Dismiss error" title="Dismiss" onClick={() => setOperationError("")}><X size={12} /></button></div>}{topBarLabel && <TopBar label={topBarLabel} canBack={nav.canBack()} canForward={nav.canForward()} onBack={() => nav.back()} onForward={() => nav.forward()} onSearch={openPalette} />}<main className="content">{portalLocation ?
       <div className="portal-view">
         <header className="portal-head">
           <h1>Pulse</h1>
@@ -1576,7 +1589,7 @@ function App() {
 <button className="menu-item danger" type="button" role="menuitem" onClick={() => { setMenuOpen(false); setRemoveTarget(activeRepo); }}>
 <Trash2 size={13} />Remove from WorktreeView</button>
 <p className="menu-note">Removes the project from this app only. Your repository, worktrees, and history on disk are never touched.</p>
-</div>}</div>}</div>{loading ? <Empty icon={<CircleDot size={24} />} title="Loading repositories..." detail="Reading saved repositories." /> : loadError ? <Empty icon={<CircleDot size={24} />} title="Repositories could not be loaded" detail={loadError} /> : !activeRepo ? <Empty icon={<FolderGit2 size={24} />} title="No repositories" detail="Open a local Git folder to begin." action={<button className="secondary-button" type="button" onClick={() => void openRepository()} disabled={opening}>Open repository...</button>} /> : activeRepoHydrating ? <Empty icon={<CircleDot size={24} />} title="Loading worktrees..." detail="Reading live worktree identity." /> : repoErrors[activeRepo.path] ? <Empty icon={<CircleDot size={24} />} title="Worktrees unavailable" detail={repoErrors[activeRepo.path]} /> : activeRepo.worktrees.length === 0 ? <Empty icon={<CircleDot size={24} />} title="No worktrees" detail="This repository has no linked worktrees." /> : <>
+</div>}</div>}</div>{loading ? <Empty icon={<CircleDot size={24} />} title="Loading repositories..." detail="Reading saved repositories." /> : loadError ? <Empty icon={<CircleDot size={24} />} title="Repositories could not be loaded" detail={loadError} /> : !activeRepo ? <Empty icon={<FolderGit2 size={24} />} title="No repositories" detail="Open a local Git folder to begin." action={<button className="secondary-button" type="button" onClick={() => void openRepository()} disabled={opening}>Open repository...</button>} /> : activeRepoHydrating ? <Empty icon={<CircleDot size={24} />} title="Loading worktrees..." detail="Reading live worktree identity." /> : activeRepoError ? <Empty icon={<CircleDot size={24} />} title={activeProjectUnavailable ? "Project unavailable" : "Worktrees unavailable"} detail={activeRepoError.message} action={activeProjectUnavailable && activeRepo ? <div className="empty-actions"><button className="secondary-button" type="button" onClick={() => void relistProject(activeRepo.path)}>Re-check</button><button className="danger-button" type="button" onClick={() => setRemoveTarget(activeRepo)}>Remove from WorktreeView</button></div> : undefined} /> : activeRepo.worktrees.length === 0 ? <Empty icon={<CircleDot size={24} />} title="No worktrees" detail="This repository has no linked worktrees." /> : <>
 <div className="overview-filter">
 <div className="overview-tabs" role="tablist" aria-label="Project inventory">{OVERVIEW_TABS.map((tab) => <button key={tab.id} role="tab" type="button" aria-selected={overviewTab === tab.id} className={`overview-tab ${overviewTab === tab.id ? "active" : ""}`} onClick={() => { setOverviewTab(tab.id); setOverviewPage(0); }}>{tab.label}<span className="tab-count">{overviewTabCount(tab.id)}</span>
 </button>)}</div>

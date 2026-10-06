@@ -91,6 +91,15 @@ history for as long as those commits remain in the repository's object
 store. Nothing is deleted to get there; review a worktree once and it
 lands in Archived automatically if it is ever removed outside the app.
 
+If a project's folder itself is gone, the overview shows **Project
+unavailable** instead of the inventory, with what happened in plain
+language: the folder was deleted or moved, or it is no longer a Git
+repository. **Re-check** re-reads the folder (use this after restoring
+or moving it back), and **Remove from WorktreeView** drops the project
+from the app; neither touches anything on disk. Other operation
+failures surface as a banner with a dismiss button, so a stale warning
+never lingers after you have read it.
+
 ## Review working changes
 
 The **changed** chip on a worktree row opens the working-changes review:

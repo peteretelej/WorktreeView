@@ -60,7 +60,7 @@ function select(directory) {
   renameSync(replacement, selector);
 }
 
-const INBOX_TERMINAL_STATES = ["No repositories", "No worktrees", "Worktrees unavailable", "Repositories could not be loaded"];
+const INBOX_TERMINAL_STATES = ["No repositories", "No worktrees", "Project unavailable", "Repositories could not be loaded"];
 
 async function showWorktreeList() {
   // A repository lands on its project overview: the inbox pane showing the
@@ -224,7 +224,9 @@ describe("bundled desktop lifecycle", () => {
     await openSelectedRepository(removed);
     rmSync(removed, { recursive: true });
     await browser.refresh();
-    await expect($("strong=Worktrees unavailable")).toBeDisplayed();
+    await expect($("strong=Project unavailable")).toBeDisplayed();
+    await expect($("button=Re-check")).toBeDisplayed();
+    await expect($("button=Remove from WorktreeView")).toBeDisplayed();
     await expect($("h1=removed-repository")).toBeDisplayed();
 
     const large = path.join(fixtureRoot, "large-search-repository");

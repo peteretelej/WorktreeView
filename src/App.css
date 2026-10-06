@@ -550,6 +550,10 @@ kbd {
 }
 
 .operation-error {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
   margin: 12px 20px 0;
   padding: 8px 10px;
   border: 1px solid var(--danger);
@@ -558,6 +562,11 @@ kbd {
   color: var(--foreground);
   font-size: 11px;
 }
+
+.operation-error-message { min-width: 0; overflow-wrap: anywhere; }
+
+.error-dismiss { flex: none; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.error-dismiss:hover { background: var(--surface-2); color: var(--foreground); }
 
 .inbox-pane {
   min-width: 0;
@@ -1847,6 +1856,8 @@ button:disabled {
   color: var(--foreground);
   font-size: 12px;
 }
+
+.empty-actions { display: flex; gap: 8px; }
 
 .confirm-dialog {
   width: min(420px, calc(100vw - 48px));

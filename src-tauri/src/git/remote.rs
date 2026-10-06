@@ -1,6 +1,6 @@
-use super::exec::{git_execution_error, read_bounded};
+use super::exec::{git_execution_error, is_not_a_repository_diagnostic, read_bounded};
 use super::parse::{parse_framed_output, FragmentOutput};
-use super::validate::{is_not_a_repository_diagnostic, validate_file};
+use super::validate::validate_file;
 use crate::CommandError;
 use std::future::Future;
 use std::pin::Pin;
