@@ -95,6 +95,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     dbus \
     git \
+    libappindicator3-1 \
     libwebkit2gtk-4.1-0 \
     openssh-client \
     openssh-server \

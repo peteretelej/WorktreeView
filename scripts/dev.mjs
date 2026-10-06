@@ -6,6 +6,7 @@
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -47,7 +48,15 @@ while (true) {
 // symlink or colliding with a squatter file in a shared temp location.
 const overlayDir = mkdtempSync(path.join(os.tmpdir(), "worktreeview-dev-"));
 const overlayPath = path.join(overlayDir, "dev-url-overlay.json");
-writeFileSync(overlayPath, JSON.stringify({ build: { devUrl: `http://localhost:${port}` } }));
+// A distinct dev identifier keeps the dev build out of the installed app's
+// single-instance registration (Windows keys that mutex on the identifier),
+// and the per-checkout hash keeps two parallel dev checkouts registered
+// separately while a same-checkout relaunch still focuses the running app.
+const checkoutKey = createHash("sha256").update(root.toLowerCase()).digest("hex").slice(0, 8);
+writeFileSync(overlayPath, JSON.stringify({
+  build: { devUrl: `http://localhost:${port}` },
+  identifier: `com.etelej.worktreeview.dev-${checkoutKey}`,
+}));
 
 if (port !== basePort) {
   console.log(`Port ${basePort} is busy; starting the dev server on ${port}.`);

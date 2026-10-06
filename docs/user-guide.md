@@ -434,6 +434,23 @@ Fetching is always an explicit action;
 focus and the interval never fetch. Nothing else in WorktreeView ever
 touches your Git state.
 
+## Keep it running in the tray
+
+Closing the window never quits WorktreeView: the window hides to the
+system tray (the notification area on Windows, the menu bar on macOS),
+and the agent endpoint keeps serving while it is hidden, so agents can
+deliver reviews after you have moved on. Left-click the tray icon (or
+its **Open WorktreeView** item) to bring the window back, and the icon's
+menu shows the live endpoint at a glance. **Quit WorktreeView** in the
+tray menu is the in-app way to exit and stops the endpoint with the app;
+on macOS the standard app-menu Quit (Cmd+Q) exits too.
+
+Launching the app while it already runs focuses the running window
+instead of starting a second copy, so there is always exactly one
+endpoint owner. To keep agents reached after a reboot without anyone
+opening the app, turn on **Start at login** in Settings > Agent API; it
+defaults to off and only writes the ordinary OS startup entry.
+
 ## Tune the app
 
 Settings has four pages. **General** covers appearance (theme,
@@ -444,6 +461,7 @@ members and agent tokens (see [Work against a server](#work-against-a-server)).
 **Agent API** controls the local endpoint your coding agents
 connect through; saved address and port changes apply through that
 section's Restart action, no app restart needed. The same section
+decides whether the app starts when you log in (off by default) and
 installs the bundled agent skill into the agent skills folders it
 detects on your machine (one click per folder, with an update offer
 whenever a release changes the skill), so your agents follow the

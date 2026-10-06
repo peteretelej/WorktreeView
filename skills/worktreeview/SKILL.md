@@ -173,4 +173,7 @@ agent: `docs/connect-an-agent.md`.
   human takeover) instead.
 - A 401 means the token is wrong, deleted, or rotated: re-read the
   config file (or ask the human for a fresh named token). A connection
-  refusal means the app is not running - ask the human to start it.
+  refusal means the app is not running: stop retrying and tell the human
+  WorktreeView is offline. Starting it once is enough; if this keeps
+  happening, suggest the Start at login toggle in Settings -> Agent API so
+  the app comes up on its own after a reboot.

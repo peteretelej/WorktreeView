@@ -32,6 +32,10 @@ export function createAgentToken(name: string) { return invoke<CreatedAgentToken
 export function deleteAgentToken(id: number) { return invoke<void>("delete_agent_token", { id }); }
 export function getMcpStatus() { return invoke<McpStatus>("get_mcp_status"); }
 export function restartMcp() { return invoke<McpStatus>("restart_mcp"); }
+// Start-at-login is OS registration, not a stored setting: nothing
+// registers at boot, so off is the default on every platform.
+export function getStartAtLogin() { return invoke<boolean>("get_autostart_enabled"); }
+export function setStartAtLogin(enabled: boolean) { return invoke<boolean>("set_autostart_enabled", { enabled }); }
 export function listSkillTargets() { return invoke<SkillTarget[]>("list_skill_targets"); }
 export function installSkillTarget(path: string) { return invoke<SkillTarget>("install_skill_target", { path }); }
 // The persisted write for a dismissed install prompt; the key rides the
@@ -120,6 +124,7 @@ function StatusLine({ status }: { status: McpStatus | null }) {
 function AgentApiSection({ settings, onChange, targets, onInstall }: { settings: Settings; onChange: (next: Settings) => void; targets: SkillTarget[]; onInstall: (path: string) => Promise<SkillTarget> }) {
   const [tokens, setTokens] = useState<AgentToken[]>([]);
   const [status, setStatus] = useState<McpStatus | null>(null);
+  const [startAtLogin, setStartAtLoginState] = useState<boolean | null>(null);
   const [installing, setInstalling] = useState("");
   const [newName, setNewName] = useState("");
   const [revealed, setRevealed] = useState<CreatedAgentToken | null>(null);
@@ -131,6 +136,7 @@ function AgentApiSection({ settings, onChange, targets, onInstall }: { settings:
     let mounted = true;
     listAgentTokens().then((loaded) => { if (mounted) setTokens(loaded); }).catch((caught) => { if (mounted) setError(errorMessageOf(caught)); });
     getMcpStatus().then((loaded) => { if (mounted) setStatus(loaded); }).catch((caught) => { if (mounted) setError(errorMessageOf(caught)); });
+    getStartAtLogin().then((enabled) => { if (mounted) setStartAtLoginState(enabled); }).catch((caught) => { if (mounted) setError(errorMessageOf(caught)); });
     return () => { mounted = false; };
   }, []);
 
@@ -186,6 +192,15 @@ function AgentApiSection({ settings, onChange, targets, onInstall }: { settings:
     }
   }
 
+  async function toggleStartAtLogin(next: boolean) {
+    setError("");
+    try {
+      setStartAtLoginState(await setStartAtLogin(next));
+    } catch (caught) {
+      setError(errorMessageOf(caught));
+    }
+  }
+
   const liveAddress = `http://${status?.address ?? settings.mcp_listen_address}:${status?.port ?? settings.mcp_port}/`;
   return <>
     <section id="settings-mcp" className="settings-section" aria-labelledby="settings-mcp-heading">
@@ -193,6 +208,10 @@ function AgentApiSection({ settings, onChange, targets, onInstall }: { settings:
       <div className="settings-row">
         <div className="settings-row-copy"><strong>Agent endpoint</strong><span>Let coding agents deliver reviews, comment, and ping for refresh.</span></div>
         <SettingSwitch checked={settings.mcp_enabled} label="Agent endpoint" onChange={(mcp_enabled) => onChange({ ...settings, mcp_enabled })} />
+      </div>
+      <div className="settings-row">
+        <div className="settings-row-copy"><strong>Start at login</strong><span>Register the app to start when you log in so agents reach the endpoint after a reboot without opening it; off by default. Closing the window already keeps the app running in the tray.</span></div>
+        <SettingSwitch checked={startAtLogin === true} label="Start at login" onChange={(next) => void toggleStartAtLogin(next)} />
       </div>
       <div className="settings-row">
         <div className="settings-row-copy"><strong>Listen address</strong><span>Beyond 127.0.0.1 the token is the real auth boundary.</span></div>

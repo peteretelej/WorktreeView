@@ -23,27 +23,34 @@ mod transport;
 use commands::{
     add_server_project, create_agent_token, create_comment, create_review_request,
     delete_agent_token, delete_comment, delete_server_connection, describe_commit, edit_comment,
-    fetch_project, fetch_review_objects, get_branch_inventory, get_mcp_status, get_portal_thread,
-    get_settings, install_skill_target, list_agent_tokens, list_attention, list_comments,
-    list_commits, list_portal_activity, list_portal_reviews, list_portal_threads, list_refs,
-    list_repos, list_requests, list_review_changes, list_server_connections, list_skill_targets,
-    list_submissions, list_surfaces, list_worktree_status, list_worktrees, mark_activity_seen,
+    fetch_project, fetch_review_objects, get_autostart_enabled, get_branch_inventory,
+    get_mcp_status, get_portal_thread, get_settings, install_skill_target, list_agent_tokens,
+    list_attention, list_comments, list_commits, list_portal_activity,
+    list_portal_reviews, list_portal_threads, list_refs, list_repos, list_requests,
+    list_review_changes, list_server_connections, list_skill_targets, list_submissions,
+    list_surfaces, list_worktree_status, list_worktrees, mark_activity_seen,
     match_comment_anchors, open_log_dir, open_remote_repo, open_repo, open_review_file,
     read_review_file, read_review_file_bytes, read_review_patch, remove_repo,
     remove_server_project, reply_comment, restart_mcp, save_server_connection, search_portal,
-    set_comment_resolved, set_repo_pinned, set_server_project_pinned, set_settings,
-    set_skill_prompt, set_surface_pinned, update_review_request,
+    set_autostart_enabled, set_comment_resolved, set_repo_pinned, set_server_project_pinned,
+    set_settings, set_skill_prompt, set_surface_pinned, update_review_request,
 };
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 struct AppState {
     pool: SqlitePool,
 }
+
+// The tray's status item is the one place outside Settings that mirrors the
+// live listener; boot and the restart command refresh its text.
+pub(crate) struct TrayStatusItem(pub(crate) MenuItem<tauri::Wry>);
 
 #[derive(Debug, Serialize)]
 pub struct CommandError {
@@ -249,6 +256,13 @@ fn set_aside_store(db_path: &Path) -> std::io::Result<()> {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(
+            // Registered first: a second launch hands itself over to the
+            // running process here (Windows keys the handover mutex on the
+            // app identifier), which is what keeps the endpoint owner to
+            // exactly one process.
+            tauri_plugin_single_instance::init(|app, _args, _cwd| show_main_window(app)),
+        )
+        .plugin(
             // The file log is the support artifact: capped rolling files in
             // the app log dir, info level, never token secrets, note or
             // comment bodies, or Authorization headers.
@@ -264,6 +278,10 @@ pub fn run() {
         )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             initialize(app).map_err(|error| {
                 // Setup errors surface only as a stderr panic, which a
@@ -276,8 +294,25 @@ pub fn run() {
                     .blocking_show();
                 error
             })?;
+            // The tray is a convenience surface; a tray-less environment
+            // (headless test session, stripped desktop) still runs and
+            // serves the endpoint, and Quit stays reachable there only by
+            // stopping the process (on macOS the default app menu offers
+            // it regardless).
+            if let Err(error) = build_tray(app) {
+                log::warn!("tray unavailable, the app keeps running without it: {error}");
+            }
             log::info!("worktreeview {} started", app.package_info().version);
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Every close path hides instead of exiting: the loopback
+            // endpoint must outlive the last window. Exit goes through the
+            // tray menu's Quit (or the macOS app menu).
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             open_repo,
@@ -312,6 +347,8 @@ pub fn run() {
             open_log_dir,
             get_settings,
             set_settings,
+            get_autostart_enabled,
+            set_autostart_enabled,
             list_server_connections,
             save_server_connection,
             delete_server_connection,
@@ -353,6 +390,59 @@ pub fn run() {
             }
         }
     });
+}
+
+// Reveal and raise the main window; shared by the tray click, the tray
+// menu's Open item, and second-launch forwarding.
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+// The tray is the resident-mode control surface: Open reveals the hidden
+// window, the disabled status item mirrors the live listener, and Quit is
+// the tray's exit (alongside the macOS app menu). Built after initialize
+// so the status handle exists; a failure only costs the surface, never the
+// endpoint.
+fn build_tray(app: &tauri::App) -> Result<(), tauri::Error> {
+    let status = app.state::<transport::McpStatusHandle>();
+    let open = MenuItem::with_id(app, "open", "Open WorktreeView", true, None::<&str>)?;
+    let status_item = MenuItem::with_id(
+        app,
+        "agent-api-status",
+        transport::tray_status_line(&status.lock_status()),
+        false,
+        None::<&str>,
+    )?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit WorktreeView", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &status_item, &separator, &quit])?;
+    TrayIconBuilder::with_id("main")
+        .icon(app.default_window_icon().expect("bundled window icon").clone())
+        .tooltip("WorktreeView")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    app.manage(TrayStatusItem(status_item));
+    Ok(())
 }
 
 // Dev builds run from their own checkout's target directory, so the binary's

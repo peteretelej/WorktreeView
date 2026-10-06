@@ -176,7 +176,14 @@ normalized domain data through narrow, typed Tauri commands.
   a bind failure is a normal condition that updates a shared status
   handle the `get_mcp_status` command reads and the Settings Agent API
   section shows, never a startup failure, and it writes no config
-  file or default token for a dead endpoint. Bearer authentication is
+  file or default token for a dead endpoint. The process is resident:
+  closing the last window hides it to the tray (the tray menu's Quit is
+  the in-app exit, alongside the standard macOS app-menu Quit) so the
+  endpoint outlives the UI, and the
+  single-instance plugin forwards a second launch to the running process
+  (dev builds carry a distinct identifier via the dev config overlay, so
+  a dev checkout and the installed release register separately); exactly
+  one process owns the endpoint. Bearer authentication is
   evaluated only here, once per request: the presented secret is hashed
   and matched against `agent_tokens` first, then `user_tokens`, so every
   request resolves to exactly one actor kind and the resolved identity

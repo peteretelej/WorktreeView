@@ -196,6 +196,18 @@ impl McpStatusHandle {
     }
 }
 
+// One summary line for the tray menu, the one listener surface that cannot
+// read the JSON status; boot and the restart command refresh it.
+pub(crate) fn tray_status_line(status: &ListenerStatus) -> String {
+    if !status.enabled {
+        "Agent API is off".into()
+    } else if status.running {
+        format!("Agent API at {}:{}", status.address, status.port)
+    } else {
+        "Agent API not running".into()
+    }
+}
+
 // What the listener needs to bind: everything comes from Settings.
 #[derive(Debug, Clone)]
 pub(crate) struct ListenerConfig {

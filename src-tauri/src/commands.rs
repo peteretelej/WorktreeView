@@ -54,6 +54,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Manager;
+use tauri_plugin_autostart::ManagerExt;
 
 // The backend-owned freshness taxonomy for remote project loads. A local
 // load serializes exactly as before; a remote load carries the explicit
@@ -691,6 +692,7 @@ pub(crate) async fn get_mcp_status(
 // returned status is the post-restart view for the Settings section.
 #[tauri::command]
 pub(crate) async fn restart_mcp(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     deps: tauri::State<'_, TransportDeps>,
     status: tauri::State<'_, McpStatusHandle>,
@@ -702,9 +704,40 @@ pub(crate) async fn restart_mcp(
         address: settings.mcp_listen_address.clone(),
         port: settings.mcp_port,
     };
-    restart(state.pool.clone(), &deps, config, (*status).clone(), &listener)
+    let view = restart(state.pool.clone(), &deps, config, (*status).clone(), &listener)
         .await
-        .map_err(|message| CommandError::new("transport", message))
+        .map_err(|message| CommandError::new("transport", message))?;
+    // Best effort: the tray's status line mirrors the live listener, and
+    // no tray means nothing to refresh.
+    if let Some(item) = app.try_state::<crate::TrayStatusItem>() {
+        let _ = item.0.set_text(crate::transport::tray_status_line(&view));
+    }
+    Ok(view)
+}
+
+// Start-at-login is an OS registration, not stored app state: nothing
+// registers at boot, so off is the default on every platform and the
+// toggle only ever writes the user's explicit choice.
+#[tauri::command]
+pub(crate) fn get_autostart_enabled(app: tauri::AppHandle) -> Result<bool, CommandError> {
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|error| CommandError::new("autostart", format!("Could not read start-at-login: {error}")))
+}
+
+#[tauri::command]
+pub(crate) fn set_autostart_enabled(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<bool, CommandError> {
+    let autostart = app.autolaunch();
+    let outcome = if enabled { autostart.enable() } else { autostart.disable() };
+    outcome.map_err(|error| {
+        CommandError::new("autostart", format!("Could not update start-at-login: {error}"))
+    })?;
+    autostart
+        .is_enabled()
+        .map_err(|error| CommandError::new("autostart", format!("Could not read start-at-login: {error}")))
 }
 
 // The skill-install commands are the app's one write surface outside its
