@@ -97,14 +97,10 @@ jobs:
             Windows SmartScreen and macOS Gatekeeper warn on first launch;
             see CONTRIBUTING.md in case you'd prefer to build from source.
 
-            Also on [Microsoft Store](https://apps.microsoft.com/detail/9PM1BN0JZDB3),
-            though it may be a few versions behind.
-
-            Tip for upgrading on macOS: quit a running copy first (its menu
-            bar icon > Quit), then install the new dmg. An older copy keeps
-            running until quit, so starting the new one while it lives would
-            just bring the old window forward. Windows installers close the
-            running app for you.
+            - Also on [Microsoft Store](https://apps.microsoft.com/detail/9PM1BN0JZDB3),
+              though it may be a few versions behind.
+            - macOS upgrade: quit the running copy first (menu bar icon >
+              Quit), or the new launch just brings the old one forward.
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true
