@@ -263,6 +263,12 @@ normalized domain data through narrow, typed Tauri commands.
   one write surface outside its home. The companion `set_skill_prompt`
   command records the dismissed prompt state under the same sole-writer
   rule as the activity watermark.
+- `updates.rs`: the user-driven updater over `tauri-plugin-updater`
+  (EdDSA-signed artifacts from the GitHub releases endpoint). One check
+  flow serves both surfaces, the Settings About row (which mirrors the
+  `update-status` event) and a tray menu item (which reports through
+  dialogs); checks only run on request, downloads install in place, and
+  Store/MSIX installs are detected and left to the Store.
 
 ## Git as the semantic authority
 

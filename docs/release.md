@@ -50,7 +50,10 @@ GitHub Actions runs two workflows:
   it only leaves development builds reporting the previous version.
 
 Release builds are unsigned: Windows shows a
-SmartScreen warning, and macOS requires right-click Open (or
-`xattr -cr /Applications/WorktreeView.app`) on first launch. There is no
-updater channel yet, so installs upgrade by downloading the next
-release.
+SmartScreen warning, and macOS requires the System Settings "Open Anyway"
+flow on first launch (macOS 15+ removed the right-click Open bypass).
+Installed apps can also update themselves: every release publishes a
+signed updater manifest, and Settings > About (or the tray menu) checks
+that endpoint, downloads, and applies the new version in place. The
+channel carries no Windows Store or MSIX updates; those installs take
+their updates from the Store.

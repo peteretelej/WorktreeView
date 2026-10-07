@@ -23,8 +23,9 @@ the only Git engine; the rationale lives in
 - `src-tauri/src/`: Rust backend. `commands.rs` is the thin typed IPC
   surface; `git/` spawns and parses the CLI (`exec.rs`, `validate.rs`,
   `filters.rs`, `parse.rs`); `review.rs`, `reviews.rs`, `overview.rs`,
-  `retrospection.rs`, `cache.rs`, `store.rs`, `agents.rs`, and
-  `transport.rs` (the app's one inbound network surface) do the rest.
+  `retrospection.rs`, `cache.rs`, `store.rs`, `agents.rs`,
+  `transport.rs` (the app's one inbound network surface), and
+  `updates.rs` (the user-driven updater) do the rest.
   The module map lives in [docs/architecture.md](docs/architecture.md).
 - `src-tauri/migrations/`: append-only sqlx migrations.
 - `e2e/`: headless desktop e2e suite, run in Docker.

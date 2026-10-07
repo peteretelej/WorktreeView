@@ -3,6 +3,17 @@
   "productName": "WorktreeView",
   "version": "0.6.0",
   "identifier": "com.etelej.worktreeview",
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU0OTRERjVDRkEwMTUyOUYKUldTZlVnSDZYTitVNUV6S3luMStyR2lIbnE4QW1yUXhmKzR4ejdWU0FXcU9DSTlnQUF2WUowYWsK",
+      "endpoints": [
+        "https://github.com/peteretelej/WorktreeView/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "build": {
     "beforeDevCommand": "npm run dev:web",
     "devUrl": "http://localhost:1420",
@@ -30,6 +41,7 @@
     }
   },
   "bundle": {
+    "createUpdaterArtifacts": true,
     "active": true,
     "targets": "all",
     "icon": [

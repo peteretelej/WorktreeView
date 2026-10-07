@@ -87,6 +87,8 @@ jobs:
         timeout-minutes: 50
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
           releaseName: WorktreeView v__VERSION__
@@ -99,13 +101,15 @@ jobs:
 
             - Also on [Microsoft Store](https://apps.microsoft.com/detail/9PM1BN0JZDB3),
               though it may be a few versions behind.
-            - macOS upgrade: quit the running copy first (menu bar icon >
-              Quit), or the new launch just brings the old one forward.
+            - Installed apps can update themselves from Settings > About
+              (or the tray menu), so upgrading is no longer a manual
+              download.
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true
-          uploadUpdaterJson: false
-          uploadUpdaterSignatures: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
 
       - name: Build server binary

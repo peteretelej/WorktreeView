@@ -19,6 +19,7 @@ mod store;
 #[cfg(test)]
 mod testutil;
 mod transport;
+mod updates;
 
 use commands::{
     add_server_project, create_agent_token, create_comment, create_review_request,
@@ -43,6 +44,7 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use updates::{check_for_updates, get_update_status, install_update, restart_app};
 
 struct AppState {
     pool: SqlitePool,
@@ -282,6 +284,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             initialize(app).map_err(|error| {
                 // Setup errors surface only as a stderr panic, which a
@@ -349,6 +352,10 @@ pub fn run() {
             set_settings,
             get_autostart_enabled,
             set_autostart_enabled,
+            get_update_status,
+            check_for_updates,
+            install_update,
+            restart_app,
             list_server_connections,
             save_server_connection,
             delete_server_connection,
@@ -417,9 +424,10 @@ fn build_tray(app: &tauri::App) -> Result<(), tauri::Error> {
         false,
         None::<&str>,
     )?;
+    let check_updates = MenuItem::with_id(app, "check-updates", "Check for updates", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit WorktreeView", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &status_item, &separator, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &status_item, &separator, &check_updates, &quit])?;
     TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().expect("bundled window icon").clone())
         .tooltip("WorktreeView")
@@ -427,6 +435,7 @@ fn build_tray(app: &tauri::App) -> Result<(), tauri::Error> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main_window(app),
+            "check-updates" => updates::check_from_tray(app.clone()),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -597,6 +606,10 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
     app.manage(deps);
     app.manage(status);
     app.manage(transport::ListenerOwner(tokio::sync::Mutex::new(endpoint)));
+    app.manage(updates::UpdateState(std::sync::Mutex::new(
+        updates::UpdateStatus::new("idle"),
+    )));
+    app.manage(updates::PendingUpdate(std::sync::Mutex::new(None)));
     Ok(())
 }
 

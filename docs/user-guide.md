@@ -441,9 +441,10 @@ system tray (the notification area on Windows, the menu bar on macOS),
 and the agent endpoint keeps serving while it is hidden, so agents can
 deliver reviews after you have moved on. Left-click the tray icon (or
 its **Open WorktreeView** item) to bring the window back, and the icon's
-menu shows the live endpoint at a glance. **Quit WorktreeView** in the
-tray menu is the in-app way to exit and stops the endpoint with the app;
-on macOS the standard app-menu Quit (Cmd+Q) exits too.
+menu shows the live endpoint at a glance alongside **Check for
+updates**. **Quit WorktreeView** in the tray menu is the in-app way to
+exit and stops the endpoint with the app; on macOS the standard
+app-menu Quit (Cmd+Q) exits too.
 
 Launching the app while it already runs focuses the running window
 instead of starting a second copy, so there is always exactly one
@@ -467,8 +468,9 @@ detects on your machine (one click per folder, with an update offer
 whenever a release changes the skill), so your agents follow the
 documented workflows; see [connect-an-agent.md](connect-an-agent.md).
 **About** names the app
-and its version (the same value agents see from the endpoint), and its
-Logs row opens the diagnostic log folder.
+and its version (the same value agents see from the endpoint), checks
+for updates on request, and its Logs row opens the diagnostic log
+folder.
 
 ## Work against a server
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft } from "lucide-react";
 import { ZOOM_LEVELS, snapZoom } from "./zoom.ts";
 import { connectionLabel, call, probeConnection, type RemoteSource, type ServerConnectionRow } from "./remote.ts";
@@ -36,6 +37,14 @@ export function restartMcp() { return invoke<McpStatus>("restart_mcp"); }
 // registers at boot, so off is the default on every platform.
 export function getStartAtLogin() { return invoke<boolean>("get_autostart_enabled"); }
 export function setStartAtLogin(enabled: boolean) { return invoke<boolean>("set_autostart_enabled", { enabled }); }
+
+// The updater flow is event-driven: Rust owns the phase machine and the
+// webview mirrors `update-status` events plus this one-shot read.
+export type UpdateStatus = { phase: "idle" | "checking" | "up_to_date" | "managed_by_store" | "available" | "downloading" | "ready" | "failed"; version: string | null; notes: string | null; received: number | null; total: number | null; message: string | null };
+export function getUpdateStatus() { return invoke<UpdateStatus>("get_update_status"); }
+export function checkForUpdates() { return invoke<void>("check_for_updates"); }
+export function installUpdate() { return invoke<void>("install_update"); }
+export function restartApp() { return invoke<void>("restart_app"); }
 export function listSkillTargets() { return invoke<SkillTarget[]>("list_skill_targets"); }
 export function installSkillTarget(path: string) { return invoke<SkillTarget>("install_skill_target", { path }); }
 // The persisted write for a dismissed install prompt; the key rides the
@@ -552,10 +561,13 @@ function ServerManagementSection({ connection }: { connection: ServerConnectionR
 function AboutSection() {
   const [version, setVersion] = useState("");
   const [logError, setLogError] = useState("");
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
   useEffect(() => {
     let mounted = true;
     getVersion().then((loaded) => { if (mounted) setVersion(loaded); }).catch(() => { /* the rest of the page still renders */ });
-    return () => { mounted = false; };
+    getUpdateStatus().then((loaded) => { if (mounted) setUpdate(loaded); }).catch(() => { /* ditto */ });
+    const unlisten = listen<UpdateStatus>("update-status", (event) => { if (mounted) setUpdate(event.payload); });
+    return () => { mounted = false; void unlisten.then((off) => off()); };
   }, []);
   async function openLogs() {
     setLogError("");
@@ -565,6 +577,25 @@ function AboutSection() {
       setLogError(errorMessageOf(caught));
     }
   }
+  function runUpdateAction() {
+    if (!update) return;
+    setLogError("");
+    const action = update.phase === "available" ? installUpdate() : update.phase === "ready" ? restartApp() : checkForUpdates();
+    void action.catch((caught) => setLogError(errorMessageOf(caught)));
+  }
+  const phase = update?.phase ?? "idle";
+  const updateText = phase === "checking" ? "Checking for updates..."
+    : phase === "up_to_date" ? "You're up to date."
+    : phase === "managed_by_store" ? "Updates are managed by the Microsoft Store."
+    : phase === "available" ? `Version ${update?.version} is available.`
+    : phase === "downloading" ? `Downloading update${update?.total ? ` (${Math.round((100 * (update.received ?? 0)) / update.total)}%)` : "..."}`
+    : phase === "ready" ? `Version ${update?.version} is installed; restart to finish.`
+    : phase === "failed" ? update?.message ?? "The update check failed."
+    : "Check for a new version and install it from here.";
+  const updateAction = phase === "available" ? "Download and install"
+    : phase === "ready" ? "Restart to update"
+    : phase === "checking" || phase === "downloading" ? "Working..."
+    : "Check for updates";
   return <section id="settings-about" className="settings-section" aria-labelledby="settings-about-heading">
     <h2 id="settings-about-heading">About</h2>
     <div className="settings-row">
@@ -573,6 +604,10 @@ function AboutSection() {
     <div className="settings-row">
       <div className="settings-row-copy"><strong>Version</strong><span>Also reported to agents as the endpoint server version.</span></div>
       <code>{version || "unknown"}</code>
+    </div>
+    <div className="settings-row">
+      <div className="settings-row-copy"><strong>Updates</strong><span>{updateText}</span></div>
+      <button className="settings-select settings-button" type="button" disabled={phase === "checking" || phase === "downloading"} onClick={runUpdateAction}>{updateAction}</button>
     </div>
     <div className="settings-row">
       <div className="settings-row-copy"><strong>Logs</strong><span>Small rolling diagnostic files; attach them when reporting an issue. Secrets, notes, and review text are never written to them.</span></div>
