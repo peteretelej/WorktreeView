@@ -588,7 +588,14 @@ export function PaneHandle({ onWidth, onCommit }: { onWidth: (width: number) => 
   };
   return <div ref={ref} className={`pane-handle${dragging ? " dragging" : ""}`} role="separator" aria-orientation="vertical" aria-label="Resize the comments pane" tabIndex={0}
     onPointerDown={(event) => { setDragging(true); ref.current?.setPointerCapture(event.pointerId); }}
-    onPointerMove={(event) => { if (dragging) onWidth(clampWidth(window.innerWidth - event.clientX)); }}
+    onPointerMove={(event) => {
+      // Hover moves arrive here too: a drag whose pointerup was lost
+      // (capture dropped, window switched) must end itself on the first
+      // buttonless move, or hovering keeps resizing the pane.
+      if (dragging && event.buttons === 0) { setDragging(false); onCommit(currentWidth()); return; }
+      if (dragging) onWidth(clampWidth(window.innerWidth - event.clientX));
+    }}
+    onPointerCancel={() => { if (dragging) { setDragging(false); onCommit(currentWidth()); } }}
     onPointerUp={(event) => { if (!dragging) return; setDragging(false); onCommit(currentWidth()); event.preventDefault(); }}
     onKeyDown={(event) => {
       const step = event.shiftKey ? 64 : 16;
