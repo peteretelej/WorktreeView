@@ -119,6 +119,15 @@ test("degraded keys come from the identity's recorded refs", () => {
   assert.equal(degradedReviewKey({ ...identity, base: recordedBase, target: { kind: "ref", name: "refs/remotes/origin/feature" } }), null);
 });
 
+test("degraded keys accept the empty-tree spellings for all-files surfaces", () => {
+  // Canvas documents pin at the reserved literal; the stored row keys on it
+  // directly, and a computed hash spelling lands on the same row.
+  const allFiles = { ...identity, base: "empty-tree", target: { kind: "commit", sha: "c".repeat(40), parents: [], defaultBaseAncestor: false } as ReviewIdentity["target"], recordedKey: { targetKey: "c".repeat(40), targetKind: "head" as const } };
+  assert.deepEqual(degradedReviewKey(allFiles), { repoPath: "/repo", baseSha: "empty-tree", targetKey: "c".repeat(40), targetKind: "head" });
+  const byHash = degradedReviewKey({ ...allFiles, base: "4b825dc642cb6eb9a060e54bf8d69288fbee4904" });
+  assert.equal(byHash?.baseSha, "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+});
+
 test("logical side flips only under reversal", () => {
   assert.equal(logicalSide("LEFT", false), "LEFT");
   assert.equal(logicalSide("RIGHT", false), "RIGHT");
