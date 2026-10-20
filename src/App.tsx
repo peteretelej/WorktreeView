@@ -1328,12 +1328,13 @@ function App() {
   function changePaneVisibility(next: { files: boolean; comments: boolean }) { void updateSettings({ ...settings, files_pane_visible: next.files, comments_pane_visible: next.comments }); }
   function changePaneWidth(width: number) {
     const clamped = Math.min(MAX_PANE_WIDTH, Math.max(MIN_PANE_WIDTH, Math.round(width)));
-    void updateSettings({ ...settings, [paneTab === "canvas" ? "canvas_pane_width" : "comments_pane_width"]: clamped });
-    setPaneDragWidth(null);
+    // The drag width stays applied until the persisted setting lands:
+    // clearing it here would snap the pane back to the stale width for
+    // several frames before the new one arrives.
+    void updateSettings({ ...settings, [paneTab === "canvas" ? "canvas_pane_width" : "comments_pane_width"]: clamped }).then(() => setPaneDragWidth(null));
   }  function commitPaneWidth(width: number) { changePaneWidth(width); }
   function resetPaneWidth() {
-    void updateSettings({ ...settings, [paneTab === "canvas" ? "canvas_pane_width" : "comments_pane_width"]: paneTab === "canvas" ? defaultSettings.canvas_pane_width : defaultSettings.comments_pane_width });
-    setPaneDragWidth(null);
+    void updateSettings({ ...settings, [paneTab === "canvas" ? "canvas_pane_width" : "comments_pane_width"]: paneTab === "canvas" ? defaultSettings.canvas_pane_width : defaultSettings.comments_pane_width }).then(() => setPaneDragWidth(null));
   }
   async function refreshCanvasDocs(repoPath: string) {
     try {
