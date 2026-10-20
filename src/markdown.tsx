@@ -18,12 +18,23 @@ import { parseCodeRef, type CodeRef } from "./comments.ts";
 
 export type { CodeRef };
 
+// Rendered diagrams are cached per theme+code: the canvas surface re-renders
+// documents on unrelated state updates, and re-running the async mermaid
+// render would flash the placeholder and churn the SVG each time.
+const mermaidCache = new Map<string, string>();
+
 function MermaidBlock({ code }: { code: string }) {
   const [svg, setSvg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const figureId = useRef(`mermaid-${Math.random().toString(36).slice(2)}`);
   const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "default";
   useEffect(() => {
+    const cached = mermaidCache.get(`${theme}:${code}`);
+    if (cached) {
+      setSvg(cached);
+      setFailed(false);
+      return;
+    }
     let cancelled = false;
     setSvg(null);
     setFailed(false);
@@ -34,6 +45,7 @@ function MermaidBlock({ code }: { code: string }) {
         const mermaid = (await import("mermaid")).default;
         mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme });
         const { svg: rendered } = await mermaid.render(figureId.current, code);
+        mermaidCache.set(`${theme}:${code}`, rendered);
         if (!cancelled) setSvg(rendered);
       } catch {
         if (!cancelled) setFailed(true);
