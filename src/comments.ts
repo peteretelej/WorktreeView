@@ -77,6 +77,14 @@ export function reviewKeyOf(identity: ReviewIdentity, index: ReviewIndexSummary)
   return { repoPath: identity.repoPath, baseSha: index.base_sha, targetKey: index.target_sha, targetKind: "head" };
 }
 
+// The store keys the reserved literal; the loaded index and event payloads
+// can still carry a computed empty-tree hash (the index reports resolved
+// SHAs). Both spellings must compare equal so live refreshes and doc
+// surfaces match all-files reviews.
+export function canonicalBaseSha(base: string): string {
+  return base === "4b825dc642cb6eb9a060e54bf8d69288fbee4904" || base === "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321" ? "empty-tree" : base;
+}
+
 // When the index cannot resolve (moved project, gone surface), a review
 // opened from stored rows still carries its recorded refs: a full-SHA base
 // is its own resolution, worktree targets key by path, and head targets by

@@ -443,7 +443,7 @@ fn tool_descriptors() -> Value {
     let review_identity = || {
         json!({
             "repo_path": path_arg("Exact repository path as listed by list_repos."),
-            "base_sha": path_arg("Resolved base SHA the review keys on."),
+            "base_sha": path_arg("The review base: a resolved base SHA, or the literal \"empty-tree\" for all-files reviews."),
             "target_key": path_arg(
                 "Worktree path for target_kind \"worktree\"; resolved target SHA for \"head\".",
             ),
@@ -545,7 +545,7 @@ fn tool_descriptors() -> Value {
             schema(
                 json!({
                     "repo_path": path_arg("Exact repository path as listed by list_repos."),
-                    "base_sha": path_arg("Resolved base SHA the review keys on."),
+                    "base_sha": path_arg("The review base: a resolved base SHA, or the literal \"empty-tree\" for all-files reviews."),
                     "target_key": path_arg(
                         "Worktree path for target_kind \"worktree\"; resolved target SHA for \"head\".",
                     ),
@@ -643,7 +643,7 @@ fn tool_descriptors() -> Value {
             schema(
                 json!({
                     "repo_path": path_arg("Exact repository path as listed by list_repos."),
-                    "base_sha": path_arg("Resolved base SHA the review keys on."),
+                    "base_sha": path_arg("The review base: a resolved base SHA, or the literal \"empty-tree\" for all-files reviews."),
                     "target_key": path_arg(
                         "Worktree path for target_kind \"worktree\"; resolved target SHA for \"head\".",
                     ),
@@ -685,7 +685,7 @@ fn tool_descriptors() -> Value {
             schema(
                 json!({
                     "repo_path": path_arg("Exact repository path as listed by list_repos."),
-                    "base_sha": path_arg("Resolved base SHA the review keys on."),
+                    "base_sha": path_arg("The review base: a resolved base SHA, or the literal \"empty-tree\" for all-files reviews."),
                     "target_key": path_arg(
                         "Worktree path for target_kind \"worktree\"; resolved target SHA for \"head\".",
                     ),

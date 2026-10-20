@@ -1,4 +1,5 @@
 use crate::events;
+use crate::git::canonical_base_sha;
 use crate::store::now_millis;
 use crate::transport::{RequestChange, RequestChangeSink};
 use crate::CommandError;
@@ -354,6 +355,9 @@ pub(crate) async fn create_request_in_pool(
     actor: &Actor,
     notify: &RequestChangeSink,
 ) -> Result<ReviewRequest, CommandError> {
+    // Requests key on the reserved literal so all spellings of the
+    // empty-tree base land on the same identity as reviews do.
+    let base_sha = canonical_base_sha(base_sha);
     validate_identity(target_key, target_kind)?;
     validate_draft(draft)?;
     validate_reviewers_exist(pool, &draft.reviewers).await?;
@@ -511,6 +515,7 @@ pub(crate) async fn announce_review_in_pool(
     actor: &Actor,
     notify: &RequestChangeSink,
 ) -> Result<ReviewRequest, CommandError> {
+    let base_sha = canonical_base_sha(base_sha);
     validate_identity(target_key, target_kind)?;
     if let Some(note) = note {
         validate_request_note(note)?;
@@ -890,6 +895,7 @@ pub(crate) async fn observe_submission_in_pool(
     submitter_token_id: Option<i64>,
     notify: &RequestChangeSink,
 ) -> Result<(), CommandError> {
+    let base_sha = canonical_base_sha(base_sha);
     let open: Vec<ReviewRequest> = sqlx::query(REQUEST_OPEN_ON_IDENTITY)
         .bind(repo_path)
         .bind(base_sha)
@@ -1056,6 +1062,7 @@ pub(crate) async fn list_requests_in_pool(
     target_kind: &str,
 ) -> Result<Vec<RequestRow>, CommandError> {
     let now = now_millis();
+    let base_sha = canonical_base_sha(base_sha);
     let rows = sqlx::query(IDENTITY_REQUESTS_QUERY)
         .bind(repo_path)
         .bind(base_sha)
@@ -3103,6 +3110,22 @@ mod tests {
         create_request_in_pool(pool, REPO, base, KEY, KIND, &draft(head), actor, &noop_notify())
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn request_ids_collapse_empty_tree_spellings() {
+        let pool = test_pool().await;
+        seed_repo(&pool, REPO).await;
+        let actor = Actor::Human("you".into());
+        let by_hash = create_on(
+            &pool,
+            &actor,
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "head-1",
+        )
+        .await;
+        let by_literal = create_on(&pool, &actor, "empty-tree", "head-1").await;
+        assert_eq!(by_hash.id, by_literal.id);
     }
 
     async fn observe_on(pool: &SqlitePool, base: &str, blocking: bool) {

@@ -18,6 +18,7 @@ import { ATTENTION_TABS, attentionAge, attentionPreview, attentionRows, attentio
 import { normalizeReviewsSearch, normalizeThreadsText, threadIdentityRef, type PortalActivityEvent, type PortalReviewRow, type PortalSearchMatches, type PortalThreadGroup, type ReviewIdentityRef } from "./portal.ts";
 import { PortalActivityTab, PortalReviewsTab, PortalThreadDetail, PortalThreadsTab, useNow, usePaneWidth, type PortalActivityPayload, type PortalReviewsPayload, type PortalThreadPayload, type PortalThreadsPayload } from "./portal.tsx";
 import { useReviewComments, canvasDocMatches, canvasDocTitle, type CanvasDocRow, type CanvasPaneContext, type PaneTab } from "./comments.tsx";
+import { canonicalBaseSha } from "./comments.ts";
 import type { CodeRef } from "./markdown.tsx";
 import { copyText } from "./clipboard";
 import { BrandMark, CopyButton, Empty, Pager, TopBar, UpdatedStamp } from "./ui";
@@ -176,7 +177,7 @@ function App() {
   // Does the open review surface carry the document's pinned revision?
   function reviewIsDocSurface(doc: CanvasDocRow): boolean {
     if (!reviewLocation || reviewLocation.identity.repoPath !== doc.repo_path || !reviewIndex || reviewIndex.error) return false;
-    if (reviewIndex.base_sha !== doc.base_sha) return false;
+    if (canonicalBaseSha(reviewIndex.base_sha) !== canonicalBaseSha(doc.base_sha)) return false;
     const target = reviewLocation.identity.target;
     if (doc.target_kind === "worktree") return target.kind === "worktree" && target.worktree.path === doc.target_key;
     return target.kind === "commit" && target.sha === doc.target_key;
@@ -452,7 +453,7 @@ function App() {
       // A delivery for the review the user is reading refreshes it live:
       // the tick drives the open review's stream and submissions strip.
       const key = commentsRef.current.key;
-      if (key && key.repoPath === arrival.repo_path && key.baseSha === arrival.base_sha && key.targetKey === arrival.target_key && key.targetKind === arrival.target_kind) {
+      if (key && key.repoPath === arrival.repo_path && key.baseSha === canonicalBaseSha(arrival.base_sha) && key.targetKey === arrival.target_key && key.targetKind === arrival.target_kind) {
         setReviewRefreshTick((tick) => tick + 1);
       }
     });
@@ -607,7 +608,7 @@ function App() {
       // Canvas documents are repo-scoped comments, so any comment change in
       // the open repo also refreshes the document library.
       void refreshCanvasDocs(change.repo_path);
-      if (!key || key.repoPath !== change.repo_path || key.baseSha !== change.base_sha || key.targetKey !== change.target_key || key.targetKind !== change.target_kind) return;
+      if (!key || key.repoPath !== change.repo_path || key.baseSha !== canonicalBaseSha(change.base_sha) || key.targetKey !== change.target_key || key.targetKind !== change.target_kind) return;
       void commentsRef.current.refresh();
     });
     return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
@@ -659,7 +660,7 @@ function App() {
         const known = (repoPath: string) => projects.some((project) => project.repo_path === repoPath);
         const openKeyMatches = (repoPath: string, baseSha: string, targetKey: string, targetKind: string) => {
           const key = commentsRef.current.key;
-          return key !== null && key.repoPath === repoPath && key.baseSha === baseSha && key.targetKey === targetKey && key.targetKind === targetKind;
+          return key !== null && key.repoPath === repoPath && key.baseSha === canonicalBaseSha(baseSha) && key.targetKey === targetKey && key.targetKind === targetKind;
         };
         switch (frame.event) {
           case "submission-received": {

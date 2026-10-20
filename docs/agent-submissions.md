@@ -185,8 +185,10 @@ identity fields with the submission schema above:
 
 `target_kind` is `"worktree"` (`target_key` is then the worktree path) or
 `"head"` (`target_key` is then the resolved target SHA). `base_sha` is the
-resolved base the review keys on. Unknown fields are rejected anywhere in
-`params`, as in the schema.
+resolved base the review keys on, or the literal `empty-tree` for
+all-files reviews; a computed empty-tree hash keys the same review as the
+literal. Unknown fields are rejected anywhere in `params`, as in the
+schema.
 
 Delivery is synchronous: a successful response returns the submission id
 after the submission and its finding comments are stored, and the app

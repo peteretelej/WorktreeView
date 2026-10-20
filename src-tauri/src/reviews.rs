@@ -1,4 +1,5 @@
 use crate::events;
+use crate::git::canonical_base_sha;
 use crate::store::now_millis;
 use crate::transport::RequestChangeSink;
 use crate::{agents::AgentIdentity, CommandError};
@@ -278,6 +279,7 @@ async fn find_review_id(
     target_key: &str,
     target_kind: &str,
 ) -> Result<Option<i64>, sqlx::Error> {
+    let base_sha = canonical_base_sha(base_sha);
     sqlx::query_scalar(
         "SELECT id FROM reviews \
          WHERE repo_path = ? AND base_sha = ? AND target_key = ? AND target_kind = ?",
@@ -299,6 +301,9 @@ async fn resolve_review_id(
     target_key: &str,
     target_kind: &str,
 ) -> Result<i64, CommandError> {
+    // The identity keys on the reserved literal, so an agent that still
+    // carries the computed empty-tree hash lands on the same review row.
+    let base_sha = canonical_base_sha(base_sha);
     if let Some(id) = find_review_id(pool, repo_path, base_sha, target_key, target_kind).await? {
         return Ok(id);
     }
@@ -1167,7 +1172,7 @@ pub(crate) async fn ingest_submission_in_pool(
         events::NewEvent {
             repo_path: repo_path.to_string(),
             kind: events::SUBMISSION_DELIVERED,
-            base_sha: Some(base_sha.to_string()),
+            base_sha: Some(canonical_base_sha(base_sha).to_string()),
             target_key: Some(target_key.to_string()),
             target_kind: Some(target_kind.to_string()),
             request_id: None,
@@ -1304,6 +1309,31 @@ mod tests {
             old_line,
             new_line,
         }
+    }
+
+    #[tokio::test]
+    async fn review_ids_collapse_empty_tree_spellings() {
+        let pool = test_pool().await;
+        seed_repo(&pool, "/demo").await;
+        let by_hash = resolve_review_id(
+            &pool,
+            "/demo",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "4e8cf98",
+            "head",
+        )
+        .await
+        .unwrap();
+        let by_literal = resolve_review_id(&pool, "/demo", "empty-tree", "4e8cf98", "head")
+            .await
+            .unwrap();
+        assert_eq!(by_hash, by_literal);
+        let stored: String = sqlx::query_scalar("SELECT base_sha FROM reviews WHERE id = ?")
+            .bind(by_literal)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, "empty-tree");
     }
 
     #[tokio::test]

@@ -172,6 +172,18 @@ pub(crate) async fn resolve_empty_tree(path: &Path) -> Result<String, CommandErr
     Ok(sha.to_string())
 }
 
+// The empty tree hashes to a constant of the object format, not to
+// repository data, so a base carrying the computed hash is recognized
+// without a git call. Reviews key on the reserved "empty-tree" literal
+// (review.rs); the hash spellings collapse onto it at the identity boundary.
+pub(crate) fn canonical_base_sha(base: &str) -> &str {
+    match base {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        | "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321" => "empty-tree",
+        other => other,
+    }
+}
+
 pub(crate) fn primary_branch(branches: &[String]) -> Option<&str> {
     if branches.iter().any(|branch| branch == "refs/heads/main") {
         Some("refs/heads/main")
@@ -265,6 +277,21 @@ mod tests {
     use super::*;
     use crate::review::review_changes;
     use crate::testutil::{test_pool, test_repo, test_git};
+
+    #[test]
+    fn canonical_base_collapses_empty_tree_hashes() {
+        assert_eq!(
+            canonical_base_sha("4b825dc642cb6eb9a060e54bf8d69288fbee4904"),
+            "empty-tree"
+        );
+        assert_eq!(
+            canonical_base_sha("6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"),
+            "empty-tree"
+        );
+        assert_eq!(canonical_base_sha("empty-tree"), "empty-tree");
+        assert_eq!(canonical_base_sha("main"), "main");
+        assert_eq!(canonical_base_sha("3f2a"), "3f2a");
+    }
 
     #[test]
     fn validates_review_arguments() {

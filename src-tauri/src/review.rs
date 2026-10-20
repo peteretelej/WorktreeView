@@ -1143,17 +1143,25 @@ async fn review_changes_local(
         reject_applicable_filters(&path, &paths, &filters).await?;
     }
 
-    let mut num_owned = filter_override_args(&filters);
-    num_owned.extend(review_index_args("--numstat", &range, reversed));
-    let num_args = git_args(&num_owned);
-    let (exit_code, stdout, stderr) = run_git(&path, &num_args).await?;
-    if exit_code != 0 {
-        return Err(match partial_clone_failure(&path, &num_args).await {
-            Some(failure) => failure,
-            None => git_execution_error(&stderr),
-        });
-    }
-    let (additions, deletions, _) = parse_numstat(&stdout)?;
+    // All-files totals are the repo's entire line count (every file is
+    // added), so the whole-range numstat scan is skipped and the header
+    // shows the file count instead.
+    let (additions, deletions) = if empty_tree_base {
+        (0, 0)
+    } else {
+        let mut num_owned = filter_override_args(&filters);
+        num_owned.extend(review_index_args("--numstat", &range, reversed));
+        let num_args = git_args(&num_owned);
+        let (exit_code, stdout, stderr) = run_git(&path, &num_args).await?;
+        if exit_code != 0 {
+            return Err(match partial_clone_failure(&path, &num_args).await {
+                Some(failure) => failure,
+                None => git_execution_error(&stderr),
+            });
+        }
+        let (additions, deletions, _) = parse_numstat(&stdout)?;
+        (additions, deletions)
+    };
 
     if !committed_only && !reversed {
         let (exit_code, stdout, stderr) =
@@ -1335,21 +1343,27 @@ async fn review_changes_remote_with(
     } else {
         base.clone()
     };
-    diff_name_owned = filter_override_args(&filters);
-    diff_name_owned.extend(review_index_args("--name-status", &range, reversed));
-    diff_num_owned = filter_override_args(&filters);
-    diff_num_owned.extend(review_index_args("--numstat", &range, reversed));
-    let (second_batch, name_slot, num_slot) = if committed_one_shot {
-        (first_batch, one_shot_name_slot, one_shot_num_slot)
-    } else {
+      diff_name_owned = filter_override_args(&filters);
+      diff_name_owned.extend(review_index_args("--name-status", &range, reversed));
+      if !empty_tree_base {
+        diff_num_owned = filter_override_args(&filters);
+        diff_num_owned.extend(review_index_args("--numstat", &range, reversed));
+      }
+      let (second_batch, name_slot, num_slot) = if committed_one_shot {
+        (first_batch, one_shot_name_slot, Some(one_shot_num_slot))
+      } else if empty_tree_base {
+        let second =
+          run_remote_batch_with(spawner, target, &[batch_fragment(diff_name_owned)]).await?;
+        (second, 0, None)
+      } else {
         let second = run_remote_batch_with(
-            spawner,
-            target,
-            &[batch_fragment(diff_name_owned), batch_fragment(diff_num_owned)],
+          spawner,
+          target,
+          &[batch_fragment(diff_name_owned), batch_fragment(diff_num_owned)],
         )
         .await?;
-        (second, 0, 1)
-    };
+        (second, 0, Some(1))
+      };
     let name_fragment = second_batch.ok(name_slot)?;
     let mut files = parse_name_status(&name_fragment.stdout)?;
     if !filters.is_empty() {
@@ -1376,8 +1390,16 @@ async fn review_changes_remote_with(
             }
         }
     }
-    let num_fragment = second_batch.ok(num_slot)?;
-    let (additions, deletions, _) = parse_numstat(&num_fragment.stdout)?;
+    let (additions, deletions) = match num_slot {
+        Some(slot) => {
+            let num_fragment = second_batch.ok(slot)?;
+            let (additions, deletions, _) = parse_numstat(&num_fragment.stdout)?;
+            (additions, deletions)
+        }
+        // All-files totals are the repo's entire line count; skipped, the
+        // header shows the file count instead.
+        None => (0, 0),
+    };
 
     if !untracked_paths.is_empty() {
         for file in untracked_paths {
@@ -3035,6 +3057,10 @@ mod tests {
         assert_eq!(index.files.len(), 1);
         assert_eq!(index.files[0].path, "tracked.txt");
         assert_eq!(index.files[0].status, "A");
+        // All-files totals are skipped: everything is added, so the numstat
+        // pass would only report the repo's entire line count.
+        assert_eq!(index.additions, 0);
+        assert_eq!(index.deletions, 0);
         assert_eq!(
             index.base_sha,
             "4b825dc642cb6eb9a060e54bf8d69288fbee4904"

@@ -30,10 +30,8 @@ One `create_comment` call, review-level (no file anchor), with `kind`:
   explaining. For a codebase tour that is the worktree's current head
   from `list_review_targets`; for a change walkthrough, the change's
   head.
-- `base_sha`: the empty tree for codebase tours
-  (`4b825dc642cb6eb9a060e54bf8d69288fbee4904` on SHA-1 repositories,
-  which is nearly all of them; SHA-256 repositories compute their own
-  via `git hash-object -t tree /dev/null`). For a change walkthrough,
+- `base_sha`: the literal `empty-tree` for codebase tours (the app
+  resolves it; never compute tree hashes). For a change walkthrough,
   the change's base from the review in question.
 - `kind`: a short slug - `walkthrough` for explanations, `notes` for
   working documents. Other slugs are allowed; the app badges whatever
