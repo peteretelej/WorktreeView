@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
@@ -28,7 +28,9 @@ function MermaidBlock({ code }: { code: string }) {
   const [failed, setFailed] = useState(false);
   const figureId = useRef(`mermaid-${Math.random().toString(36).slice(2)}`);
   const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "default";
-  useEffect(() => {
+  // useLayoutEffect so a cached diagram is applied before the browser
+  // paints: a remount would otherwise flash the placeholder for a frame.
+  useLayoutEffect(() => {
     const cached = mermaidCache.get(`${theme}:${code}`);
     if (cached) {
       setSvg(cached);
