@@ -9,6 +9,14 @@
     />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>WorktreeView</title>
+    <style>
+      /* Boot background matching the app surface; the runtime theme picker
+         overrides it once settings load. */
+      html { background-color: #151921; }
+      @media (prefers-color-scheme: light) {
+        html:not([data-theme]) { background-color: #eef0f4; }
+      }
+    </style>
   </head>
 
   <body>
