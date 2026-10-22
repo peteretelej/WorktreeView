@@ -140,23 +140,27 @@ Select a file from **Changed files** and its diff opens in the patch
 pane. The pane's **Tree/List/Details** toggle re-shapes the list: a
 collapsible directory tree with per-folder counts, a compact single-line
 list, or each name with its full path on a second line; the filter box
-narrows the list as you type, and the chosen view is remembered. Gaps
-between hunks carry expand controls that pull surrounding lines into the
-diff, and the **Diff/File** toggle swaps the pane to the whole file as it
-exists on the new side, with the patch's additions highlighted. Toggling
-back restores the diff with its scroll position intact. Syntax
-highlighting renders progressively and never delays the first paint.
-The display toggles at the top of the review cover syntax highlighting,
-split layout, visible whitespace, line wrap, and inline comments; hiding
-inline comments clears the diff for a plain read of the code while
-threads stay available in the Comments pane. Appearance, zoom, layout,
-and whitespace preferences live in Settings.
+narrows the list as you type, and the chosen view is remembered. On deep
+monorepo paths the directory half of a row clips from its start, so the
+filename stays readable; the full path is always on the row's tooltip.
+Gaps between hunks carry expand controls that pull surrounding lines
+into the diff, and the **Diff/File** toggle swaps the pane to the whole
+file as it exists on the new side, with the patch's additions
+highlighted. Toggling back restores the diff with its scroll position
+intact. Syntax highlighting renders progressively and never delays the
+first paint. The display toggles at the top of the review cover syntax
+highlighting, split layout, visible whitespace, line wrap, and inline
+comments; hiding inline comments clears the diff for a plain read of
+the code while threads stay available in the Comments pane. Appearance,
+zoom, layout, and whitespace preferences live in Settings.
 
 Both review side panes collapse: **Changed files** and **Comments** each
 carry a hide control in their heading, `Ctrl B` toggles the file list, and
-a slim rail brings a hidden pane back. The Comments pane also carries a
-widen control for reading long findings; visibility and width are
-remembered.
+a slim rail brings a hidden pane back. Both panes also drag-resize: one
+handle sits between the file list and the diff, another between the diff
+and the comments pane, and each width is remembered (the comments
+handle's width is per tab, so canvas documents can keep a wider reading
+column); pane headings keep a **reset** back to the default width.
 
 ## Comment on a review
 
@@ -193,10 +197,7 @@ Documents are pinned at the commit they explain, so a reference always
 lands on the line its author meant; when the live head has moved on, the
 app says so and jumping shows the pinned snapshot with a one-click way
 back. Documents are threads: reply to ask questions, resolve when
-answered, and ask any connected agent to review or extend one. The
-comments pane itself resizes: drag the handle between the diff and the
-pane, and each tab remembers its own width; the header keeps **collapse**
-and a **reset** back to the default.
+answered, and ask any connected agent to review or extend one.
 
 ## Work with agent reviews
 

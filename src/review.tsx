@@ -452,7 +452,7 @@ function RequestForm({ identityKey, headSha, source, onCreated }: { identityKey:
   </form>;
 }
 
-export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target, refs, base, scope, reversed, index, loading, selectedFile, patch, patchError, patchLoading, fileView, diffPrefs, diffToggles, comments, content, contentLoading, contentError, imageSrc, imageError, imageLoading, onEnsureContent, canBack, canForward, onHistoryBack, onHistoryForward, onBack, onBaseChange, onTargetChange, onPreset, onReverse, onFileView, onFile, panes, onPaneVisibility, branchAction, focusedCommentId, reviewRefreshTick, requestRefreshTick, paneWidth, onPaneWidth, onPaneWidthCommit, onPaneReset, paneTab, onPaneTab, canvas, externalJump, osOpenRepoKey, osOpenBlocked, onOsOpenFailure, resolveSource, readOnly }: { repoPath: string; repoName: string; liveWorktree?: Worktree; worktrees?: Worktree[]; target: ReviewTarget; refs: RefInventory; base: string; scope: ReviewScope; reversed: boolean; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; fileView: ChangedFilesView; diffPrefs: DiffPreferences; diffToggles: React.ReactNode; comments: CommentsApi; content: FileContent | null; contentLoading: boolean; contentError: string; imageSrc: string | null; imageError: string; imageLoading: boolean; onEnsureContent: () => void; canBack: boolean; canForward: boolean; onHistoryBack: () => void; onHistoryForward: () => void; onBack: () => void; onBaseChange: (value: string) => void; onTargetChange: (target: ReviewTarget) => void; onPreset: (preset: WorktreeReviewPreset) => void; onReverse: () => void; onFileView: (view: ChangedFilesView) => void; onFile: (file: ChangedFile) => void; panes: { files: boolean; comments: boolean }; onPaneVisibility: (next: { files: boolean; comments: boolean }) => void; branchAction?: { ref: string; busy: boolean; run: () => void } | null; focusedCommentId: number | null; reviewRefreshTick: number; requestRefreshTick: number; paneWidth: number; onPaneWidth: (width: number) => void; onPaneWidthCommit: (width: number) => void; onPaneReset: () => void; paneTab: PaneTab; onPaneTab: (tab: PaneTab) => void; canvas?: CanvasPaneContext; externalJump?: { filePath: string; line: number; nonce: number } | null; osOpenRepoKey?: string | null; osOpenBlocked?: boolean; onOsOpenFailure?: () => void; resolveSource: SourceResolver; readOnly: boolean }) {
+export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target, refs, base, scope, reversed, index, loading, selectedFile, patch, patchError, patchLoading, fileView, diffPrefs, diffToggles, comments, content, contentLoading, contentError, imageSrc, imageError, imageLoading, onEnsureContent, canBack, canForward, onHistoryBack, onHistoryForward, onBack, onBaseChange, onTargetChange, onPreset, onReverse, onFileView, onFile, panes, onPaneVisibility, branchAction, focusedCommentId, reviewRefreshTick, requestRefreshTick, paneWidth, onPaneWidth, onPaneWidthCommit, onPaneReset, filesWidth, onFilesWidth, onFilesWidthCommit, onFilesReset, paneTab, onPaneTab, canvas, externalJump, osOpenRepoKey, osOpenBlocked, onOsOpenFailure, resolveSource, readOnly }: { repoPath: string; repoName: string; liveWorktree?: Worktree; worktrees?: Worktree[]; target: ReviewTarget; refs: RefInventory; base: string; scope: ReviewScope; reversed: boolean; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; fileView: ChangedFilesView; diffPrefs: DiffPreferences; diffToggles: React.ReactNode; comments: CommentsApi; content: FileContent | null; contentLoading: boolean; contentError: string; imageSrc: string | null; imageError: string; imageLoading: boolean; onEnsureContent: () => void; canBack: boolean; canForward: boolean; onHistoryBack: () => void; onHistoryForward: () => void; onBack: () => void; onBaseChange: (value: string) => void; onTargetChange: (target: ReviewTarget) => void; onPreset: (preset: WorktreeReviewPreset) => void; onReverse: () => void; onFileView: (view: ChangedFilesView) => void; onFile: (file: ChangedFile) => void; panes: { files: boolean; comments: boolean }; onPaneVisibility: (next: { files: boolean; comments: boolean }) => void; branchAction?: { ref: string; busy: boolean; run: () => void } | null; focusedCommentId: number | null; reviewRefreshTick: number; requestRefreshTick: number; paneWidth: number; onPaneWidth: (width: number) => void; onPaneWidthCommit: (width: number) => void; onPaneReset: () => void; filesWidth: number; onFilesWidth: (width: number) => void; onFilesWidthCommit: (width: number) => void; onFilesReset: () => void; paneTab: PaneTab; onPaneTab: (tab: PaneTab) => void; canvas?: CanvasPaneContext; externalJump?: { filePath: string; line: number; nonce: number } | null; osOpenRepoKey?: string | null; osOpenBlocked?: boolean; onOsOpenFailure?: () => void; resolveSource: SourceResolver; readOnly: boolean }) {
   const targetName = target.kind === "worktree" ? target.worktree.branch : target.kind === "commit" ? target.sha : target.name;
   const allRefs = [...refs.heads, ...refs.remotes, ...refs.tags];
   const targetRefs = allRefs.filter((ref) => ref !== liveWorktree?.branch);
@@ -548,10 +548,11 @@ export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target
       </CommitRow>
       <div className="review-subbar"><span className="bar-grow" />{diffToggles}</div>
     </header>
-    {!base && !loading ? <Empty icon={<GitBranch size={24} />} title="Choose a base branch to review" detail="This review has no default base." action={<RefPicker id="prompt-review-base" label="Choose base" repoPath={repoPath} refs={allRefs} value={base} resolve={resolveSource} exclude={target.kind === "worktree" ? [] : [targetName]} onChange={onBaseChange} />} /> : <div className={reviewBodyClass(panes)} style={panes.comments ? { "--comments-col": `${paneWidth}px` } as React.CSSProperties : undefined}>
-      {panes.files ? <FileIndexPane base={base} index={index} loading={loading} selectedFile={selectedFile} view={fileView} onView={onFileView} onFile={onFile} onCollapse={() => onPaneVisibility({ files: false, comments: panes.comments })} branchAction={branchAction} /> : <PaneRail side="left" label="Changed files" onOpen={() => onPaneVisibility({ files: true, comments: panes.comments })} />}
+    {!base && !loading ? <Empty icon={<GitBranch size={24} />} title="Choose a base branch to review" detail="This review has no default base." action={<RefPicker id="prompt-review-base" label="Choose base" repoPath={repoPath} refs={allRefs} value={base} resolve={resolveSource} exclude={target.kind === "worktree" ? [] : [targetName]} onChange={onBaseChange} />} /> : <div className={reviewBodyClass(panes)} style={{ ...(panes.files ? { "--files-col": `${filesWidth}px` } : {}), ...(panes.comments ? { "--comments-col": `${paneWidth}px` } : {}) } as React.CSSProperties}>
+      {panes.files ? <FileIndexPane base={base} index={index} loading={loading} selectedFile={selectedFile} view={fileView} onView={onFileView} onFile={onFile} onCollapse={() => onPaneVisibility({ files: false, comments: panes.comments })} branchAction={branchAction} onReset={onFilesReset} /> : <PaneRail side="left" label="Changed files" onOpen={() => onPaneVisibility({ files: true, comments: panes.comments })} />}
+      {panes.files && <PaneHandle side="left" label="Resize the changed files pane" onWidth={onFilesWidth} onCommit={onFilesWidthCommit} />}
       <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} diffPrefs={diffPrefs} reversed={reversed} comments={comments} onDiskWorktree={diskWorktree} content={content} contentLoading={contentLoading} contentError={contentError} imageSrc={imageSrc} imageError={imageError} imageLoading={imageLoading} onEnsureContent={onEnsureContent} anchorJump={anchorJump ?? externalJumpRefJump(externalJump, selectedFile)} osOpenRepoKey={osOpenRepoKey} osOpenBlocked={osOpenBlocked} onOsOpenFailure={onOsOpenFailure} />
-      {panes.comments && <PaneHandle onWidth={onPaneWidth} onCommit={onPaneWidthCommit} />}
+      {panes.comments && <PaneHandle side="right" label="Resize the comments pane" onWidth={onPaneWidth} onCommit={onPaneWidthCommit} />}
       {panes.comments ? <CommentStream comments={comments} reversed={reversed} strip={<ReviewsStrip reviewKey={comments.key} refreshTick={reviewRefreshTick} resolve={resolveSource} />} onCollapse={() => onPaneVisibility({ files: panes.files, comments: false })} onReset={onPaneReset} onOpenAnchor={openCommentAnchor} paneTab={paneTab} onPaneTab={onPaneTab} canvas={canvas} /> : <PaneRail side="right" label="Comments" onOpen={() => onPaneVisibility({ files: panes.files, comments: true })} />}
     </div>}
   </section>;
@@ -565,7 +566,7 @@ export function PaneRail({ side, label, onOpen }: { side: "left" | "right"; labe
 }
 
 export function reviewBodyClass(panes: { files: boolean; comments: boolean }) {
-  return ["review-body", panes.files ? "" : "files-collapsed", panes.comments ? "" : "comments-collapsed"].filter(Boolean).join(" ");
+  return ["review-body", panes.files ? "files-open" : "files-collapsed", panes.comments ? "" : "comments-collapsed"].filter(Boolean).join(" ");
 }
 
 // A canvas document's reference lands like a comment anchor once its file
@@ -575,32 +576,42 @@ function externalJumpRefJump(externalJump: { filePath: string; line: number; non
   return { filePath: externalJump.filePath, side: "RIGHT", line: externalJump.line, nonce: externalJump.nonce };
 }
 
-// The drag handle between the diff and the right pane: dragging updates the
-// width live and pointer-up commits it to settings; arrows resize by 16px
-// (64 with shift) so the resize is keyboard-reachable.
-export function PaneHandle({ onWidth, onCommit }: { onWidth: (width: number) => void; onCommit: (width: number) => void }) {
+// A drag handle beside a pane: dragging updates the width live and
+// pointer-up commits it to settings; arrows resize by 16px (64 with shift)
+// so the resize is keyboard-reachable. The right handle sits between the
+// diff and the right pane; the left one between the files list and the diff.
+export function PaneHandle({ side = "right", label, onWidth, onCommit }: { side?: "left" | "right"; label: string; onWidth: (width: number) => void; onCommit: (width: number) => void }) {
   const [dragging, setDragging] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
   const clampWidth = (width: number) => Math.max(MIN_PANE_WIDTH, Math.min(MAX_PANE_WIDTH, width));
   const currentWidth = () => {
     const rect = ref.current?.getBoundingClientRect();
-    return clampWidth(rect ? window.innerWidth - rect.x : MIN_PANE_WIDTH);
+    if (!rect) return MIN_PANE_WIDTH;
+    // The right handle measures to the window edge; the left one measures
+    // from its grid container's left edge, since the app sidebar sits
+    // outside the review grid.
+    const width = side === "right"
+      ? window.innerWidth - rect.x
+      : rect.x - (ref.current?.parentElement?.getBoundingClientRect().left ?? 0);
+    return clampWidth(width);
   };
-  return <div ref={ref} className={`pane-handle${dragging ? " dragging" : ""}`} role="separator" aria-orientation="vertical" aria-label="Resize the comments pane" tabIndex={0}
+  return <div ref={ref} className={`pane-handle ${side}${dragging ? " dragging" : ""}`} role="separator" aria-orientation="vertical" aria-label={label} tabIndex={0}
     onPointerDown={(event) => { setDragging(true); ref.current?.setPointerCapture(event.pointerId); }}
     onPointerMove={(event) => {
       // Hover moves arrive here too: a drag whose pointerup was lost
       // (capture dropped, window switched) must end itself on the first
       // buttonless move, or hovering keeps resizing the pane.
       if (dragging && event.buttons === 0) { setDragging(false); onCommit(currentWidth()); return; }
-      if (dragging) onWidth(clampWidth(window.innerWidth - event.clientX));
+      if (dragging) onWidth(clampWidth(side === "right" ? window.innerWidth - event.clientX : event.clientX - (ref.current?.parentElement?.getBoundingClientRect().left ?? 0)));
     }}
     onPointerCancel={() => { if (dragging) { setDragging(false); onCommit(currentWidth()); } }}
     onPointerUp={(event) => { if (!dragging) return; setDragging(false); onCommit(currentWidth()); event.preventDefault(); }}
     onKeyDown={(event) => {
       const step = event.shiftKey ? 64 : 16;
-      if (event.key === "ArrowLeft") { onCommit(currentWidth() + step); event.preventDefault(); }
-      else if (event.key === "ArrowRight") { onCommit(currentWidth() - step); event.preventDefault(); }
+      const grow = side === "right" ? "ArrowLeft" : "ArrowRight";
+      const shrink = side === "right" ? "ArrowRight" : "ArrowLeft";
+      if (event.key === grow) { onCommit(currentWidth() + step); event.preventDefault(); }
+      else if (event.key === shrink) { onCommit(currentWidth() - step); event.preventDefault(); }
     }} />;
 }
 
@@ -610,7 +621,7 @@ const FILE_VIEW_OPTIONS: { value: ChangedFilesView; label: string; title: string
   { value: "details", label: "Details", title: "Name with full path on a second line" },
 ];
 
-export function FileIndexPane({ base, index, loading, selectedFile, view, onView, onFile, onCollapse, branchAction }: { base: string; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; view: ChangedFilesView; onView: (view: ChangedFilesView) => void; onFile: (file: ChangedFile) => void; onCollapse: () => void; branchAction?: { ref: string; busy: boolean; run: () => void } | null }) {
+export function FileIndexPane({ base, index, loading, selectedFile, view, onView, onFile, onCollapse, onReset, branchAction }: { base: string; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; view: ChangedFilesView; onView: (view: ChangedFilesView) => void; onFile: (file: ChangedFile) => void; onCollapse: () => void; onReset?: () => void; branchAction?: { ref: string; busy: boolean; run: () => void } | null }) {
   const files = index?.files ?? [];
   const [query, setQuery] = useState("");
   // Expand/collapse is deliberately local: the tree opens fully on every
@@ -646,7 +657,7 @@ export function FileIndexPane({ base, index, loading, selectedFile, view, onView
     next.focus();
   }
   return <aside className="file-index" aria-label="Changed files">
-    <div className="pane-heading"><strong>Changed files</strong><span className="pane-heading-actions"><span>{query.trim() ? `${shown.length} / ${files.length}` : files.length}</span><button className="icon-button" type="button" aria-label="Hide Changed files" title="Hide Changed files (Ctrl B)" onClick={onCollapse}><PanelLeftClose size={12} /></button></span></div>
+    <div className="pane-heading"><strong>Changed files</strong><span className="pane-heading-actions"><span>{query.trim() ? `${shown.length} / ${files.length}` : files.length}</span>{onReset && <button className="icon-btn" type="button" aria-label="Reset pane width" title="Reset pane width" onClick={onReset}>⟲</button>}<button className="icon-button" type="button" aria-label="Hide Changed files" title="Hide Changed files (Ctrl B)" onClick={onCollapse}><PanelLeftClose size={12} /></button></span></div>
     {loading ? <div className="index-skeleton">{Array.from({ length: 7 }, (_, i) => <i key={i} />)}</div>
       : index?.error ? <Empty icon={<CircleDot size={20} />} title="Review unavailable" detail={index.error} action={branchAction && index.error_code === "partial_clone_content" ? <button className="secondary-button" type="button" disabled={branchAction.busy} onClick={branchAction.run}><RefreshCw size={13} />{branchAction.busy ? "Fetching content..." : "Fetch branch content"}</button> : undefined} />
       : files.length === 0 ? <Empty icon={<CircleDot size={20} />} title={`No changes vs ${shortToken(base)}`} detail="Try a different base branch." />

@@ -2302,20 +2302,29 @@ button:disabled {
 .request-rounds button { padding: 0 10px; font-size: 10.5px; }
 .request-form-error { margin: 0; color: var(--danger); font-size: 11px; }
 .request-form-actions { display: flex; justify-content: flex-start; gap: 6px; }
-/* Collapsed panes leave a slim reopen rail in their grid column; the
-   resize handle owns the 5px track between the diff and the right pane.
-   Children are placed explicitly so the collapsed and narrow variants,
-   which drop or hide the handle, cannot shift a pane into the wrong
-   track. */
+/* Collapsed panes leave a slim reopen rail in their grid column; a resize
+   handle owns the 5px track beside each open pane (left of the diff for
+   files, right of it for comments). Children are placed explicitly so the
+   collapsed and narrow variants, which drop or hide the handles, cannot
+   shift a pane into the wrong track. */
 .review-body { display: grid; min-width: 0; min-height: 0; flex: 1; grid-template-columns: var(--files-col, 300px) minmax(0, 1fr) 5px var(--comments-col, 300px); }
 .review-body > .file-index, .review-body > .pane-rail.left { grid-column: 1; }
 .review-body > .patch-pane { grid-column: 2; }
 .review-body > .pane-handle { grid-column: 3; }
 .review-body > .comment-stream, .review-body > .pane-rail.right { grid-column: 4; }
+.review-body.files-open { grid-template-columns: var(--files-col, 300px) 5px minmax(0, 1fr) 5px var(--comments-col, 300px); }
+.review-body.files-open > .pane-handle.left { grid-column: 2; }
+.review-body.files-open > .patch-pane { grid-column: 3; }
+.review-body.files-open > .pane-handle.right { grid-column: 4; }
+.review-body.files-open > .comment-stream, .review-body.files-open > .pane-rail.right { grid-column: 5; }
 .review-body.files-collapsed { --files-col: 44px; }
 .review-body.comments-collapsed { --comments-col: 44px; grid-template-columns: var(--files-col, 300px) minmax(0, 1fr) var(--comments-col, 44px); }
 .review-body.comments-collapsed > .comment-stream, .review-body.comments-collapsed > .pane-rail.right { grid-column: 3; }
+.review-body.files-open.comments-collapsed { grid-template-columns: var(--files-col, 300px) 5px minmax(0, 1fr) var(--comments-col, 44px); }
+.review-body.files-open.comments-collapsed > .pane-handle.right, .review-body.files-open.comments-collapsed > .comment-stream, .review-body.files-open.comments-collapsed > .pane-rail.right { grid-column: 4; }
+.review-body.files-collapsed.comments-collapsed { grid-template-columns: var(--files-col, 44px) minmax(0, 1fr) var(--comments-col, 44px); }
 .pane-handle { cursor: col-resize; background: var(--surface-2); border-left: 1px solid var(--border); }
+.pane-handle.left { border-left: 0; border-right: 1px solid var(--border); }
 .pane-handle:hover, .pane-handle.dragging { background: var(--primary-soft); }
 .pane-handle:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
 .pane-rail { display: flex; min-height: 0; flex-direction: column; align-items: center; padding: 4px 0; border-right: 1px solid var(--border); background: var(--surface); }
@@ -2353,7 +2362,9 @@ button:disabled {
 .file-row.details-row { display: block; padding-top: 5px; padding-bottom: 5px; }
 .file-row.details-row .details-top { display: flex; gap: 6px; align-items: center; }
 .file-row.details-row .file-name { flex: 1; min-width: 0; }
-.file-dir-sub { display: block; margin: 2px 0 0 18px; color: var(--muted); font-size: 10px; }
+/* The directory line clips from its start (rtl + left alignment) so the
+   segments nearest the filename survive on deep paths. */
+.file-dir-sub { display: block; margin: 2px 0 0 18px; color: var(--muted); font-size: 10px; direction: rtl; text-align: left; }
 .patch-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--background); }
 .patch-heading { display: flex; flex: none; height: 36px; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .patch-heading code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2473,6 +2484,12 @@ button:disabled {
 @media (max-width: 760px) {
   .review-body { --files-col: minmax(180px, 38%); --comments-col: 44px; grid-template-columns: var(--files-col) minmax(0, 1fr) 0 var(--comments-col); }
   .review-body .pane-handle { display: none; }
+  .review-body.files-open { grid-template-columns: var(--files-col) minmax(0, 1fr) var(--comments-col); }
+  .review-body.files-open > .patch-pane { grid-column: 2; }
+  .review-body.files-open > .comment-stream, .review-body.files-open > .pane-rail.right { grid-column: 3; }
+  .review-body.files-open.comments-collapsed { grid-template-columns: var(--files-col) minmax(0, 1fr) var(--comments-col); }
+  .review-body.files-open.comments-collapsed > .patch-pane { grid-column: 2; }
+  .review-body.files-open.comments-collapsed > .comment-stream, .review-body.files-open.comments-collapsed > .pane-rail.right { grid-column: 3; }
   .review-bar { flex-wrap: wrap; }
 }
 

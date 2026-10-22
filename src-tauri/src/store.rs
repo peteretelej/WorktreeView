@@ -111,6 +111,7 @@ pub struct Settings {
     pub comments_pane_visible: bool,
     pub comments_pane_width: u32,
     pub canvas_pane_width: u32,
+    pub files_pane_width: u32,
     pub changed_files_view: ChangedFilesView,
     pub zoom: f64,
     pub mcp_enabled: bool,
@@ -160,6 +161,7 @@ impl Default for Settings {
             comments_pane_visible: true,
             comments_pane_width: 300,
             canvas_pane_width: 560,
+            files_pane_width: 300,
             changed_files_view: ChangedFilesView::Tree,
             zoom: 1.0,
             mcp_enabled: true,
@@ -489,6 +491,11 @@ pub(crate) async fn get_settings_in_pool(pool: &SqlitePool) -> Result<Settings, 
                     settings.canvas_pane_width = clamp_pane_width(width);
                 }
             }
+            "files_pane_width" => {
+                if let Ok(width) = value.parse::<u32>() {
+                    settings.files_pane_width = clamp_pane_width(width);
+                }
+            }
             "changed_files_view" => {
                 if let Some(view) = ChangedFilesView::from_value(&value) {
                     settings.changed_files_view = view;
@@ -564,6 +571,7 @@ pub(crate) async fn set_settings_in_pool(
         ),
         ("comments_pane_width", settings.comments_pane_width.to_string()),
         ("canvas_pane_width", settings.canvas_pane_width.to_string()),
+        ("files_pane_width", settings.files_pane_width.to_string()),
         (
             "changed_files_view",
             settings.changed_files_view.as_value().to_string(),
@@ -999,6 +1007,7 @@ mod tests {
             comments_pane_visible: false,
             comments_pane_width: 420,
             canvas_pane_width: 700,
+            files_pane_width: 310,
             changed_files_view: ChangedFilesView::List,
             zoom: 1.25,
             mcp_enabled: false,

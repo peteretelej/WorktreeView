@@ -86,6 +86,7 @@ export function resolveTheme(theme: Theme): "light" | "dark" {
 // OS scheme changes.
 export function applyTheme(theme: Theme) {
   document.documentElement.dataset.theme = resolveTheme(theme);
+  diagramThemeChanged();
 }
 
 const THEME_OPTIONS: { value: Theme; label: string }[] = [

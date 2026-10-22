@@ -80,6 +80,15 @@ later optimization target.
   worker per language. Token results cache per content key in a bounded
   cache on the main thread, and files without a supported language skip
   highlighting entirely.
+- Comment and canvas-doc markdown re-renders are bounded by identity:
+  the markdown components map is module-level (rebuilding it would make
+  React remount every rendered block on each parent render), bodies are
+  memoized on their text, and diagram palettes update through a small
+  store rather than piggybacking on unrelated re-renders. App-level
+  updates (the 20s project re-list, event refreshes) therefore cost the
+  comment stream a shallow props compare, not a markdown re-parse or a
+  diagram re-render; the per-theme diagram cache keeps theme flips
+  equally cheap.
 
 ## Desktop e2e as a floor
 
