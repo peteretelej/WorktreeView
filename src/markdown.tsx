@@ -1,5 +1,5 @@
-import { useLayoutEffect, useRef, useState } from "react";
-import Markdown from "react-markdown";
+import { createContext, memo, useContext, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import Markdown, { type Components, type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
 import { markdownSchema } from "./markdown-schema.ts";
@@ -23,11 +23,67 @@ export type { CodeRef };
 // render would flash the placeholder and churn the SVG each time.
 const mermaidCache = new Map<string, string>();
 
+// The components map must keep a stable identity: react-markdown hands these
+// functions to React as element types, so rebuilding the map per render would
+// remount every `pre` and `code` (diagrams included) on each parent render.
+// Values that vary per call site (the jump-chip handler) arrive by context.
+const MARKDOWN_COMPONENTS: Components = {
+  pre({ children }) {
+    const child = Array.isArray(children) ? children[0] : children;
+    const className = (child as { props?: { className?: string } })?.props?.className ?? "";
+    if (className.includes("language-mermaid")) {
+      const code = String((child as { props?: { children?: unknown } })?.props?.children ?? "");
+      return <MermaidBlock code={code.replace(/\n$/, "")} />;
+    }
+    return <pre>{children}</pre>;
+  },
+  code: MarkdownCode,
+};
+
+const CodeRefContext = createContext<((ref: CodeRef, raw: string) => void) | null>(null);
+
+function MarkdownCode({ className, children }: { className?: string; children?: ReactNode }) {
+  const onCodeRef = useContext(CodeRefContext);
+  const raw = String(children);
+  if (!className && onCodeRef) {
+    const ref = parseCodeRef(raw);
+    if (ref) {
+      return <button type="button" className="code-ref" title={`Jump to ${ref.path}:${ref.start}`} onClick={() => onCodeRef(ref, raw)}>{raw}</button>;
+    }
+  }
+  return <code className={className}>{children}</code>;
+}
+
+// Diagram palettes are baked into each cached SVG, so a theme flip must
+// reach MermaidBlock even where memoization skips unrelated re-renders;
+// applyTheme pings this store after the root attribute lands.
+type DiagramTheme = "dark" | "default";
+
+function readDiagramTheme(): DiagramTheme {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "default";
+}
+let diagramTheme = readDiagramTheme();
+const diagramThemeListeners = new Set<() => void>();
+
+export function diagramThemeChanged() {
+  const next = readDiagramTheme();
+  if (next === diagramTheme) return;
+  diagramTheme = next;
+  diagramThemeListeners.forEach((listener) => listener());
+}
+
+function useDiagramTheme(): DiagramTheme {
+  return useSyncExternalStore((listener) => {
+    diagramThemeListeners.add(listener);
+    return () => diagramThemeListeners.delete(listener);
+  }, () => diagramTheme);
+}
+
 function MermaidBlock({ code }: { code: string }) {
   const [svg, setSvg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const figureId = useRef(`mermaid-${Math.random().toString(36).slice(2)}`);
-  const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "default";
+  const theme = useDiagramTheme();
   // useLayoutEffect so a cached diagram is applied before the browser
   // paints: a remount would otherwise flash the placeholder for a frame.
   useLayoutEffect(() => {
@@ -61,30 +117,25 @@ function MermaidBlock({ code }: { code: string }) {
     : <div className="mermaid-figure" dangerouslySetInnerHTML={{ __html: svg }} />;
 }
 
-export function CommentBody({ text, onCodeRef }: { text: string; onCodeRef?: (ref: CodeRef, raw: string) => void }) {
-  return <div className="comment-body"><Markdown
-    remarkPlugins={[remarkGfm]}
-    rehypePlugins={[[rehypeSanitize, markdownSchema]]}
-    components={{
-      pre({ children }) {
-        const child = Array.isArray(children) ? children[0] : children;
-        const className = (child as { props?: { className?: string } })?.props?.className ?? "";
-        if (className.includes("language-mermaid")) {
-          const code = String((child as { props?: { children?: unknown } })?.props?.children ?? "");
-          return <MermaidBlock code={code.replace(/\n$/, "")} />;
-        }
-        return <pre>{children}</pre>;
-      },
-      code({ className, children }) {
-        const raw = String(children);
-        if (!className && onCodeRef) {
-          const ref = parseCodeRef(raw);
-          if (ref) {
-            return <button type="button" className="code-ref" title={`Jump to ${ref.path}:${ref.start}`} onClick={() => onCodeRef(ref, raw)}>{raw}</button>;
-          }
-        }
-        return <code className={className}>{children}</code>;
-      },
-    }}
-  >{text}</Markdown></div>;
+const REMARK_PLUGINS: Options["remarkPlugins"] = [remarkGfm];
+const REHYPE_PLUGINS: Options["rehypePlugins"] = [[rehypeSanitize, markdownSchema]];
+
+function CommentBodyImpl({ text, onCodeRef }: { text: string; onCodeRef?: (ref: CodeRef, raw: string) => void }) {
+  // Read through a ref so the memo below can compare text alone; the
+  // wrapper identity stays stable across renders.
+  const handlerRef = useRef(onCodeRef);
+  handlerRef.current = onCodeRef;
+  const hasHandler = onCodeRef !== undefined;
+  const handler = useMemo(() => (hasHandler
+    ? (ref: CodeRef, raw: string) => handlerRef.current?.(ref, raw)
+    : null), [hasHandler]);
+  return <div className="comment-body"><CodeRefContext.Provider value={handler}><Markdown
+    remarkPlugins={REMARK_PLUGINS}
+    rehypePlugins={REHYPE_PLUGINS}
+    components={MARKDOWN_COMPONENTS}
+  >{text}</Markdown></CodeRefContext.Provider></div>;
 }
+
+// Comment bodies re-render on every unrelated app state update; equal text
+// must skip the markdown re-parse and everything under it.
+export const CommentBody = memo(CommentBodyImpl, (a, b) => a.text === b.text && (a.onCodeRef !== undefined) === (b.onCodeRef !== undefined));

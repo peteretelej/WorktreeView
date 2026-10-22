@@ -320,6 +320,15 @@ function CanvasPane({ canvas, reversed }: { canvas: CanvasPaneContext; reversed:
   const identity = useMemo(() => (activeDoc ? canvasDocIdentity(activeDoc) : null), [activeDoc]);
   const docComments = useReviewComments(identity, null, null, reversed, canvas.resolve);
   const thread = activeDoc ? docComments.threads.find((candidate) => candidate.comment.id === activeDoc.id) ?? null : null;
+  // The jump handler must keep one identity for the memoized comment body's
+  // lifetime, so the click path reads the live doc and context through a ref
+  // instead of closing over the render that first mounted the body.
+  const liveRef = useRef({ canvas, activeDoc });
+  liveRef.current = { canvas, activeDoc };
+  const onDocCodeRef = useMemo(() => (ref: CodeRef, raw: string) => {
+    const { canvas: liveCanvas, activeDoc: doc } = liveRef.current;
+    if (doc) liveCanvas.onCodeRef(doc, ref, raw);
+  }, []);
   return <div className="canvas-pane">
     <div className="canvas-library">
       <p className="eyebrow">Canvas docs · this repo</p>
@@ -332,8 +341,8 @@ function CanvasPane({ canvas, reversed }: { canvas: CanvasPaneContext; reversed:
       ))}
     </div>
     {activeDoc && (thread
-      ? <CommentThreadView thread={thread} status={null} comments={docComments} reversed={reversed} onCodeRef={(ref, raw) => canvas.onCodeRef(activeDoc, ref, raw)} />
-      : <CommentCard comment={activeDoc} status={null} reversed={reversed} onCodeRef={(ref, raw) => canvas.onCodeRef(activeDoc, ref, raw)} />)}
+      ? <CommentThreadView thread={thread} status={null} comments={docComments} reversed={reversed} onCodeRef={onDocCodeRef} />
+      : <CommentCard comment={activeDoc} status={null} reversed={reversed} onCodeRef={onDocCodeRef} />)}
   </div>;
 }
 
