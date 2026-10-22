@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ArrowLeft, ArrowLeftRight, ArrowRight, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, CircleDot, Code, Columns2, ExternalLink, FileDiff, FileWarning, FolderOpen, GitBranch, MessageSquare, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, Search, Space, UnfoldVertical, WrapText } from "lucide-react";
+import { ArrowLeft, ArrowLeftRight, ArrowRight, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, CircleDot, Code, Columns2, ExternalLink, FileDiff, FileWarning, FolderOpen, GitBranch, GripVertical, MessageSquare, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, Search, Space, UnfoldVertical, WrapText } from "lucide-react";
 import { call, type RemoteSource, type SourceResolver } from "./remote.ts";
 import { sameReviewTarget, type ChangedFile, type CommitDetail, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type Worktree } from "./navigation";
 import { allTreeDirPaths, buildFileTree, filterChangedFiles, flattenFileTree, splitFilePath } from "./fileTree";
@@ -618,7 +618,9 @@ export function PaneHandle({ side = "right", label, onWidth, onCommit }: { side?
       const shrink = side === "right" ? "ArrowRight" : "ArrowLeft";
       if (event.key === grow) { onCommit(currentWidth() + step); event.preventDefault(); }
       else if (event.key === shrink) { onCommit(currentWidth() - step); event.preventDefault(); }
-    }} />;
+    }}>
+    <GripVertical size={10} className="pane-grip" aria-hidden="true" />
+  </div>;
 }
 
 const FILE_VIEW_OPTIONS: { value: ChangedFilesView; label: string; title: string }[] = [

@@ -2323,9 +2323,14 @@ button:disabled {
 .review-body.files-open.comments-collapsed { grid-template-columns: var(--files-col, 300px) 5px minmax(0, 1fr) var(--comments-col, 44px); }
 .review-body.files-open.comments-collapsed > .pane-handle.right, .review-body.files-open.comments-collapsed > .comment-stream, .review-body.files-open.comments-collapsed > .pane-rail.right { grid-column: 4; }
 .review-body.files-collapsed.comments-collapsed { grid-template-columns: var(--files-col, 44px) minmax(0, 1fr) var(--comments-col, 44px); }
-.pane-handle { cursor: col-resize; background: var(--surface-2); border-left: 1px solid var(--border); }
+.pane-handle { position: relative; z-index: 1; display: flex; align-items: center; justify-content: center; cursor: col-resize; background: var(--surface-2); border-left: 1px solid var(--border); }
+/* The grab zone reaches ~4px past the 5px bar on each side; the raised
+   z-index keeps the overhang hit-testable over the neighboring panes. */
+.pane-handle::before { content: ""; position: absolute; inset: 0 -4px; }
+.pane-grip { flex: none; color: var(--muted); }
 .pane-handle.left { border-left: 0; border-right: 1px solid var(--border); }
 .pane-handle:hover, .pane-handle.dragging { background: var(--primary-soft); }
+.pane-handle:hover .pane-grip { color: var(--foreground); }
 .pane-handle:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
 .pane-rail { display: flex; min-height: 0; flex-direction: column; align-items: center; padding: 4px 0; border-right: 1px solid var(--border); background: var(--surface); }
 .pane-rail.right { border-right: 0; border-left: 1px solid var(--border); }
