@@ -13,7 +13,7 @@ export function capPaneWidths(bodyWidth: number, files: number, comments: number
   if (bodyWidth <= 0) return [files, comments];
   const reserved = (filesOpen ? HANDLE_TRACK_PX : COLLAPSED_RAIL_PX) + (commentsOpen ? HANDLE_TRACK_PX : COLLAPSED_RAIL_PX) + PATCH_FLOOR_PX;
   const budget = Math.max(0, bodyWidth - reserved);
-  const cap = (width: number) => Math.max(MIN_PANE_WIDTH, Math.min(width, budget));
+  const cap = (width: number) => Math.max(MIN_PANE_WIDTH, Math.round(Math.min(width, budget)));
   if (!filesOpen || !commentsOpen) return filesOpen ? [cap(files), comments] : [files, cap(comments)];
   const total = files + comments;
   if (total <= budget) return [files, comments];
