@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useState } from "react";
 import { Bot, Check, Copy, ExternalLink, FolderGit2, GitBranch, Inbox, ListTree, MessageSquare, Search, User } from "lucide-react";
 import { attentionAge, isNarrowAttention } from "./requests.ts";
 import { copyText } from "./clipboard.ts";
 import { call } from "./remote.ts";
 import { CommentThreadView, type CommentsApi } from "./comments.tsx";
 import { anchorLabel } from "./comments.ts";
+import { usePaneWidth } from "./ui.tsx";
 import { activityDividerIndexForSources, type RemoteSource } from "./remote.ts";
 import {
   activityActorLabel,
@@ -40,20 +41,7 @@ import {
 // The Reviews tab's fetched listing; null until the first load lands.
 export type PortalReviewsPayload = { rows: PortalReviewRow[]; loading: boolean; error: string };
 
-// The attention panes fold on their own width, not the window's, so the
-// observer tracks the pane element rather than using a media query.
-export function usePaneWidth(): [RefObject<HTMLElement | null>, number] {
-  const paneRef = useRef<HTMLElement | null>(null);
-  const [paneWidth, setPaneWidth] = useState(0);
-  useEffect(() => {
-    const pane = paneRef.current;
-    if (!pane || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((entries) => setPaneWidth(entries[0].contentRect.width));
-    observer.observe(pane);
-    return () => observer.disconnect();
-  }, []);
-  return [paneRef, paneWidth];
-}
+export { usePaneWidth };
 
 // Relative ages only move when a surface re-renders, so the portal
 // samples the clock on an interval; without it a parked tab would show

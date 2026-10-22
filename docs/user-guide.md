@@ -160,7 +160,9 @@ a slim rail brings a hidden pane back. Both panes also drag-resize: one
 handle sits between the file list and the diff, another between the diff
 and the comments pane, and each width is remembered (the comments
 handle's width is per tab, so canvas documents can keep a wider reading
-column); pane headings keep a **reset** back to the default width.
+column); pane headings keep a **reset** back to the default width. When
+the window cannot fit both remembered widths, they yield proportionally
+so the diff between them stays readable.
 
 ## Comment on a review
 

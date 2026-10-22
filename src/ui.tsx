@@ -1,7 +1,22 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Copy, Search } from "lucide-react";
 import { copyText } from "./clipboard";
 import { relativeTime } from "./format";
+
+// A pane's own width folds layouts on the pane's size, not the window's,
+// so observers track the pane element rather than a media query.
+export function usePaneWidth<T extends HTMLElement = HTMLElement>(): [React.RefObject<T | null>, number] {
+  const paneRef = useRef<T | null>(null);
+  const [paneWidth, setPaneWidth] = useState(0);
+  useEffect(() => {
+    const pane = paneRef.current;
+    if (!pane || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => setPaneWidth(entries[0].contentRect.width));
+    observer.observe(pane);
+    return () => observer.disconnect();
+  }, []);
+  return [paneRef, paneWidth];
+}
 
 export function CopyButton({ value, label, ghost = false }: { value: string; label: string; ghost?: boolean }) {
   const [copied, setCopied] = useState(false);

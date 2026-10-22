@@ -12,9 +12,9 @@ export type Theme = "system" | "light" | "dark";
 export type DiffLayout = "unified" | "split";
 export type ChangedFilesView = "tree" | "list" | "details";
 // Pane width bounds for the review pane's drag handles; the Rust store
-// clamps stored values to the same range.
-export const MIN_PANE_WIDTH = 240;
-export const MAX_PANE_WIDTH = 2000;
+// clamps stored values to the same range, and src/panes.ts caps the
+// display widths against the window.
+export { MAX_PANE_WIDTH, MIN_PANE_WIDTH } from "./panes.ts";
 export type Settings = { theme: Theme; diff_layout: DiffLayout; whitespace_visible: boolean; line_wrap: boolean; syntax_visible: boolean; inline_comments_visible: boolean; files_pane_visible: boolean; comments_pane_visible: boolean; comments_pane_width: number; canvas_pane_width: number; files_pane_width: number; changed_files_view: ChangedFilesView; zoom: number; mcp_enabled: boolean; notifications_enabled: boolean; mcp_listen_address: string; mcp_port: number; activity_seen_id: number; skill_prompt_key: string };
 
 // Mirrors the server's identity rows; the secret exists only in the
