@@ -175,12 +175,17 @@ pub(crate) async fn resolve_empty_tree(path: &Path) -> Result<String, CommandErr
 // The empty tree hashes to a constant of the object format, not to
 // repository data, so a base carrying the computed hash is recognized
 // without a git call. Reviews key on the reserved "empty-tree" literal
-// (review.rs); the hash spellings collapse onto it at the identity boundary.
+// (review.rs); the hash spellings collapse onto it at the identity boundary,
+// case-insensitively, so a mangled uppercase echo cannot spawn an orphan row.
 pub(crate) fn canonical_base_sha(base: &str) -> &str {
-    match base {
-        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-        | "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321" => "empty-tree",
-        other => other,
+    if base.eq_ignore_ascii_case("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
+        || base.eq_ignore_ascii_case(
+            "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
+        )
+    {
+        "empty-tree"
+    } else {
+        base
     }
 }
 
@@ -286,6 +291,18 @@ mod tests {
         );
         assert_eq!(
             canonical_base_sha("6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"),
+            "empty-tree"
+        );
+        // Uppercase echoes collapse too, so a mangled agent payload cannot
+        // resolve as an unknown ref.
+        assert_eq!(
+            canonical_base_sha("4B825DC642CB6EB9A060E54BF8D69288FBEE4904"),
+            "empty-tree"
+        );
+        assert_eq!(
+            canonical_base_sha(
+                "6EF19B41225C5369F1C104D45D8D85EFA9B057B53B14B4B9B939DD74DECC5321"
+            ),
             "empty-tree"
         );
         assert_eq!(canonical_base_sha("empty-tree"), "empty-tree");

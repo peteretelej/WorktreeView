@@ -4,6 +4,7 @@ import type { DiffLine } from "./diff.ts";
 import type { ReviewIdentity } from "./navigation.ts";
 import {
   anchorLabel,
+  canonicalBaseSha,
   commentJumpTarget,
   commentThreads,
   degradedReviewKey,
@@ -89,6 +90,18 @@ test("review keys use resolved shas and the worktree path for targets", () => {
   // A stand-in target sessions on the stored identity it reopens.
   const standIn = { ...commit, recordedKey: { targetKey: "/repo-wt", targetKind: "worktree" as const } };
   assert.deepEqual(reviewKeyOf(standIn, index), { repoPath: "/repo", baseSha: index.base_sha, targetKey: "/repo-wt", targetKind: "worktree" });
+});
+
+test("canonical base collapses the empty-tree spellings in any case", () => {
+  assert.equal(canonicalBaseSha("empty-tree"), "empty-tree");
+  assert.equal(canonicalBaseSha("4b825dc642cb6eb9a060e54bf8d69288fbee4904"), "empty-tree");
+  assert.equal(canonicalBaseSha("6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"), "empty-tree");
+  // Uppercase echoes collapse too, mirroring the Rust canonicalizer.
+  assert.equal(canonicalBaseSha("4B825DC642CB6EB9A060E54BF8D69288FBEE4904"), "empty-tree");
+  assert.equal(canonicalBaseSha("6EF19B41225C5369F1C104D45D8D85EFA9B057B53B14B4B9B939DD74DECC5321"), "empty-tree");
+  // Everything else passes through untouched.
+  assert.equal(canonicalBaseSha("main"), "main");
+  assert.equal(canonicalBaseSha("ABCDEF0"), "ABCDEF0");
 });
 
 test("degraded keys come from the identity's recorded refs", () => {

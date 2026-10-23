@@ -1,6 +1,7 @@
 use crate::agents::AgentIdentity;
 use crate::commands::{list_worktrees_in_pool, refresh_repo};
 use crate::events::{list_events_in_pool, EventQuery, EVENT_LIST_LIMIT};
+use crate::git::canonical_base_sha;
 use crate::overview::branch_inventory;
 use crate::portal::{
     list_portal_threads_in_pool, PortalThreadQuery, THREAD_STATE_OPEN, THREAD_STATE_RESOLVED,
@@ -1265,7 +1266,9 @@ async fn create_comment(
     .map_err(|error| error.message)?;
     (state.comment_changes)(CommentChange {
         repo_path: args.repo_path,
-        base_sha: args.base_sha,
+        // The store row keys the canonical spelling, so the live payload
+        // must match it or an all-files comment change misses its surface.
+        base_sha: canonical_base_sha(&args.base_sha).to_string(),
         target_key: args.target_key,
         target_kind: args.target_kind,
         comment_id: comment.id(),

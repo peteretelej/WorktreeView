@@ -585,9 +585,12 @@ async fn create_comment_with_anchor(
         validate_kind(&draft.kind)?,
     )
     .await?;
+    // The lookup above resolves through the canonicalizing identity, so the
+    // event must carry the same spelling or the activity log splits the
+    // review in two (mirroring the submission path's canonical event).
     let identity = ReviewIdentity {
         repo_path: repo_path.to_string(),
-        base_sha: base_sha.to_string(),
+        base_sha: canonical_base_sha(base_sha).to_string(),
         target_key: target_key.to_string(),
         target_kind: target_kind.to_string(),
     };

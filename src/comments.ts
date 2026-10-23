@@ -80,9 +80,11 @@ export function reviewKeyOf(identity: ReviewIdentity, index: ReviewIndexSummary)
 // The store keys the reserved literal; the loaded index and event payloads
 // can still carry a computed empty-tree hash (the index reports resolved
 // SHAs). Both spellings must compare equal so live refreshes and doc
-// surfaces match all-files reviews.
+// surfaces match all-files reviews; the fold is case-insensitive, mirroring
+// the Rust canonicalizer, so an uppercase echo lands on the same surface.
 export function canonicalBaseSha(base: string): string {
-  return base === "4b825dc642cb6eb9a060e54bf8d69288fbee4904" || base === "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321" ? "empty-tree" : base;
+  const folded = base.toLowerCase();
+  return folded === "4b825dc642cb6eb9a060e54bf8d69288fbee4904" || folded === "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321" ? "empty-tree" : base;
 }
 
 // When the index cannot resolve (moved project, gone surface), a review
