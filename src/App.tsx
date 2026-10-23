@@ -135,6 +135,11 @@ function App() {
   const [history, setHistory] = useState<HistoryState | null>(null); const [historyRefs, setHistoryRefs] = useState<RefInventory>({ heads: [], remotes: [], tags: [], default_base: null }); const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, WorktreeStatus[] | null>>({}); const [statusNonce, setStatusNonce] = useState(0);
   const [inventories, setInventories] = useState<Record<string, BranchInventory | null>>({}); const [menuOpen, setMenuOpen] = useState(false); const [removeTarget, setRemoveTarget] = useState<Repo | null>(null); const [removing, setRemoving] = useState(false);
   const [settings, setSettings] = useState<Settings>(defaultSettings); const [settingsSaveError, setSettingsSaveError] = useState("");
+  // Mirrors the latest settings including optimistic in-flight writes: field
+  // writes compose against this rather than the render snapshot, so two
+  // writes landing inside one persistence round-trip cannot revert each
+  // other (the webview is the only settings writer).
+  const settingsRef = useRef<Settings>(defaultSettings);
   const [skillTargets, setSkillTargets] = useState<SkillTarget[]>([]);
   const [skillInstalling, setSkillInstalling] = useState(false);
   const [skillInstallError, setSkillInstallError] = useState(false);
@@ -313,9 +318,9 @@ function App() {
   const comments = useReviewComments(commentIdentity, reviewIndex, commentFile, reversed, resolveRepoSource);
   // The event listeners read the live comment layer and open repo path
   // through refs, so they subscribe once and never hold stale closures.
-  const commentsRef = useRef(comments); const activeRepoPathRef = useRef(activeRepoPath); const reposRef = useRef(repos); const settingsRef = useRef(settings);
+  const commentsRef = useRef(comments); const activeRepoPathRef = useRef(activeRepoPath); const reposRef = useRef(repos);
 
-  useEffect(() => { let mounted = true; async function load() { try { const loaded = await invoke<Repo[]>("list_repos"); if (!mounted) return; setRepos(loaded); setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? ""); setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1]))); let nextSettings = defaultSettings; try { nextSettings = await getSettings(); } catch (error) { if (mounted) setOperationError(errorMessage(error)); } if (!mounted) return; nextSettings.zoom = snapZoom(nextSettings.zoom); applyTheme(nextSettings.theme); setSettings(nextSettings); try { const loadedConnections = await listServerConnections(); if (mounted) setConnections(loadedConnections); } catch { /* the app stays local; the Servers page surfaces the failure */ } setLoading(false); for (let start = 0; start < loaded.length; start += 4) await Promise.all(loaded.slice(start, start + 4).map(async (repo) => { try { const load = adoptLoad(repo.path, await invoke<Worktree[] | RemoteLoad<Worktree[]>>("list_worktrees", { path: repo.path })); if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees: load.data ?? [] } : item)); let listing: SurfaceListing = { gone: [], pinned: [] }; try { listing = adoptLoad(repo.path, await invoke<SurfaceListing | RemoteLoad<SurfaceListing>>("list_surfaces", { path: repo.path })).data ?? listing; } catch { listing = { gone: [], pinned: [] }; } if (mounted) setSurfaces((current) => ({ ...current, [repo.path]: listing })); } catch (error) { if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: { message: errorMessage(error), code: errorCodeOf(error) } })); } finally { if (mounted) setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } })); } catch (error) { if (mounted) { setLoadError(errorMessage(error)); setLoading(false); } } } void load(); return () => { mounted = false; }; }, []);
+  useEffect(() => { let mounted = true; async function load() { try { const loaded = await invoke<Repo[]>("list_repos"); if (!mounted) return; setRepos(loaded); setActiveRepoPath((current) => loaded.some((repo) => repo.path === current) ? current : loaded[0]?.path ?? ""); setHydratingRepos(Object.fromEntries(loaded.map((repo) => [repo.path, 1]))); let nextSettings = defaultSettings; try { nextSettings = await getSettings(); } catch (error) { if (mounted) setOperationError(errorMessage(error)); } if (!mounted) return; nextSettings.zoom = snapZoom(nextSettings.zoom); applyTheme(nextSettings.theme); settingsRef.current = nextSettings; setSettings(nextSettings); try { const loadedConnections = await listServerConnections(); if (mounted) setConnections(loadedConnections); } catch { /* the app stays local; the Servers page surfaces the failure */ } setLoading(false); for (let start = 0; start < loaded.length; start += 4) await Promise.all(loaded.slice(start, start + 4).map(async (repo) => { try { const load = adoptLoad(repo.path, await invoke<Worktree[] | RemoteLoad<Worktree[]>>("list_worktrees", { path: repo.path })); if (mounted) setRepos((current) => current.map((item) => item.path === repo.path ? { ...item, worktrees: load.data ?? [] } : item)); let listing: SurfaceListing = { gone: [], pinned: [] }; try { listing = adoptLoad(repo.path, await invoke<SurfaceListing | RemoteLoad<SurfaceListing>>("list_surfaces", { path: repo.path })).data ?? listing; } catch { listing = { gone: [], pinned: [] }; } if (mounted) setSurfaces((current) => ({ ...current, [repo.path]: listing })); } catch (error) { if (mounted) setRepoErrors((current) => ({ ...current, [repo.path]: { message: errorMessage(error), code: errorCodeOf(error) } })); } finally { if (mounted) setHydratingRepos((current) => { const count = current[repo.path] ?? 0; if (count > 1) return { ...current, [repo.path]: count - 1 }; const next = { ...current }; delete next[repo.path]; return next; }); } })); } catch (error) { if (mounted) { setLoadError(errorMessage(error)); setLoading(false); } } } void load(); return () => { mounted = false; }; }, []);
   useEffect(() => {
     if (connections.length === 0) return;
     let cancelled = false;
@@ -590,11 +595,11 @@ function App() {
     }, 250);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [query, connections]);
-  useEffect(() => { commentsRef.current = comments; activeRepoPathRef.current = activeRepoPath; reposRef.current = allRepos; settingsRef.current = settings; connectionsRef.current = connections; localPathsRef.current = repos.map((repo) => repo.path); paneToggleRef.current = () => {
+  useEffect(() => { commentsRef.current = comments; activeRepoPathRef.current = activeRepoPath; reposRef.current = allRepos; connectionsRef.current = connections; localPathsRef.current = repos.map((repo) => repo.path); paneToggleRef.current = () => {
     // Ctrl+B means the surface's pane: the files list in a review, the
     // project navigator on the overview; the settings overlay has none.
     const kind = nav.current().kind;
-    if (kind === "review" || kind === "commit-history") void updateSettings({ ...settings, files_pane_visible: !settings.files_pane_visible });
+    if (kind === "review" || kind === "commit-history") void updateSettingsPatch({ files_pane_visible: !settingsRef.current.files_pane_visible });
     else if (kind === "inbox") setCollapsed((value) => !value);
   }; });
   // Agent comment changes arrive through the same endpoint; when one names
@@ -1323,28 +1328,49 @@ function App() {
     // reading stale state; on a failed save the level and the webview both
     // roll back so shortcuts keep working.
     zoomLiveRef.current = target;
-    try { await applyZoom(target); setSettings(await persistSettings({ ...settings, zoom: target })); } catch { zoomLiveRef.current = current; void applyZoom(current); }
+    try { await applyZoom(target); const persisted = await persistSettings({ ...settingsRef.current, zoom: target }); settingsRef.current = persisted; setSettings(persisted); } catch { zoomLiveRef.current = current; void applyZoom(current); }
   }
-  async function updateSettings(next: Settings) { setSettingsSaveError(""); applyTheme(next.theme); try { setSettings(await persistSettings(next)); } catch (error) { applyTheme(settings.theme); setSettingsSaveError(errorMessage(error)); } }
-  function changeFileView(changed_files_view: ChangedFilesView) { void updateSettings({ ...settings, changed_files_view }); }
-  function changePaneVisibility(next: { files: boolean; comments: boolean }) { void updateSettings({ ...settings, files_pane_visible: next.files, comments_pane_visible: next.comments }); }
+  async function updateSettings(next: Settings) {
+    const previous = settingsRef.current;
+    settingsRef.current = next;
+    setSettingsSaveError("");
+    applyTheme(next.theme);
+    try {
+      const persisted = await persistSettings(next);
+      settingsRef.current = persisted;
+      setSettings(persisted);
+    } catch (error) {
+      // Only the write that still owns the ref may roll it back: an older
+      // write failing late must not clobber a newer one that persisted.
+      if (settingsRef.current === next) {
+        settingsRef.current = previous;
+        applyTheme(previous.theme);
+      }
+      setSettingsSaveError(errorMessage(error));
+    }
+  }
+  // Field-scoped writes build on the latest settings via settingsRef;
+  // whole-object writes (the Settings form) keep the caller's object.
+  function updateSettingsPatch(patch: Partial<Settings>) { return updateSettings({ ...settingsRef.current, ...patch }); }
+  function changeFileView(changed_files_view: ChangedFilesView) { void updateSettingsPatch({ changed_files_view }); }
+  function changePaneVisibility(next: { files: boolean; comments: boolean }) { void updateSettingsPatch({ files_pane_visible: next.files, comments_pane_visible: next.comments }); }
   function changePaneWidth(width: number) {
     const clamped = Math.min(MAX_PANE_WIDTH, Math.max(MIN_PANE_WIDTH, Math.round(width)));
     // The drag width stays applied until the persisted setting lands:
     // clearing it here would snap the pane back to the stale width for
     // several frames before the new one arrives.
-    void updateSettings({ ...settings, [paneTab === "canvas" ? "canvas_pane_width" : "comments_pane_width"]: clamped }).then(() => setPaneDragWidth(null));
+    void updateSettingsPatch({ [paneTab === "canvas" ? "canvas_pane_width" : "comments_pane_width"]: clamped }).then(() => setPaneDragWidth(null));
   }  function commitPaneWidth(width: number) { changePaneWidth(width); }
   function resetPaneWidth() {
-    void updateSettings({ ...settings, [paneTab === "canvas" ? "canvas_pane_width" : "comments_pane_width"]: paneTab === "canvas" ? defaultSettings.canvas_pane_width : defaultSettings.comments_pane_width }).then(() => setPaneDragWidth(null));
+    void updateSettingsPatch({ [paneTab === "canvas" ? "canvas_pane_width" : "comments_pane_width"]: paneTab === "canvas" ? defaultSettings.canvas_pane_width : defaultSettings.comments_pane_width }).then(() => setPaneDragWidth(null));
   }
   function changeFilesWidth(width: number) {
     const clamped = Math.min(MAX_PANE_WIDTH, Math.max(MIN_PANE_WIDTH, Math.round(width)));
-    void updateSettings({ ...settings, files_pane_width: clamped }).then(() => setFilesDragWidth(null));
+    void updateSettingsPatch({ files_pane_width: clamped }).then(() => setFilesDragWidth(null));
   }
   function commitFilesWidth(width: number) { changeFilesWidth(width); }
   function resetFilesWidth() {
-    void updateSettings({ ...settings, files_pane_width: defaultSettings.files_pane_width }).then(() => setFilesDragWidth(null));
+    void updateSettingsPatch({ files_pane_width: defaultSettings.files_pane_width }).then(() => setFilesDragWidth(null));
   }
   async function refreshCanvasDocs(repoPath: string) {
     try {
@@ -1416,7 +1442,7 @@ function App() {
   const diffPrefs: DiffPreferences = { layout: settings.diff_layout, whitespaceVisible: settings.whitespace_visible, lineWrap: settings.line_wrap, syntaxVisible: settings.syntax_visible, inlineCommentsVisible: settings.inline_comments_visible };
   const reviewRemote = reviewLocation ? resolveRepoSource(reviewLocation.identity.repoPath).kind === "server" : false;
   const historyRemote = historyLocation ? resolveRepoSource(historyLocation.repoPath).kind === "server" : false;
-  const diffToggles = <DiffToggles settings={settings} onChange={(next) => { void updateSettings(next); }} />;
+  const diffToggles = <DiffToggles settings={settings} onChange={updateSettingsPatch} />;
   const goneReview = reviewLocation && reviewIndex !== null && reviewIndex.error && (reviewIndex.error_code === "unresolvable_ref" || reviewIndex.error_code === "git_execution") ? goneSurfaceMatching(reviewLocation.identity.repoPath, reviewLocation.identity.target) : null;
   // The partial-clone recovery offer: only when the live review failed for
   // missing promisor content and the review knows which remote branch it
@@ -1495,6 +1521,7 @@ function App() {
     setSkillInstallError(false);
     try {
       await setSkillPrompt(skillPrompt.key);
+      settingsRef.current = { ...settingsRef.current, skill_prompt_key: skillPrompt.key };
       setSettings((current) => ({ ...current, skill_prompt_key: skillPrompt.key }));
     } catch { /* the cue stays; a failed dismissal retries on the next load */ }
   }

@@ -1199,13 +1199,16 @@ function DiffHalf({ placement, side, gutter, text, whitespace, tokens, commentsA
   return <div className={`diff-line half half-${placement} ${text.startsWith("+") ? "addition" : text.startsWith("-") ? "deletion" : ""}${target ? " commentable" : ""}${selected}`} data-side={target ? side : undefined} data-line={target ? gutter : undefined} onClick={target ? (event) => onRowClick(side, gutter, event.shiftKey) : undefined} onMouseEnter={target ? () => onEnter(side, gutter) : undefined}><span className="line-number" onMouseDown={target ? (event) => { event.preventDefault(); onGutterDown(side, gutter); } : undefined}>{gutter ?? ""}</span><code>{diffLineContent(text, whitespace, tokens)}</code>{chip}</div>;
 }
 
-export function DiffToggles({ settings, onChange }: { settings: Settings; onChange: (next: Settings) => void }) {
+// The toggles hand back a field patch: the caller composes it against the
+// latest persisted settings, so a toggle landing inside a width write's
+// round-trip cannot revert that write.
+export function DiffToggles({ settings, onChange }: { settings: Settings; onChange: (patch: Partial<Settings>) => void }) {
   return <div className="diff-toggles" role="group" aria-label="Diff display options">
-    <button className={`icon-button ${settings.syntax_visible ? "active" : ""}`} type="button" aria-pressed={settings.syntax_visible} aria-label="Syntax highlighting" title="Syntax highlighting" onClick={() => onChange({ ...settings, syntax_visible: !settings.syntax_visible })}><Code size={12} /></button>
-    <button className={`icon-button ${settings.diff_layout === "split" ? "active" : ""}`} type="button" aria-pressed={settings.diff_layout === "split"} aria-label="Split diff layout" title="Split diff layout" onClick={() => onChange({ ...settings, diff_layout: settings.diff_layout === "split" ? "unified" : "split" })}><Columns2 size={12} /></button>
-    <button className={`icon-button ${settings.whitespace_visible ? "active" : ""}`} type="button" aria-pressed={settings.whitespace_visible} aria-label="Visible whitespace" title="Visible whitespace" onClick={() => onChange({ ...settings, whitespace_visible: !settings.whitespace_visible })}><Space size={12} /></button>
-    <button className={`icon-button ${settings.line_wrap ? "active" : ""}`} type="button" aria-pressed={settings.line_wrap} aria-label="Wrap lines" title="Wrap lines" onClick={() => onChange({ ...settings, line_wrap: !settings.line_wrap })}><WrapText size={12} /></button>
-    <button className={`icon-button ${settings.inline_comments_visible ? "active" : ""}`} type="button" aria-pressed={settings.inline_comments_visible} aria-label="Inline comments" title="Inline comments in the diff" onClick={() => onChange({ ...settings, inline_comments_visible: !settings.inline_comments_visible })}><MessageSquare size={12} /></button>
+    <button className={`icon-button ${settings.syntax_visible ? "active" : ""}`} type="button" aria-pressed={settings.syntax_visible} aria-label="Syntax highlighting" title="Syntax highlighting" onClick={() => onChange({ syntax_visible: !settings.syntax_visible })}><Code size={12} /></button>
+    <button className={`icon-button ${settings.diff_layout === "split" ? "active" : ""}`} type="button" aria-pressed={settings.diff_layout === "split"} aria-label="Split diff layout" title="Split diff layout" onClick={() => onChange({ diff_layout: settings.diff_layout === "split" ? "unified" : "split" })}><Columns2 size={12} /></button>
+    <button className={`icon-button ${settings.whitespace_visible ? "active" : ""}`} type="button" aria-pressed={settings.whitespace_visible} aria-label="Visible whitespace" title="Visible whitespace" onClick={() => onChange({ whitespace_visible: !settings.whitespace_visible })}><Space size={12} /></button>
+    <button className={`icon-button ${settings.line_wrap ? "active" : ""}`} type="button" aria-pressed={settings.line_wrap} aria-label="Wrap lines" title="Wrap lines" onClick={() => onChange({ line_wrap: !settings.line_wrap })}><WrapText size={12} /></button>
+    <button className={`icon-button ${settings.inline_comments_visible ? "active" : ""}`} type="button" aria-pressed={settings.inline_comments_visible} aria-label="Inline comments" title="Inline comments in the diff" onClick={() => onChange({ inline_comments_visible: !settings.inline_comments_visible })}><MessageSquare size={12} /></button>
   </div>;
 }
 
