@@ -455,7 +455,7 @@ function App() {
       // A delivery for the review the user is reading refreshes it live:
       // the tick drives the open review's stream and submissions strip.
       const key = commentsRef.current.key;
-      if (key && key.repoPath === arrival.repo_path && key.baseSha === canonicalBaseSha(arrival.base_sha) && key.targetKey === arrival.target_key && key.targetKind === arrival.target_kind) {
+      if (key && key.repoPath === arrival.repo_path && canonicalBaseSha(key.baseSha) === canonicalBaseSha(arrival.base_sha) && key.targetKey === arrival.target_key && key.targetKind === arrival.target_kind) {
         setReviewRefreshTick((tick) => tick + 1);
       }
     });
@@ -610,7 +610,7 @@ function App() {
       // Canvas documents are repo-scoped comments, so any comment change in
       // the open repo also refreshes the document library.
       void refreshCanvasDocs(change.repo_path);
-      if (!key || key.repoPath !== change.repo_path || key.baseSha !== canonicalBaseSha(change.base_sha) || key.targetKey !== change.target_key || key.targetKind !== change.target_kind) return;
+      if (!key || key.repoPath !== change.repo_path || canonicalBaseSha(key.baseSha) !== canonicalBaseSha(change.base_sha) || key.targetKey !== change.target_key || key.targetKind !== change.target_kind) return;
       void commentsRef.current.refresh();
     });
     return () => { disposed = true; void subscription.then((unsubscribe) => unsubscribe()); };
@@ -662,7 +662,7 @@ function App() {
         const known = (repoPath: string) => projects.some((project) => project.repo_path === repoPath);
         const openKeyMatches = (repoPath: string, baseSha: string, targetKey: string, targetKind: string) => {
           const key = commentsRef.current.key;
-          return key !== null && key.repoPath === repoPath && key.baseSha === canonicalBaseSha(baseSha) && key.targetKey === targetKey && key.targetKind === targetKind;
+          return key !== null && key.repoPath === repoPath && canonicalBaseSha(key.baseSha) === canonicalBaseSha(baseSha) && key.targetKey === targetKey && key.targetKind === targetKind;
         };
         switch (frame.event) {
           case "submission-received": {

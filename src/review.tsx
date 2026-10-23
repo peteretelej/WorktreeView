@@ -20,7 +20,7 @@ import { unwrapLoad, type RemoteLoad } from "./remoteLoads";
 import { CopyButton, Empty, Pager, usePaneWidth } from "./ui";
 import { capPaneWidths } from "./panes.ts";
 import type { CommentSelection, DisplaySide, ReviewComment, ReviewKey } from "./comments";
-import { commentJumpTarget } from "./comments";
+import { canonicalBaseSha, commentJumpTarget } from "./comments";
 
 export const BRANCH_PAGE_SIZE = 50;
 
@@ -309,7 +309,7 @@ function ReviewRequestBar({ identityKey, headSha, resolve, refreshTick }: { iden
       if (disposed) return;
       const key = identityRef.current;
       const change = event.payload;
-      if (key.repoPath !== change.repo_path || key.baseSha !== change.base_sha || key.targetKey !== change.target_key || key.targetKind !== change.target_kind) return;
+      if (key.repoPath !== change.repo_path || canonicalBaseSha(key.baseSha) !== canonicalBaseSha(change.base_sha) || key.targetKey !== change.target_key || key.targetKind !== change.target_kind) return;
       void (async () => {
         try {
           const listed = await call<ReviewRequestRow[]>("list_requests", { repoPath: key.repoPath, baseSha: key.baseSha, targetKey: key.targetKey, targetKind: key.targetKind }, sourceRef.current);
