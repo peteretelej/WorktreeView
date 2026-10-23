@@ -410,6 +410,28 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+// The window starts hidden (tauri.conf.json) so the native frame never
+// paints the static config color: the persisted theme resolves against the
+// OS scheme first, the frame takes its surface color, then the window
+// shows. The webview's own boot style keeps covering the html until the
+// frontend applies the theme.
+fn apply_boot_theme(app: &tauri::App, theme: store::Theme) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let resolved = match theme {
+        store::Theme::Light => tauri::Theme::Light,
+        store::Theme::Dark => tauri::Theme::Dark,
+        store::Theme::System => window.theme().unwrap_or(tauri::Theme::Dark),
+    };
+    let (red, green, blue) = match resolved {
+        tauri::Theme::Light => (238, 240, 244),
+        _ => (21, 25, 33),
+    };
+    let _ = window.set_background_color(Some(tauri::window::Color(red, green, blue, 255)));
+    let _ = window.show();
+}
+
 // The tray is the resident-mode control surface: Open reveals the hidden
 // window, the disabled status item mirrors the live listener, and Quit is
 // the tray's exit (alongside the macOS app menu). Built after initialize
@@ -552,6 +574,7 @@ fn initialize(app: &tauri::App) -> Result<(), String> {
     })?;
     let settings = tauri::async_runtime::block_on(store::get_settings_in_pool(&pool))
         .map_err(|error| format!("Could not read settings: {}", error.message))?;
+    apply_boot_theme(app, settings.theme.clone());
     app.manage(AppState { pool: pool.clone() });
     let app_handle = app.handle().clone();
     let arrivals: transport::ArrivalSink = Arc::new(move |arrival| {
