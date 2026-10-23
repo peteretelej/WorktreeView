@@ -82,7 +82,6 @@ function useDiagramTheme(): DiagramTheme {
 function MermaidBlock({ code }: { code: string }) {
   const [svg, setSvg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
-  const figureId = useRef(`mermaid-${Math.random().toString(36).slice(2)}`);
   const theme = useDiagramTheme();
   // useLayoutEffect so a cached diagram is applied before the browser
   // paints: a remount would otherwise flash the placeholder for a frame.
@@ -94,6 +93,9 @@ function MermaidBlock({ code }: { code: string }) {
       return;
     }
     let cancelled = false;
+    // A fresh id per run keeps a superseded render from colliding with the
+    // live one inside mermaid's global registry.
+    const figureId = `mermaid-${Math.random().toString(36).slice(2)}`;
     setSvg(null);
     setFailed(false);
     void (async () => {
@@ -102,8 +104,11 @@ function MermaidBlock({ code }: { code: string }) {
         // content; the SVG that comes back is mermaid's own output.
         const mermaid = (await import("mermaid")).default;
         mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme });
-        const { svg: rendered } = await mermaid.render(figureId.current, code);
-        mermaidCache.set(`${theme}:${code}`, rendered);
+        const { svg: rendered } = await mermaid.render(figureId, code);
+        // Only the live run caches: a render superseded by a theme flip can
+        // come back painted under the other theme's global config, and the
+        // cache would replay that mixed render for the rest of the session.
+        if (!cancelled) mermaidCache.set(`${theme}:${code}`, rendered);
         if (!cancelled) setSvg(rendered);
       } catch {
         if (!cancelled) setFailed(true);
