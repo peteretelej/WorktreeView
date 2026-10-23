@@ -114,6 +114,10 @@ describe("desktop all-files scope", () => {
     // all-files identity and the tree returns without refetch surprises.
     await $('[aria-label="Commit review preset"]').$("button=This commit").click();
     await browser.waitUntil(async () => /\.\.\./.test(await $(".range-chip code").getText()), { timeoutMsg: "range chip did not switch back" });
+    // This commit changed only second.txt; once its tree settles, the
+    // comment must be absent because it belongs to the all-files identity.
+    await browser.waitUntil(async () => (await $$("button.file-row")).length === 1, { timeoutMsg: "this-commit tree did not settle" });
+    assert.equal(await $(".inline-comment .comment-card").isExisting(), false);
     await $('[aria-label="Commit review preset"]').$("button=All files").click();
     await browser.waitUntil(async () => (await $$("button.file-row")).length >= 2, { timeoutMsg: "all-files tree did not return" });
     await $('//button[contains(@class, "file-row")][.//span[normalize-space()="second.txt"]]').click();

@@ -3895,6 +3895,54 @@ repo.to_str().unwrap().into(),
         assert_eq!(index.deletions, 1);
     }
 
+    // The empty-tree committed review splits in two: the first invocation
+    // resolves the empty tree and the head, the second carries only the
+    // name-status diff over the resolved base..head range. No numstat rides
+    // along; the all-files header shows the file count instead.
+    #[tokio::test]
+    async fn remote_empty_tree_review_splits_its_diff_batch() {
+        let empty_tree_sha = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+        let head_sha = "b".repeat(40);
+        let range = format!("'{empty_tree_sha}..{head_sha}'");
+        let (spawner, scripts) = batch_fake_spawner(vec![
+            vec![
+                (0, format!("{empty_tree_sha}\n").into_bytes()),
+                (0, format!("{head_sha}\n").into_bytes()),
+            ],
+            vec![(0, b"M\0src/app.rs\0".to_vec())],
+        ]);
+        let target = remote_target("/srv/re po");
+        let pool = test_pool().await;
+        let index = review_changes_remote_with(
+            &spawner,
+            &pool,
+            "dev@host.example:/srv/re po",
+            &target,
+            "empty-tree".into(),
+            head_sha.clone(),
+            false,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(scripts.lock().unwrap().len(), 2);
+        let first = scripts.lock().unwrap()[0].clone();
+        assert_eq!(first.matches("-begin").count(), 2);
+        assert!(first.contains("hash-object"));
+        let second = scripts.lock().unwrap()[1].clone();
+        assert_eq!(second.matches("-begin").count(), 1);
+        assert!(second.contains("--name-status"));
+        assert!(!second.contains("--numstat"));
+        assert!(second.contains(&range));
+        assert_eq!(index.base_sha, empty_tree_sha);
+        assert_eq!(index.target_sha, head_sha);
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].path, "src/app.rs");
+        assert_eq!(index.additions, 0);
+        assert_eq!(index.deletions, 0);
+    }
+
     fn remote_target(path: &str) -> RemoteTarget {
         RemoteTarget::from_parts(Some("dev"), "host.example", None, path).unwrap()
     }
