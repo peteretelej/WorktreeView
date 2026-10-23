@@ -119,9 +119,10 @@ The base defaults to the fork point between the reviewed branch and the
 default branch (the merge-base), so a review shows what the branch
 actually changes, not everything that moved elsewhere since. To compare
 against something else, open the compare chip in the review header (it
-shows the active `base...target` range) and pick any ref in the
-**BASE** box, or click the corner-arrow "Use as review base" button on
-any commit row in the history to re-base the review there.
+shows the active comparison, a `base...target` range or "All files") and
+pick any ref in the **BASE** box, or click the corner-arrow "Use as
+review base" button on any commit row in the history to re-base the
+review there.
 
 ## Review any commit
 
@@ -131,6 +132,18 @@ diff against its parent; no checkout, no new branch. The commit row in
 the review header keeps the subject visible; click it to expand the
 full description with the author, commit time, and copyable base and
 target hashes.
+
+A commit review carries three scope presets:
+
+- **Branch so far**: everything the branch changes against its fork
+  point from the default branch.
+- **This commit**: the commit's own diff against its parent. This is
+  the default.
+- **All files**: every tracked file at the commit, with no diff, as if
+  the tree grew from nothing. The range chip renames itself, the counts
+  show the bare file count (there are no meaningful +/- totals), and
+  comments attach to this all-files view, staying put when you switch
+  scopes and back.
 
 ![Commit review](images/guide-commit-review.webp)
 
