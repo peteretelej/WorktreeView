@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Copy, Search } from "lucide-react";
 import { copyText } from "./clipboard";
 import { relativeTime } from "./format";
@@ -8,7 +8,9 @@ import { relativeTime } from "./format";
 export function usePaneWidth<T extends HTMLElement = HTMLElement>(): [React.RefObject<T | null>, number] {
   const paneRef = useRef<T | null>(null);
   const [paneWidth, setPaneWidth] = useState(0);
-  useEffect(() => {
+  // Layout effect so observation lands before the first paint: a passive
+  // registration would let one frame paint the stored widths uncapped.
+  useLayoutEffect(() => {
     const pane = paneRef.current;
     if (!pane || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver((entries) => setPaneWidth(entries[0].contentRect.width));

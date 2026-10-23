@@ -2487,7 +2487,10 @@ button:disabled {
 }
 
 @media (max-width: 760px) {
-  .review-body { --files-col: minmax(180px, 38%); --comments-col: 44px; grid-template-columns: var(--files-col) minmax(0, 1fr) 0 var(--comments-col); }
+  /* The column variables are owned by the JSX inline style when a pane is
+     open and by the collapsed rules otherwise; declaring them here would be
+     dead in every pane state. */
+  .review-body { grid-template-columns: var(--files-col) minmax(0, 1fr) 0 var(--comments-col); }
   .review-body .pane-handle { display: none; }
   .review-body.files-open { grid-template-columns: var(--files-col) minmax(0, 1fr) var(--comments-col); }
   .review-body.files-open > .patch-pane { grid-column: 2; }
