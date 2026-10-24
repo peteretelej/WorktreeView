@@ -3223,7 +3223,7 @@ mod tests {
         seed_repo(&pool, REPO).await;
         seed_repo(&pool, "/other").await;
         let reviewer = agent_token(&pool, "reviewer-bot").await;
-        let second = agent_token(&pool, "second-bot").await;
+        agent_token(&pool, "second-bot").await;
 
         // Requested by an agent with a P1: an open pickup waits on you (only
         // a P0 escalates to needs-human), and its age basis is its creation.

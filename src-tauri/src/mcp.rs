@@ -2599,7 +2599,7 @@ mod tests {
         // The engine's create-time validation renders as isError results,
         // never as JSON-RPC errors.
         let base = args.clone();
-        let mut variant = |field: &str, value: Value| {
+        let variant = |field: &str, value: Value| {
             let mut args = base.clone();
             args[field] = value;
             args
