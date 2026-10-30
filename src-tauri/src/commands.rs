@@ -1348,6 +1348,20 @@ fn open_with_os(path: &Path, reveal: bool) -> Result<(), CommandError> {
     })
 }
 
+// Markdown links hand off to the OS browser: the webview itself must never
+// navigate to external pages (no back path out, no user web session). The
+// scheme allowlist matches what the sanitized markdown renderer can emit.
+#[tauri::command]
+pub(crate) async fn open_url(url: String) -> Result<(), CommandError> {
+    let trimmed = url.trim();
+    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with("mailto:")) {
+        return Err(CommandError::new("invalid_url", "Only http, https, and mailto links open externally."));
+    }
+    tauri_plugin_opener::open_url(trimmed, None::<&str>).map_err(|error| {
+        CommandError::new("open_failed", format!("The link could not be opened: {error}"))
+    })
+}
+
 // The remote copy-to-temp: the reviewed worktree file is fetched under the
 // same content bounds as every other remote read, after the same worktree
 // pin the local open's containment check enforces, and written to a fresh

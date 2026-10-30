@@ -4,6 +4,8 @@ import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
 import { markdownSchema } from "./markdown-schema.ts";
 import { parseCodeRef, type CodeRef } from "./comments.ts";
+import { openExternalLink } from "./external.ts";
+import { isExternalHref, parseHrefCodeRef } from "./markdownLinks.ts";
 
 // Shared sanitized markdown renderer for comment bodies; GFM extensions
 // (tables, strikethrough, task lists) match what agents routinely emit, and
@@ -38,6 +40,7 @@ const MARKDOWN_COMPONENTS: Components = {
     return <pre>{children}</pre>;
   },
   code: MarkdownCode,
+  a: MarkdownLink,
 };
 
 const CodeRefContext = createContext<((ref: CodeRef, raw: string) => void) | null>(null);
@@ -52,6 +55,24 @@ function MarkdownCode({ className, children }: { className?: string; children?: 
     }
   }
   return <code className={className}>{children}</code>;
+}
+
+// Anchors never navigate the webview: scheme links open in the user's
+// browser, repo-relative links jump like the code spans, and anything
+// else stays inert.
+function MarkdownLink({ href, children }: { href?: string; children?: ReactNode }) {
+  const onCodeRef = useContext(CodeRefContext);
+  if (!href) return <a>{children}</a>;
+  if (isExternalHref(href)) {
+    // auxclick is guarded too: middle-click must not hand the page to the
+    // webview's window machinery instead of the browser handoff.
+    return <a href={href} title={`${href} (opens in your browser)`} onClick={(event) => { event.preventDefault(); void openExternalLink(href); }} onAuxClick={(event) => event.preventDefault()}>{children}</a>;
+  }
+  const ref = parseHrefCodeRef(href);
+  if (ref && onCodeRef) {
+    return <button type="button" className="code-ref" title={`Jump to ${ref.path}:${ref.start}`} onClick={() => onCodeRef(ref, href)}>{children}</button>;
+  }
+  return <a title="This link does not resolve here">{children}</a>;
 }
 
 // Diagram palettes are baked into each cached SVG, so a theme flip must

@@ -208,6 +208,9 @@ the repo with its kind badge, pinned commit, and age.
 A document renders wide for reading: markdown, Mermaid diagrams, and
 code references written as `path:line` (or ranges, and `path:line@sha`
 for another revision) become jump chips that open the cited code.
+Markdown links to repo files (`[auth](src/auth.rs#L12-L40)`) jump the
+same way, while `http(s)` and `mailto` links open in your external
+browser; the app never navigates itself to a web page.
 Documents are pinned at the commit they explain, so a reference always
 lands on the line its author meant; when the live head has moved on, the
 app says so and jumping shows the pinned snapshot with a one-click way

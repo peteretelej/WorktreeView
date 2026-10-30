@@ -57,6 +57,12 @@ typo-level fixes; never re-base one in place.
   To narrate history, cite another revision explicitly:
   `` `auth.go:18@f0c3d21` `` - write the sha yourself and put the commit
   subject in prose ("previously overhauled in Fix login redirect").
+- Link code in prose with repo-relative markdown links
+  (`[auth checks](src/auth.rs#L12-L40)`); they jump in-app like the
+  backticked spans. Absolute `http(s)` and `mailto` links open in the
+  human's external browser, where none of their app session follows, so
+  never depend on them being signed in; there is no webview navigation,
+  and `file://`, intranet hosts, and any other scheme do not resolve.
 - Diagrams where they genuinely help, never decoratively: fenced
   ```` ```mermaid ```` blocks (sequence, flowchart, state) render as
   pictures; agents reading the document see the source.
