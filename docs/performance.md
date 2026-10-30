@@ -50,6 +50,10 @@ later optimization target.
   existing `{path, status}` list, and rows are one-line buttons, so the
   DOM scales with the changeset's file count at a fraction of the cost of
   diff rows (the same trade the row stream below makes).
+- Pane width drags never re-render React: pointer moves coalesce to one
+  animation frame and the capped widths land directly on the review grid's
+  CSS variables, so dragging stays responsive over whole-list changesets;
+  app state only carries the width committed on release.
 - Both patch and full-file views render one continuous row stream in
   native flow (`src/stream.ts` builds the rows; there is no custom scroll
   code). The whole stream is present in the DOM and the browser owns

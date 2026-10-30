@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Copy, Search } from "lucide-react";
 import { copyText } from "./clipboard";
 import { relativeTime } from "./format";
+import { capPaneWidths } from "./panes.ts";
 
 // A pane's own width folds layouts on the pane's size, not the window's,
 // so observers track the pane element rather than a media query.
@@ -18,6 +19,27 @@ export function usePaneWidth<T extends HTMLElement = HTMLElement>(): [React.RefO
     return () => observer.disconnect();
   }, []);
   return [paneRef, paneWidth];
+}
+
+// Live drag widths bypass React state: the pointer writes the review grid's
+// CSS variables directly, so a drag never re-renders the panes' large lists.
+// The ref bridges unrelated re-renders until the committed width lands in
+// settings and the state-derived widths take over again.
+export function useLivePaneWidths<T extends HTMLElement>(bodyRef: React.RefObject<T | null>, effFilesWidth: number, effPaneWidth: number, panes: { files: boolean; comments: boolean }) {
+  const liveRef = useRef<[number, number] | null>(null);
+  useLayoutEffect(() => { liveRef.current = null; }, [effFilesWidth, effPaneWidth]);
+  const dragWidth = (side: "left" | "right", measured: number) => {
+    const body = bodyRef.current;
+    if (!body) return;
+    const current = liveRef.current ?? [effFilesWidth, effPaneWidth];
+    const next = capPaneWidths(body.clientWidth, side === "left" ? measured : current[0], side === "right" ? measured : current[1], panes.files, panes.comments);
+    liveRef.current = next;
+    // A collapsed pane's 44px rail width comes from its class, which an
+    // inline variable would override; only open panes take live values.
+    if (panes.files) body.style.setProperty("--files-col", `${next[0]}px`);
+    if (panes.comments) body.style.setProperty("--comments-col", `${next[1]}px`);
+  };
+  return { liveRef, dragWidth };
 }
 
 export function CopyButton({ value, label, ghost = false }: { value: string; label: string; ghost?: boolean }) {
