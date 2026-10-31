@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { call, type RemoteSource, type SourceResolver } from "./remote.ts";
 import { Check, Copy, PanelRightClose, Trash2 } from "lucide-react";
 import type { DiffLine } from "./diff.ts";
@@ -105,13 +105,45 @@ export function useReviewComments(identity: ReviewIdentity | null, index: Review
     return () => { cancelled = true; };
   }, [identityKey, file?.path, file?.lines, reversed, comments]);
 
-  async function refresh(current: ReviewKey) {
+  // The listing helper reads only refs and setters, so every API method
+  // keys on the review key and the returned object's identity holds while
+  // the hook's state is unchanged.
+  const reload = useCallback(async (current: ReviewKey) => {
     try {
       setComments(await call<ReviewComment[]>("list_comments", { repoPath: current.repoPath, baseSha: current.baseSha, targetKey: current.targetKey, targetKind: current.targetKind }, resolveRef.current(current.repoPath)));
     } catch { /* keep the last listing; the next navigation reloads */ }
-  }
+  }, []);
   const threads = useMemo(() => commentThreads(comments), [comments]);
-  return {
+  const openComposer = useCallback((kind: "review") => { setComposer({ kind }); }, []);
+  const openFileComposer = useCallback((filePath: string) => { setComposer({ kind: "file", filePath }); }, []);
+  const closeComposer = useCallback(() => setComposer(null), []);
+  const refresh = useCallback(async () => { if (key) await reload(key); }, [key, reload]);
+  const create = useCallback(async (draft: CommentDraft) => {
+    if (!key) return;
+    await call("create_comment", { repoPath: key.repoPath, baseSha: key.baseSha, targetKey: key.targetKey, targetKind: key.targetKind, draft }, resolveRef.current(key.repoPath));
+    await reload(key);
+  }, [key, reload]);
+  const reply = useCallback(async (parentId: number, body: string) => {
+    if (!key) return;
+    await call("reply_comment", { parentId, body }, resolveRef.current(key.repoPath));
+    await reload(key);
+  }, [key, reload]);
+  const setResolved = useCallback(async (commentId: number, resolved: boolean) => {
+    if (!key) return;
+    await call("set_comment_resolved", { commentId, resolved }, resolveRef.current(key.repoPath));
+    await reload(key);
+  }, [key, reload]);
+  const edit = useCallback(async (commentId: number, body: string) => {
+    if (!key) return;
+    await call("edit_comment", { commentId, body }, resolveRef.current(key.repoPath));
+    await reload(key);
+  }, [key, reload]);
+  const remove = useCallback(async (commentId: number) => {
+    if (!key) return;
+    await call("delete_comment", { commentId }, resolveRef.current(key.repoPath));
+    await reload(key);
+  }, [key, reload]);
+  return useMemo(() => ({
     key,
     threads,
     visibleThreads: filterThreadsByAuthor(threads, author),
@@ -119,36 +151,16 @@ export function useReviewComments(identity: ReviewIdentity | null, index: Review
     author,
     setAuthor,
     composer,
-    openComposer(kind: "review") { setComposer({ kind }); },
-    openFileComposer(filePath: string) { setComposer({ kind: "file", filePath }); },
-    closeComposer() { setComposer(null); },
-    async refresh() { if (key) await refresh(key); },
-    async create(draft: CommentDraft) {
-      if (!key) return;
-      await call("create_comment", { repoPath: key.repoPath, baseSha: key.baseSha, targetKey: key.targetKey, targetKind: key.targetKind, draft }, resolveRef.current(key.repoPath));
-      await refresh(key);
-    },
-    async reply(parentId: number, body: string) {
-      if (!key) return;
-      await call("reply_comment", { parentId, body }, resolveRef.current(key.repoPath));
-      if (key) await refresh(key);
-    },
-    async setResolved(commentId: number, resolved: boolean) {
-      if (!key) return;
-      await call("set_comment_resolved", { commentId, resolved }, resolveRef.current(key.repoPath));
-      if (key) await refresh(key);
-    },
-    async edit(commentId: number, body: string) {
-      if (!key) return;
-      await call("edit_comment", { commentId, body }, resolveRef.current(key.repoPath));
-      if (key) await refresh(key);
-    },
-    async remove(commentId: number) {
-      if (!key) return;
-      await call("delete_comment", { commentId }, resolveRef.current(key.repoPath));
-      if (key) await refresh(key);
-    },
-  };
+    openComposer,
+    openFileComposer,
+    closeComposer,
+    refresh,
+    create,
+    reply,
+    setResolved,
+    edit,
+    remove,
+  }), [key, threads, statuses, author, setAuthor, composer, openComposer, openFileComposer, closeComposer, refresh, create, reply, setResolved, edit, remove]);
 }
 
 function severityLabel(severity: string) {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, ArrowLeftRight, ArrowRight, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, CircleDot, Code, Columns2, EllipsisVertical, ExternalLink, FileDiff, FileWarning, FolderOpen, GitBranch, MessageSquare, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, Search, Space, UnfoldVertical, WrapText } from "lucide-react";
@@ -478,6 +478,10 @@ export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target
   // file in the patch and lands on the row; the pane consumes the jump
   // once that row renders.
   const { anchorJump, openCommentAnchor } = useAnchorJump(reversed, selectedFile, files, onFile, comments);
+  // Identities held for the memoized panes: an unrelated app update
+  // reaches FileIndexPane and PatchPane with equal props and skips them.
+  const collapseFiles = useCallback(() => onPaneVisibility({ files: false, comments: panes.comments }), [onPaneVisibility, panes.comments]);
+  const patchAnchorJump = useMemo(() => anchorJump ?? externalJumpRefJump(externalJump, selectedFile), [anchorJump, externalJump, selectedFile?.path]);
   // readOnly only means "no local disk root here": a server-backed review
   // shows its files from the server host, so OS-open would aim at a path
   // that does not exist on this machine.
@@ -557,9 +561,9 @@ export function ReviewView({ repoPath, repoName, liveWorktree, worktrees, target
       <div className="review-subbar"><span className="bar-grow" />{diffToggles}</div>
     </header>
     {!base && !loading ? <Empty icon={<GitBranch size={24} />} title="Choose a base branch to review" detail="This review has no default base." action={<RefPicker id="prompt-review-base" label="Choose base" repoPath={repoPath} refs={allRefs} value={base} resolve={resolveSource} exclude={target.kind === "worktree" ? [] : [targetName]} onChange={onBaseChange} />} /> : <div ref={bodyRef} className={reviewBodyClass(panes)} style={{ ...(panes.files ? { "--files-col": `${shownFilesWidth}px` } : {}), ...(panes.comments ? { "--comments-col": `${shownPaneWidth}px` } : {}) } as React.CSSProperties}>
-      {panes.files ? <FileIndexPane base={base} index={index} loading={loading} selectedFile={selectedFile} view={fileView} onView={onFileView} onFile={onFile} onCollapse={() => onPaneVisibility({ files: false, comments: panes.comments })} branchAction={branchAction} onReset={onFilesReset} /> : <PaneRail side="left" label="Changed files" onOpen={() => onPaneVisibility({ files: true, comments: panes.comments })} />}
+      {panes.files ? <FileIndexPane base={base} index={index} loading={loading} selectedFile={selectedFile} view={fileView} onView={onFileView} onFile={onFile} onCollapse={collapseFiles} branchAction={branchAction} onReset={onFilesReset} /> : <PaneRail side="left" label="Changed files" onOpen={() => onPaneVisibility({ files: true, comments: panes.comments })} />}
       {panes.files && <PaneHandle side="left" label="Resize the changed files pane" onWidth={(width) => dragWidth("left", width)} onCommit={onFilesWidthCommit} />}
-      <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} diffPrefs={diffPrefs} reversed={reversed} comments={comments} onDiskWorktree={diskWorktree} content={content} contentLoading={contentLoading} contentError={contentError} imageSrc={imageSrc} imageError={imageError} imageLoading={imageLoading} onEnsureContent={onEnsureContent} anchorJump={anchorJump ?? externalJumpRefJump(externalJump, selectedFile)} osOpenRepoKey={osOpenRepoKey} osOpenBlocked={osOpenBlocked} onOsOpenFailure={onOsOpenFailure} />
+      <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} diffPrefs={diffPrefs} reversed={reversed} comments={comments} onDiskWorktree={diskWorktree} content={content} contentLoading={contentLoading} contentError={contentError} imageSrc={imageSrc} imageError={imageError} imageLoading={imageLoading} onEnsureContent={onEnsureContent} anchorJump={patchAnchorJump} osOpenRepoKey={osOpenRepoKey} osOpenBlocked={osOpenBlocked} onOsOpenFailure={onOsOpenFailure} />
       {panes.comments && <PaneHandle side="right" label="Resize the comments pane" onWidth={(width) => dragWidth("right", width)} onCommit={onPaneWidthCommit} />}
       {panes.comments ? <CommentStream comments={comments} reversed={reversed} strip={<ReviewsStrip reviewKey={comments.key} refreshTick={reviewRefreshTick} resolve={resolveSource} />} onCollapse={() => onPaneVisibility({ files: panes.files, comments: false })} onReset={onPaneReset} onOpenAnchor={openCommentAnchor} paneTab={paneTab} onPaneTab={onPaneTab} canvas={canvas} /> : <PaneRail side="right" label="Comments" onOpen={() => onPaneVisibility({ files: panes.files, comments: true })} />}
     </div>}
@@ -649,7 +653,7 @@ const FILE_VIEW_OPTIONS: { value: ChangedFilesView; label: string; title: string
   { value: "details", label: "Details", title: "Name with full path on a second line" },
 ];
 
-export function FileIndexPane({ base, index, loading, selectedFile, view, onView, onFile, onCollapse, onReset, branchAction }: { base: string; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; view: ChangedFilesView; onView: (view: ChangedFilesView) => void; onFile: (file: ChangedFile) => void; onCollapse: () => void; onReset?: () => void; branchAction?: { ref: string; busy: boolean; run: () => void } | null }) {
+function FileIndexPaneImpl({ base, index, loading, selectedFile, view, onView, onFile, onCollapse, onReset, branchAction }: { base: string; index: ReviewIndex | null; loading: boolean; selectedFile: ChangedFile | null; view: ChangedFilesView; onView: (view: ChangedFilesView) => void; onFile: (file: ChangedFile) => void; onCollapse: () => void; onReset?: () => void; branchAction?: { ref: string; busy: boolean; run: () => void } | null }) {
   const files = index?.files ?? [];
   const [query, setQuery] = useState("");
   // Expand/collapse is deliberately local: the tree opens fully on every
@@ -672,8 +676,9 @@ export function FileIndexPane({ base, index, loading, selectedFile, view, onView
     });
   }
   // Arrow keys walk the rendered file rows in order, skipping directory
-  // rows; selection follows focus.
-  function moveSelection(event: ReactKeyboardEvent<HTMLButtonElement>, delta: number) {
+  // rows; selection follows focus. The identity holds across selection
+  // changes so a flip re-renders only the two rows involved.
+  const moveSelection = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>, delta: number) => {
     const buttons = Array.from(event.currentTarget.closest(".file-list")?.querySelectorAll<HTMLButtonElement>("button[data-file-path]") ?? []);
     const at = buttons.findIndex((button) => button.dataset.filePath === event.currentTarget.dataset.filePath);
     const next = buttons[at + delta];
@@ -683,7 +688,7 @@ export function FileIndexPane({ base, index, loading, selectedFile, view, onView
     const file = files.find((item) => item.path === path);
     if (file) onFile(file);
     next.focus();
-  }
+  }, [files, onFile]);
   return <aside className="file-index" aria-label="Changed files">
     <div className="pane-heading"><strong>Changed files</strong><span className="pane-heading-actions"><span>{query.trim() ? `${shown.length} / ${files.length}` : files.length}</span>{onReset && <button className="icon-btn" type="button" aria-label="Reset pane width" title="Reset pane width" onClick={onReset}>⟲</button>}<button className="icon-button" type="button" aria-label="Hide Changed files" title="Hide Changed files (Ctrl B)" onClick={onCollapse}><PanelLeftClose size={12} /></button></span></div>
     {loading ? <div className="index-skeleton">{Array.from({ length: 7 }, (_, i) => <i key={i} />)}</div>
@@ -712,7 +717,11 @@ export function FileIndexPane({ base, index, loading, selectedFile, view, onView
   </aside>;
 }
 
-function FileRow({ file, view, depth, selected, onFile, onArrow }: { file: ChangedFile; view: ChangedFilesView; depth: number; selected: boolean; onFile: (file: ChangedFile) => void; onArrow: (event: ReactKeyboardEvent<HTMLButtonElement>, delta: number) => void }) {
+// Memo boundary: an unrelated app update must not re-render the
+// changed-files list or any row in it.
+export const FileIndexPane = memo(FileIndexPaneImpl);
+
+function FileRowImpl({ file, view, depth, selected, onFile, onArrow }: { file: ChangedFile; view: ChangedFilesView; depth: number; selected: boolean; onFile: (file: ChangedFile) => void; onArrow: (event: ReactKeyboardEvent<HTMLButtonElement>, delta: number) => void }) {
   const [dir, name] = splitFilePath(file.path);
   return <button type="button" role={view === "tree" ? "treeitem" : "option"} aria-selected={selected} data-file-path={file.path} className={`file-row ${view}-row status-${file.status.toLowerCase()} ${selected ? "selected" : ""}`} style={view === "tree" ? { paddingLeft: 8 + depth * 14 } : undefined} title={file.path}
     onClick={() => onFile(file)}
@@ -731,7 +740,11 @@ function FileRow({ file, view, depth, selected, onFile, onArrow }: { file: Chang
   </button>;
 }
 
-export function PatchPane({ selectedFile, patch, patchError, patchLoading, diffPrefs, reversed, comments, onDiskWorktree, content, contentLoading, contentError, imageSrc, imageError, imageLoading, onEnsureContent, anchorJump, osOpenRepoKey, osOpenBlocked, onOsOpenFailure }: { selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; diffPrefs: DiffPreferences; reversed: boolean; comments: CommentsApi; onDiskWorktree?: string | null; content: FileContent | null; contentLoading: boolean; contentError: string; imageSrc: string | null; imageError: string; imageLoading: boolean; onEnsureContent: () => void; anchorJump?: AnchorJump | null; osOpenRepoKey?: string | null; osOpenBlocked?: boolean; onOsOpenFailure?: () => void }) {
+// A selection flip re-renders exactly the two rows whose flag moved;
+// the row callbacks' identities hold from FileIndexPane.
+const FileRow = memo(FileRowImpl);
+
+function PatchPaneImpl({ selectedFile, patch, patchError, patchLoading, diffPrefs, reversed, comments, onDiskWorktree, content, contentLoading, contentError, imageSrc, imageError, imageLoading, onEnsureContent, anchorJump, osOpenRepoKey, osOpenBlocked, onOsOpenFailure }: { selectedFile: ChangedFile | null; patch: FilePatch | null; patchError: string; patchLoading: boolean; diffPrefs: DiffPreferences; reversed: boolean; comments: CommentsApi; onDiskWorktree?: string | null; content: FileContent | null; contentLoading: boolean; contentError: string; imageSrc: string | null; imageError: string; imageLoading: boolean; onEnsureContent: () => void; anchorJump?: AnchorJump | null; osOpenRepoKey?: string | null; osOpenBlocked?: boolean; onOsOpenFailure?: () => void }) {
   const [openError, setOpenError] = useState("");
   useEffect(() => setOpenError(""), [selectedFile?.path]);
   // osOpenRepoKey rides only for remote projects: their open is a
@@ -1066,6 +1079,10 @@ export function PatchPane({ selectedFile, patch, patchError, patchLoading, diffP
     return Boolean(selectedFile) && !patchLoading && !patchError && !patch?.binary && patch?.text !== "" && (fileMode ? !contentLoading && !contentError && content !== null && !content.binary && rows.length > 0 : hunks.length > 0);
   }
 }
+
+// Memo boundary: an unrelated app update must not re-render the patch
+// stream; a file selection, patch load, or preference flip still does.
+export const PatchPane = memo(PatchPaneImpl);
 
 // One hunk gap's inline expand control, joined into the stream. Small gaps
 // collapse to a slim one-line row; while lines are loading it shows

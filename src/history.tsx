@@ -1,6 +1,7 @@
+import { useCallback, useMemo } from "react";
 import { MessageSquare } from "lucide-react";
 import { CommentStream, type CanvasPaneContext, type CommentsApi, type PaneTab } from "./comments.tsx";
-import { useCommitSummary, CommitRow, reviewBodyClass, FileIndexPane, PatchPane, PaneHandle, PaneRail, RefPicker, useAnchorJump, type DiffPreferences, type FileContent, type FilePatch, type ReviewIndex } from "./review";
+import { useCommitSummary, CommitRow, reviewBodyClass, FileIndexPane, PatchPane, PaneHandle, PaneRail, RefPicker, useAnchorJump, type AnchorJump, type DiffPreferences, type FileContent, type FilePatch, type ReviewIndex } from "./review";
 import { compactAge, shortAuthor, shortToken } from "./format";
 import { useLivePaneWidths, usePaneWidth } from "./ui";
 import { capPaneWidths } from "./panes.ts";
@@ -30,6 +31,10 @@ export function HistoryView({ history, historyRefs, index, loading, selectedComm
   // review surface's.
   const files = index?.files ?? [];
   const { anchorJump, openCommentAnchor } = useAnchorJump(false, selectedFile, files, onFile, comments);
+  // Identities held for the memoized panes: an unrelated app update
+  // reaches FileIndexPane and PatchPane with equal props and skips them.
+  const collapseFiles = useCallback(() => onPaneVisibility({ files: false, comments: panes.comments }), [onPaneVisibility, panes.comments]);
+  const patchAnchorJump = useMemo<AnchorJump | null>(() => anchorJump ?? (externalJump && selectedFile?.path === externalJump.filePath ? { filePath: externalJump.filePath, side: "RIGHT", line: externalJump.line, nonce: externalJump.nonce } : null), [anchorJump, externalJump, selectedFile?.path]);
   if (!selected) {
     return <section className="review-view" aria-label="Commit history">
       <header className="review-header">
@@ -49,9 +54,9 @@ export function HistoryView({ history, historyRefs, index, loading, selectedComm
       <div className="review-subbar"><span className="review-counts"><code>Quick look: this commit's own changes vs {shortToken(quickBase)}; pick a base to open the full review.</code></span><span className="bar-grow" /><RefPicker id="history-base" label="Base" repoPath={history.repoPath} refs={allRefs} value={escalationDefault} exclude={[selected.sha]} onChange={onBasePick} />{diffToggles}</div>
     </header>
     <div ref={bodyRef} className={reviewBodyClass(panes)} style={{ ...(panes.files ? { "--files-col": `${shownFilesWidth}px` } : {}), ...(panes.comments ? { "--comments-col": `${shownPaneWidth}px` } : {}) } as React.CSSProperties}>
-      {panes.files ? <FileIndexPane base={quickBase} index={index} loading={loading} selectedFile={selectedFile} view={fileView} onView={onFileView} onFile={onFile} onCollapse={() => onPaneVisibility({ files: false, comments: panes.comments })} branchAction={branchAction} onReset={onFilesReset} /> : <PaneRail side="left" label="Changed files" onOpen={() => onPaneVisibility({ files: true, comments: panes.comments })} />}
+      {panes.files ? <FileIndexPane base={quickBase} index={index} loading={loading} selectedFile={selectedFile} view={fileView} onView={onFileView} onFile={onFile} onCollapse={collapseFiles} branchAction={branchAction} onReset={onFilesReset} /> : <PaneRail side="left" label="Changed files" onOpen={() => onPaneVisibility({ files: true, comments: panes.comments })} />}
       {panes.files && <PaneHandle side="left" label="Resize the changed files pane" onWidth={(width) => dragWidth("left", width)} onCommit={onFilesWidthCommit} />}
-      <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} diffPrefs={diffPrefs} reversed={false} comments={comments} onDiskWorktree={readOnly ? null : history.worktreePath ?? history.repoPath} content={content} contentLoading={contentLoading} contentError={contentError} imageSrc={imageSrc} imageError={imageError} imageLoading={imageLoading} onEnsureContent={onEnsureContent} anchorJump={anchorJump ?? (externalJump && selectedFile?.path === externalJump.filePath ? { filePath: externalJump.filePath, side: "RIGHT", line: externalJump.line, nonce: externalJump.nonce } : null)} osOpenRepoKey={osOpenRepoKey} osOpenBlocked={osOpenBlocked} onOsOpenFailure={onOsOpenFailure} />
+      <PatchPane selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} diffPrefs={diffPrefs} reversed={false} comments={comments} onDiskWorktree={readOnly ? null : history.worktreePath ?? history.repoPath} content={content} contentLoading={contentLoading} contentError={contentError} imageSrc={imageSrc} imageError={imageError} imageLoading={imageLoading} onEnsureContent={onEnsureContent} anchorJump={patchAnchorJump} osOpenRepoKey={osOpenRepoKey} osOpenBlocked={osOpenBlocked} onOsOpenFailure={onOsOpenFailure} />
       {panes.comments && <PaneHandle side="right" label="Resize the comments pane" onWidth={(width) => dragWidth("right", width)} onCommit={onPaneWidthCommit} />}
       {panes.comments ? <CommentStream comments={comments} onCollapse={() => onPaneVisibility({ files: panes.files, comments: false })} onReset={onPaneReset} onOpenAnchor={openCommentAnchor} paneTab={paneTab} onPaneTab={onPaneTab} canvas={canvas} /> : <PaneRail side="right" label="Comments" onOpen={() => onPaneVisibility({ files: panes.files, comments: true })} />}
     </div>

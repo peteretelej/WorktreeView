@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -1351,9 +1351,11 @@ function App() {
   }
   // Field-scoped writes build on the latest settings via settingsRef;
   // whole-object writes (the Settings form) keep the caller's object.
-  function updateSettingsPatch(patch: Partial<Settings>) { return updateSettings({ ...settingsRef.current, ...patch }); }
-  function changeFileView(changed_files_view: ChangedFilesView) { void updateSettingsPatch({ changed_files_view }); }
-  function changePaneVisibility(next: { files: boolean; comments: boolean }) { void updateSettingsPatch({ files_pane_visible: next.files, comments_pane_visible: next.comments }); }
+  // The closures reach settings only through settingsRef, so their
+  // identities hold for the app's lifetime.
+  const updateSettingsPatch = useCallback((patch: Partial<Settings>) => updateSettings({ ...settingsRef.current, ...patch }), []);
+  const changeFileView = useCallback((changed_files_view: ChangedFilesView) => { void updateSettingsPatch({ changed_files_view }); }, [updateSettingsPatch]);
+  const changePaneVisibility = useCallback((next: { files: boolean; comments: boolean }) => { void updateSettingsPatch({ files_pane_visible: next.files, comments_pane_visible: next.comments }); }, [updateSettingsPatch]);
   function changePaneWidth(width: number) {
     const clamped = Math.min(MAX_PANE_WIDTH, Math.max(MIN_PANE_WIDTH, Math.round(width)));
     void updateSettingsPatch({ [paneTab === "canvas" ? "canvas_pane_width" : "comments_pane_width"]: clamped });
@@ -1367,9 +1369,7 @@ function App() {
     void updateSettingsPatch({ files_pane_width: clamped });
   }
   function commitFilesWidth(width: number) { changeFilesWidth(width); }
-  function resetFilesWidth() {
-    void updateSettingsPatch({ files_pane_width: defaultSettings.files_pane_width });
-  }
+  const resetFilesWidth = useCallback(() => { void updateSettingsPatch({ files_pane_width: defaultSettings.files_pane_width }); }, [updateSettingsPatch]);
   async function refreshCanvasDocs(repoPath: string) {
     try {
       const docs = await call<CanvasDocRow[]>("list_canvas_docs", { repoPath }, resolveRepoSource(repoPath));
@@ -1437,7 +1437,7 @@ function App() {
     await loadHistoryPage(current, generation, current.commits.length, historyRefs.default_base, true);
   }
 
-  const diffPrefs: DiffPreferences = { layout: settings.diff_layout, whitespaceVisible: settings.whitespace_visible, lineWrap: settings.line_wrap, syntaxVisible: settings.syntax_visible, inlineCommentsVisible: settings.inline_comments_visible };
+  const diffPrefs = useMemo<DiffPreferences>(() => ({ layout: settings.diff_layout, whitespaceVisible: settings.whitespace_visible, lineWrap: settings.line_wrap, syntaxVisible: settings.syntax_visible, inlineCommentsVisible: settings.inline_comments_visible }), [settings.diff_layout, settings.whitespace_visible, settings.line_wrap, settings.syntax_visible, settings.inline_comments_visible]);
   const reviewRemote = reviewLocation ? resolveRepoSource(reviewLocation.identity.repoPath).kind === "server" : false;
   const historyRemote = historyLocation ? resolveRepoSource(historyLocation.repoPath).kind === "server" : false;
   const diffToggles = <DiffToggles settings={settings} onChange={updateSettingsPatch} />;
@@ -1446,12 +1446,51 @@ function App() {
   // missing promisor content and the review knows which remote branch it
   // came from.
   const activeReviewIdentity: ReviewIdentity | null = reviewLocation?.identity.base ? reviewLocation.identity : historyLocation?.selectedCommit ? { repoPath: historyLocation.repoPath, base: historyLocation.selectedCommit.parents[0] ?? "empty-tree", target: commitTargetOf(historyLocation.selectedCommit), scope: "committed", reversed: false, originRef: historyLocation.startRef ?? undefined } : null;
-  let branchFetchAction: { ref: string; busy: boolean; run: () => void } | null = null;
-  if (activeReviewIdentity?.originRef?.startsWith("refs/remotes/") && reviewIndex?.error && reviewIndex.error_code === "partial_clone_content") {
-    const identity: ReviewIdentity = activeReviewIdentity;
-    const ref: string = activeReviewIdentity.originRef;
-    branchFetchAction = { ref, busy: fetchingBranchObjects, run: () => { void fetchBranchObjects({ ref, identity }); } };
-  }
+  // The action's identity holds while its inputs hold; the run reads the
+  // live review identity through a ref so a click always reloads the
+  // review as it stands at click time.
+  const activeReviewIdentityRef = useRef<ReviewIdentity | null>(null);
+  activeReviewIdentityRef.current = activeReviewIdentity;
+  const branchFetchAction = useMemo(() => {
+    const ref = activeReviewIdentity?.originRef;
+    if (!ref?.startsWith("refs/remotes/") || !reviewIndex?.error || reviewIndex.error_code !== "partial_clone_content") return null;
+    return { ref, busy: fetchingBranchObjects, run: () => { const identity = activeReviewIdentityRef.current; if (identity) void fetchBranchObjects({ ref, identity }); } };
+  }, [activeReviewIdentity?.originRef, reviewIndex?.error, reviewIndex?.error_code, fetchingBranchObjects]);
+  // Surface callbacks aim at the location and selected file on their
+  // dependency list; the helpers they call read only refs and setters, so
+  // those stay captured and the identities hold between data changes.
+  // The file-open pair reads the live location through nav so a selection
+  // (which itself swaps the nav entry) cannot change their identities:
+  // a selection flip must re-render exactly the two affected rows.
+  const openReviewFile = useCallback((file: ChangedFile) => {
+    const location = nav.current();
+    if (location.kind !== "review") return;
+    nav.replace({ ...location, selectedFile: file });
+    void selectFile(file, location.identity);
+  }, [nav]);
+  const openHistoryFile = useCallback((file: ChangedFile) => {
+    const location = nav.current();
+    if (location.kind !== "commit-history") return;
+    const selected = location.selectedCommit;
+    if (!selected) return;
+    nav.replace({ ...location, selectedFile: file });
+    void selectFile(file, { repoPath: location.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false, originRef: location.startRef ?? undefined });
+  }, [nav]);
+  const ensureReviewContent = useCallback(() => {
+    if (selectedFile && reviewLocation) void ensureFileContent(selectedFile, reviewLocation.identity);
+  }, [selectedFile, reviewLocation]);
+  const ensureHistoryContent = useCallback(() => {
+    const selected = historyLocation?.selectedCommit;
+    if (selectedFile && selected && historyLocation) void ensureFileContent(selectedFile, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false });
+  }, [selectedFile, historyLocation]);
+  const onReviewOsOpenFailure = useCallback(() => {
+    const repoPath = reviewLocation?.identity.repoPath;
+    if (repoPath) setOsOpenUnavailable((current) => ({ ...current, [repoPath]: true }));
+  }, [reviewLocation]);
+  const onHistoryOsOpenFailure = useCallback(() => {
+    const repoPath = historyLocation?.repoPath;
+    if (repoPath) setOsOpenUnavailable((current) => ({ ...current, [repoPath]: true }));
+  }, [historyLocation]);
   const search = query.trim().toLowerCase(); const matchingResults: SearchResult[] = search ? allRepos.flatMap((repo) => `${repo.name} ${repo.path}`.toLowerCase().includes(search) ? [{ repo }] : repo.worktrees.filter((worktree) => `${worktree.branch} ${worktree.path} ${worktree.head}`.toLowerCase().includes(search)).map((worktree) => ({ repo, worktree }))) : allRepos.map((repo) => ({ repo }));
   const pinnedRepos = repos.filter((repo) => repo.pinned_at !== null).sort((left, right) => (right.pinned_at ?? 0) - (left.pinned_at ?? 0)); const recentRepos = repos.filter((repo) => repo.pinned_at === null); const sidebarRows = (repo: Repo) => {
   const listing = surfaces[repo.path] ?? { gone: [], pinned: [] };
@@ -1720,9 +1759,9 @@ function App() {
       <PortalThreadDetail payload={portalThread} groups={portalThreads?.groups ?? []} repoNames={repoNames} onOpenThread={openPortalThread} onOpenReview={openThreadInReview} onChanged={() => setThreadsNonce((nonce) => nonce + 1)} source={threadLocation ? sourceForConnection(threadLocation.connectionId, connections) : undefined} />
       : reviewLocation ?
       goneReview && !comments.key ?
-      <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} repoName={reviewRepo?.name ?? reviewLocation.identity.repoPath} liveWorktree={reviewRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={reviewRepo?.worktrees} resolveSource={resolveRepoSource} readOnly={reviewRemote} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { if (selectedFile) void ensureFileContent(selectedFile, reviewLocation.identity); }} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}focusedCommentId={reviewLocation.focusedCommentId}reviewRefreshTick={reviewRefreshTick}requestRefreshTick={requestRefreshTick}paneWidth={paneWidth}onPaneWidthCommit={commitPaneWidth}onPaneReset={resetPaneWidth}filesWidth={filesWidth}onFilesWidthCommit={commitFilesWidth}onFilesReset={resetFilesWidth}paneTab={paneTab}onPaneTab={setPaneTab}canvas={reviewCanvasContext}externalJump={reviewCanvasJump}onFile={(file) => { nav.replace({ ...reviewLocation, selectedFile: file }); void selectFile(file, reviewLocation.identity); }} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[reviewLocation.identity.repoPath] ? reviewLocation.identity.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[reviewLocation.identity.repoPath])} onOsOpenFailure={() => setOsOpenUnavailable((current) => ({ ...current, [reviewLocation.identity.repoPath]: true }))} />
+      <Empty icon={<CircleDot size={24} />} title="Content no longer available" detail="This surface's content is no longer available in the repository." /> : <ReviewView repoPath={reviewLocation.identity.repoPath} repoName={reviewRepo?.name ?? reviewLocation.identity.repoPath} liveWorktree={reviewRepo?.worktrees.find((worktree) => worktree.path === selectedWorktreePath)} worktrees={reviewRepo?.worktrees} resolveSource={resolveRepoSource} readOnly={reviewRemote} target={reviewLocation.identity.target} refs={refs} base={displayBase} scope={scope} reversed={reversed} index={reviewIndex} loading={reviewLoading} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={ensureReviewContent} canBack={nav.canBack()} canForward={nav.canForward()} onHistoryBack={() => nav.back()} onHistoryForward={() => nav.forward()} onBack={handleReviewBack} onTargetChange={(target) => { void openReview(target, reviewLocation.identity.repoPath); }} onBaseChange={(value) => changeReviewSetting(value)} onPreset={applyReviewPreset} onReverse={() => changeReviewSetting(base, scope, !reversed)} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}focusedCommentId={reviewLocation.focusedCommentId}reviewRefreshTick={reviewRefreshTick}requestRefreshTick={requestRefreshTick}paneWidth={paneWidth}onPaneWidthCommit={commitPaneWidth}onPaneReset={resetPaneWidth}filesWidth={filesWidth}onFilesWidthCommit={commitFilesWidth}onFilesReset={resetFilesWidth}paneTab={paneTab}onPaneTab={setPaneTab}canvas={reviewCanvasContext}externalJump={reviewCanvasJump}onFile={openReviewFile} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[reviewLocation.identity.repoPath] ? reviewLocation.identity.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[reviewLocation.identity.repoPath])} onOsOpenFailure={onReviewOsOpenFailure} />
       : historyLocation ?
-      <HistoryView readOnly={historyRemote} resolveSource={resolveRepoSource} history={history ?? { repoPath: historyLocation.repoPath, startPointLabel: historyLocation.startPointLabel, worktreePath: historyLocation.worktreePath ?? undefined, startRef: historyLocation.startRef ?? undefined, commits: [], hasMore: false, loading: true, error: "" }} historyRefs={historyRefs} index={reviewIndex} loading={reviewLoading} selectedCommit={historyLocation.selectedCommit} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={() => { const selected = historyLocation.selectedCommit; if (selectedFile && selected) void ensureFileContent(selectedFile, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false }); }} onBack={goInbox} onBasePick={(value) => { const selected = historyLocation.selectedCommit; if (selected) void openReview(commitTargetOf(selected), historyLocation.repoPath, { base: value }, historyLocation.startRef ?? undefined); }} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}paneWidth={paneWidth}onPaneWidthCommit={commitPaneWidth}onPaneReset={resetPaneWidth}filesWidth={filesWidth}onFilesWidthCommit={commitFilesWidth}onFilesReset={resetFilesWidth}paneTab={paneTab}onPaneTab={setPaneTab}canvas={historyCanvasContext}externalJump={reviewCanvasJump}onFile={(file) => { const selected = historyLocation.selectedCommit; if (selected) { nav.replace({ ...historyLocation, selectedFile: file }); void selectFile(file, { repoPath: historyLocation.repoPath, base: selected.parents[0] ?? "empty-tree", target: commitTargetOf(selected), scope: "committed", reversed: false, originRef: historyLocation.startRef ?? undefined }); } }} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[historyLocation.repoPath] ? historyLocation.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[historyLocation.repoPath])} onOsOpenFailure={() => setOsOpenUnavailable((current) => ({ ...current, [historyLocation.repoPath]: true }))} />
+      <HistoryView readOnly={historyRemote} resolveSource={resolveRepoSource} history={history ?? { repoPath: historyLocation.repoPath, startPointLabel: historyLocation.startPointLabel, worktreePath: historyLocation.worktreePath ?? undefined, startRef: historyLocation.startRef ?? undefined, commits: [], hasMore: false, loading: true, error: "" }} historyRefs={historyRefs} index={reviewIndex} loading={reviewLoading} selectedCommit={historyLocation.selectedCommit} selectedFile={selectedFile} patch={patch} patchError={patchError} patchLoading={patchLoading} fileView={settings.changed_files_view} diffPrefs={diffPrefs} diffToggles={diffToggles} comments={comments} content={fileContent} contentLoading={fileContentLoading} contentError={fileContentError} imageSrc={fileImageSrc} imageError={fileImageError} imageLoading={fileImageLoading} onEnsureContent={ensureHistoryContent} onBack={goInbox} onBasePick={(value) => { const selected = historyLocation.selectedCommit; if (selected) void openReview(commitTargetOf(selected), historyLocation.repoPath, { base: value }, historyLocation.startRef ?? undefined); }} onFileView={changeFileView} panes={{ files: settings.files_pane_visible, comments: settings.comments_pane_visible }} onPaneVisibility={changePaneVisibility}paneWidth={paneWidth}onPaneWidthCommit={commitPaneWidth}onPaneReset={resetPaneWidth}filesWidth={filesWidth}onFilesWidthCommit={commitFilesWidth}onFilesReset={resetFilesWidth}paneTab={paneTab}onPaneTab={setPaneTab}canvas={historyCanvasContext}externalJump={reviewCanvasJump}onFile={openHistoryFile} branchAction={branchFetchAction} osOpenRepoKey={remoteHealth[historyLocation.repoPath] ? historyLocation.repoPath : null} osOpenBlocked={Boolean(osOpenUnavailable[historyLocation.repoPath])} onOsOpenFailure={onHistoryOsOpenFailure} />
       : <section className="inbox-pane" aria-labelledby="inbox-heading" aria-busy={loading || activeRepoHydrating}>
 <div className="section-heading">
 <div className="project-heading">
