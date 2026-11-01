@@ -44,24 +44,28 @@ later optimization target.
 
 ## Webview side
 
-- The changed-files pane renders the whole list at once: there is no
-  pager, so the directory tree always spans the full changeset. The tree,
-  its per-directory counts, and filtering derive client-side from the
-  existing `{path, status}` list, and rows are one-line buttons, so the
-  DOM scales with the changeset's file count at a fraction of the cost of
-  diff rows (the same trade the row stream below makes).
+- The changed-files pane renders a windowed list: only the visible rows
+  plus a fixed overscan sit in the DOM, positioned over a total-height
+  spacer with fixed per-view row heights (`src/fileWindow.ts`), so the
+  DOM scales with the viewport instead of the changeset. Directory rows
+  and file rows share one pinned one-line height (the one accepted visual
+  normalization); details rows use one pinned two-line height. Tree
+  building, per-directory counts, and filtering stay client-side over the
+  full row data.
 - Pane width drags never re-render React: pointer moves coalesce to one
   animation frame and the capped widths land directly on the review grid's
   CSS variables, so dragging stays responsive over whole-list changesets;
   app state only carries the width committed on release.
 - Both patch and full-file views render one continuous row stream in
   native flow (`src/stream.ts` builds the rows; there is no custom scroll
-  code). The whole stream is present in the DOM and the browser owns
-  scrolling, so the scrollbar and the content can never desync. The DOM
-  scales with the diff - memory, not responsiveness, is the trade-off.
-  Files past the render cap (50,000 rows) decline with open-externally
-  actions instead of freezing, and the e2e suite validates a 6000-line
-  patch end to end.
+  code - the one exception is the changed-files windowed list in
+  `src/fileWindow.ts`, unit-tested over fixed-height rows). The patch pane
+  itself is memoized, so unrelated app updates skip it. The whole stream
+  is present in the DOM and the browser owns scrolling, so the scrollbar
+  and the content can never desync. The DOM scales with the diff - memory,
+  not responsiveness, is the trade-off. Files past the render cap (50,000
+  rows) decline with open-externally actions instead of freezing, and the
+  e2e suite validates a 6000-line patch end to end.
 - Selected file patches are cached in memory for the life of the review,
   keyed by the same identity the backend fetch uses. Revisiting a file
   renders from the cache with no Git spawn; the cache resets when the

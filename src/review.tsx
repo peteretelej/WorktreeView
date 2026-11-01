@@ -1,10 +1,11 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, ArrowLeftRight, ArrowRight, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, CircleDot, Code, Columns2, EllipsisVertical, ExternalLink, FileDiff, FileWarning, FolderOpen, GitBranch, MessageSquare, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, Search, Space, UnfoldVertical, WrapText } from "lucide-react";
 import { call, type RemoteSource, type SourceResolver } from "./remote.ts";
 import { sameReviewTarget, type ChangedFile, type CommitDetail, type RefInventory, type ReviewIdentity, type ReviewScope, type ReviewTarget, type Worktree } from "./navigation";
 import { allTreeDirPaths, buildFileTree, filterChangedFiles, flattenFileTree, splitFilePath } from "./fileTree";
+import { rowHeightFor, scrollTopForRow, totalHeight, visibleRange } from "./fileWindow";
 import { workingChangesBase, type WorktreeReviewPreset } from "./reviewPresets";
 import { MAX_PANE_WIDTH, MIN_PANE_WIDTH, type AgentToken, type ChangedFilesView, type DiffLayout, type Settings } from "./settings";
 import { changeRegions, deletionTicks, hunksWithExpandedGaps, parseHunkHeader, patchGaps, splitFileLines, type ChangeRegion, type DiffLine, type PatchGap } from "./diff";
@@ -659,7 +660,17 @@ function FileIndexPaneImpl({ base, index, loading, selectedFile, view, onView, o
   // Expand/collapse is deliberately local: the tree opens fully on every
   // visit and only the view choice itself is remembered. null = all open.
   const [openDirs, setOpenDirs] = useState<Set<string> | null>(null);
-  useEffect(() => { setQuery(""); setOpenDirs(null); }, [index]);
+  // A fresh index resets query, open directories, and scroll to the top;
+  // the filter input's onChange resets scroll the same way so it cannot
+  // ride row-count changes.
+  useEffect(() => {
+    setQuery("");
+    setOpenDirs(null);
+    const list = listRef.current;
+    if (list) list.scrollTop = 0;
+    scrollMetrics.current.scrollTop = 0;
+    syncRange();
+  }, [index]);
   const shown = useMemo(() => filterChangedFiles(files, query), [files, query]);
   // A filter always expands the tree so matches are never hidden; until it
   // clears, directory toggles stay inert because they would otherwise edit
@@ -667,6 +678,51 @@ function FileIndexPaneImpl({ base, index, loading, selectedFile, view, onView, o
   const filtering = Boolean(query.trim());
   const open = filtering ? null : openDirs;
   const rows = useMemo(() => view === "tree" ? flattenFileTree(buildFileTree(shown), open) : shown.map((file) => ({ kind: "file" as const, file, depth: 0 })), [view, shown, open]);
+  // The list renders only the visible window plus overscan over a
+  // total-height spacer. Scroll metrics live in refs and the window state
+  // moves only when the computed start/end changes, so scrolling inside
+  // the overscan margin re-renders nothing.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const scrollMetrics = useRef({ scrollTop: 0, viewportHeight: 0 });
+  const [range, setRange] = useState({ start: 0, end: 0 });
+  const rangeRef = useRef(range);
+  const rowHeight = rowHeightFor(view);
+  const commitRange = useCallback((next: { start: number; end: number }) => {
+    const current = rangeRef.current;
+    if (next.start === current.start && next.end === current.end) return;
+    rangeRef.current = next;
+    setRange(next);
+  }, []);
+  const syncRange = useCallback(() => {
+    const { scrollTop, viewportHeight } = scrollMetrics.current;
+    commitRange(visibleRange(rows.length, scrollTop, viewportHeight, rowHeight));
+  }, [rows.length, rowHeight, commitRange]);
+  // The viewport height comes from the scroll container itself, measured in
+  // a layout effect so the first window is on screen before the first
+  // paint; the observer covers later resizes (pane collapse, window edges,
+  // zoom).
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const markLayout = () => { scrollMetrics.current.viewportHeight = el.clientHeight; syncRange(); };
+    markLayout();
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(markLayout);
+      observer.observe(el);
+    }
+    return () => observer?.disconnect();
+  }, [syncRange]);
+  // The focused row must always be inside the rendered window, so an
+  // out-of-window arrow target extends the bounds and focuses after it
+  // renders; an in-window target focuses immediately as before.
+  const [pendingFocusPath, setPendingFocusPath] = useState<string | null>(null);
+  useEffect(() => {
+    if (pendingFocusPath === null) return;
+    setPendingFocusPath(null);
+    const button = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>("button[data-file-path]") ?? []).find((item) => item.dataset.filePath === pendingFocusPath);
+    button?.focus();
+  }, [pendingFocusPath]);
   function toggleDir(path: string) {
     if (filtering) return;
     setOpenDirs((current) => {
@@ -675,20 +731,37 @@ function FileIndexPaneImpl({ base, index, loading, selectedFile, view, onView, o
       return next;
     });
   }
-  // Arrow keys walk the rendered file rows in order, skipping directory
-  // rows; selection follows focus. The identity holds across selection
-  // changes so a flip re-renders only the two rows involved.
+  // Arrow keys walk the rows data instead of the DOM, skipping directory
+  // rows; selection follows focus with no wrap past the ends. The identity
+  // holds across selection changes so a flip re-renders only the rows
+  // involved.
   const moveSelection = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>, delta: number) => {
-    const buttons = Array.from(event.currentTarget.closest(".file-list")?.querySelectorAll<HTMLButtonElement>("button[data-file-path]") ?? []);
-    const at = buttons.findIndex((button) => button.dataset.filePath === event.currentTarget.dataset.filePath);
-    const next = buttons[at + delta];
-    const path = next?.dataset.filePath;
-    if (!path) return;
+    const path = event.currentTarget.dataset.filePath;
+    const at = path === undefined ? -1 : rows.findIndex((row) => row.kind === "file" && row.file.path === path);
+    if (at < 0) return;
+    let next = at + delta;
+    while (next >= 0 && next < rows.length && rows[next].kind === "dir") next += delta;
+    if (next < 0 || next >= rows.length) return;
+    const target = rows[next];
+    if (target.kind !== "file") return;
     event.preventDefault();
-    const file = files.find((item) => item.path === path);
-    if (file) onFile(file);
-    next.focus();
-  }, [files, onFile]);
+    onFile(target.file);
+    const list = listRef.current;
+    if (list) list.scrollTop = scrollTopForRow(next, list.scrollTop, list.clientHeight, rowHeight);
+    const bounds = rangeRef.current;
+    if (next >= bounds.start && next < bounds.end) {
+      const button = Array.from(list?.querySelectorAll<HTMLButtonElement>("button[data-file-path]") ?? []).find((item) => item.dataset.filePath === target.file.path);
+      button?.focus();
+      return;
+    }
+    commitRange({ start: Math.min(bounds.start, next), end: Math.max(bounds.end, next + 1) });
+    setPendingFocusPath(target.file.path);
+  }, [rows, onFile, rowHeight, commitRange]);
+  // Clamp a stale window against the live row count so a shrunk list can
+  // never render an empty frame while scrolled deep.
+  const end = Math.min(range.end, rows.length);
+  const start = Math.min(range.start, Math.max(0, end - 1));
+  const windowRows = rows.slice(start, end);
   return <aside className="file-index" aria-label="Changed files">
     <div className="pane-heading"><strong>Changed files</strong><span className="pane-heading-actions"><span>{query.trim() ? `${shown.length} / ${files.length}` : files.length}</span>{onReset && <button className="icon-btn" type="button" aria-label="Reset pane width" title="Reset pane width" onClick={onReset}>⟲</button>}<button className="icon-button" type="button" aria-label="Hide Changed files" title="Hide Changed files (Ctrl B)" onClick={onCollapse}><PanelLeftClose size={12} /></button></span></div>
     {loading ? <div className="index-skeleton">{Array.from({ length: 7 }, (_, i) => <i key={i} />)}</div>
@@ -696,21 +769,33 @@ function FileIndexPaneImpl({ base, index, loading, selectedFile, view, onView, o
       : files.length === 0 ? <Empty icon={<CircleDot size={20} />} title={`No changes vs ${shortToken(base)}`} detail="Try a different base branch." />
       : <>
         <div className="file-tools">
-          <div className="file-filter"><Search size={12} /><input type="text" aria-label="Filter changed files" placeholder="Filter files" value={query} onChange={(event) => setQuery(event.currentTarget.value)} /></div>
+          <div className="file-filter"><Search size={12} /><input type="text" aria-label="Filter changed files" placeholder="Filter files" value={query} onChange={(event) => {
+            const list = listRef.current;
+            if (list) list.scrollTop = 0;
+            scrollMetrics.current.scrollTop = 0;
+            setQuery(event.currentTarget.value);
+            syncRange();
+          }} /></div>
           <div className="file-view-toggle" role="group" aria-label="Changed files view">{FILE_VIEW_OPTIONS.map((option) => <button key={option.value} type="button" className={view === option.value ? "active" : ""} aria-pressed={view === option.value} title={option.title} onClick={() => onView(option.value)}>{option.label}</button>)}</div>
           {view === "tree" && <>
             <button className="icon-button" type="button" aria-label="Expand all directories" title="Expand all" disabled={filtering} onClick={() => setOpenDirs(new Set(allTreeDirPaths(buildFileTree(shown))))}><ChevronsUpDown size={13} /></button>
             <button className="icon-button" type="button" aria-label="Collapse all directories" title="Collapse all" disabled={filtering} onClick={() => setOpenDirs(new Set())}><ChevronsDownUp size={13} /></button>
           </>}
         </div>
-        <div className="file-list" role={view === "tree" ? "tree" : "listbox"} aria-label="Changed files">
-          {rows.map((row) => row.kind === "dir"
-            ? <button key={row.path} type="button" role="treeitem" aria-expanded={open === null || open.has(row.path)} aria-disabled={filtering || undefined} className="file-dir-row" title={row.path} style={{ paddingLeft: 6 + row.depth * 14 }} onClick={() => toggleDir(row.path)}>
-              <ChevronRight size={11} className="dir-chevron" aria-hidden="true" />
-              <span className="dir-name">{row.label}</span>
-              <span className="dir-count">{row.count}</span>
-            </button>
-            : <FileRow key={row.file.path} file={row.file} view={view} depth={row.depth} selected={selectedFile?.path === row.file.path} onFile={onFile} onArrow={moveSelection} />)}
+        <div className="file-list" role={view === "tree" ? "tree" : "listbox"} aria-label="Changed files" ref={listRef}
+          onScroll={() => { const list = listRef.current; if (!list) return; scrollMetrics.current.scrollTop = list.scrollTop; syncRange(); }}>
+          {rows.length > 0 && <div className="file-list-spacer" style={{ height: totalHeight(rows.length, rowHeight) }}>
+            {windowRows.map((row, at) => {
+              const rowIndex = start + at;
+              return row.kind === "dir"
+                ? <button key={row.path} type="button" role="treeitem" aria-expanded={open === null || open.has(row.path)} aria-disabled={filtering || undefined} className="file-dir-row" title={row.path} style={{ top: rowIndex * rowHeight, paddingLeft: 6 + row.depth * 14 }} onClick={() => toggleDir(row.path)}>
+                  <ChevronRight size={11} className="dir-chevron" aria-hidden="true" />
+                  <span className="dir-name">{row.label}</span>
+                  <span className="dir-count">{row.count}</span>
+                </button>
+                : <FileRow key={row.file.path} file={row.file} view={view} depth={row.depth} top={rowIndex * rowHeight} selected={selectedFile?.path === row.file.path} onFile={onFile} onArrow={moveSelection} />;
+            })}
+          </div>}
           {rows.length === 0 && <div className="file-list-empty">No files matching <code>{query.trim()}</code></div>}
         </div>
       </>}
@@ -721,9 +806,9 @@ function FileIndexPaneImpl({ base, index, loading, selectedFile, view, onView, o
 // changed-files list or any row in it.
 export const FileIndexPane = memo(FileIndexPaneImpl);
 
-function FileRowImpl({ file, view, depth, selected, onFile, onArrow }: { file: ChangedFile; view: ChangedFilesView; depth: number; selected: boolean; onFile: (file: ChangedFile) => void; onArrow: (event: ReactKeyboardEvent<HTMLButtonElement>, delta: number) => void }) {
+function FileRowImpl({ file, view, depth, top, selected, onFile, onArrow }: { file: ChangedFile; view: ChangedFilesView; depth: number; top: number; selected: boolean; onFile: (file: ChangedFile) => void; onArrow: (event: ReactKeyboardEvent<HTMLButtonElement>, delta: number) => void }) {
   const [dir, name] = splitFilePath(file.path);
-  return <button type="button" role={view === "tree" ? "treeitem" : "option"} aria-selected={selected} data-file-path={file.path} className={`file-row ${view}-row status-${file.status.toLowerCase()} ${selected ? "selected" : ""}`} style={view === "tree" ? { paddingLeft: 8 + depth * 14 } : undefined} title={file.path}
+  return <button type="button" role={view === "tree" ? "treeitem" : "option"} aria-selected={selected} data-file-path={file.path} className={`file-row ${view}-row status-${file.status.toLowerCase()} ${selected ? "selected" : ""}`} style={view === "tree" ? { top, paddingLeft: 8 + depth * 14 } : { top }} title={file.path}
     onClick={() => onFile(file)}
     onKeyDown={(event) => { if (event.key === "ArrowDown") onArrow(event, 1); else if (event.key === "ArrowUp") onArrow(event, -1); }}>
     {view === "details"

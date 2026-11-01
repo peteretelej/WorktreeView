@@ -2338,7 +2338,12 @@ button:disabled {
 .pane-heading { display: flex; height: 36px; flex: none; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .pane-heading span { font: 10px var(--font-mono); }
 .file-list { min-height: 0; flex: 1; overflow-y: auto; padding: 4px; }
-.file-row { display: grid; width: 100%; grid-template-columns: 20px minmax(0, 1fr); gap: 6px; align-items: center; padding: 7px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; text-align: left; font: 11px var(--font-mono); }
+/* The changed-files list renders a windowed slice over a total-height
+   spacer; each row positions itself at its computed band top. Heights
+   pair with the constants in src/fileWindow.ts and must change together. */
+.file-list-spacer { position: relative; }
+.file-list-spacer > button { position: absolute; left: 0; right: 0; }
+.file-row { display: grid; width: 100%; height: 27px; grid-template-columns: 20px minmax(0, 1fr); gap: 6px; align-items: center; padding: 7px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; text-align: left; font: 11px var(--font-mono); }
 .file-row:hover, .file-row.selected { background: var(--primary-soft); color: var(--foreground); }
 .file-row b { color: var(--ok); font-size: 10px; }
 .file-row.status-d b, .file-row.status-r b { color: var(--danger); }
@@ -2352,7 +2357,7 @@ button:disabled {
 .file-view-toggle button + button { border-left: 1px solid var(--border); }
 .file-view-toggle button.active { background: var(--primary-soft); color: var(--primary); }
 .file-tools .icon-button { flex: none; }
-.file-dir-row { display: flex; width: 100%; align-items: center; gap: 6px; padding: 5px 8px 5px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--foreground); cursor: pointer; text-align: left; font: 11px var(--font-mono); }
+.file-dir-row { display: flex; width: 100%; height: 27px; align-items: center; gap: 6px; padding: 5px 8px 5px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--foreground); cursor: pointer; text-align: left; font: 11px var(--font-mono); }
 .file-dir-row:hover { background: var(--primary-soft); }
 .file-dir-row .dir-chevron { flex: none; color: var(--muted); }
 .file-dir-row[aria-expanded="true"] .dir-chevron { transform: rotate(90deg); }
@@ -2364,7 +2369,7 @@ button:disabled {
    filename stays readable. */
 .file-dir-part { flex: 0 1000 auto; min-width: 0; overflow: hidden; direction: rtl; text-align: left; white-space: nowrap; opacity: 0.62; }
 .file-row.list-row .file-name { flex: 0 1 auto; }
-.file-row.details-row { display: block; padding-top: 5px; padding-bottom: 5px; }
+.file-row.details-row { display: block; height: 37px; padding-top: 5px; padding-bottom: 5px; }
 .file-row.details-row .details-top { display: flex; gap: 6px; align-items: center; }
 .file-row.details-row .file-name { flex: 1; min-width: 0; }
 /* The directory line clips from its start (rtl + left alignment) so the
