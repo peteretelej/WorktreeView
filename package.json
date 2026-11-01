@@ -4,6 +4,15 @@
   "version": "0.8.3",
   "type": "module",
   "license": "Apache-2.0",
+  "author": "Peter Etelej <peter@etelej.com>",
+  "homepage": "https://github.com/peteretelej/WorktreeView#readme",
+  "bugs": {
+    "url": "https://github.com/peteretelej/WorktreeView/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/peteretelej/WorktreeView.git"
+  },
   "engines": {
     "node": ">=24",
     "npm": ">=11"

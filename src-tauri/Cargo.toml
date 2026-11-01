@@ -3,6 +3,7 @@ name = "worktreeview"
 version = "0.8.3"
 description = "Code review UI for Git worktrees"
 license = "Apache-2.0"
+repository = "https://github.com/peteretelej/WorktreeView"
 authors = ["Peter Etelej"]
 edition = "2021"
 # Two binaries share the crate since the server tier; without this the

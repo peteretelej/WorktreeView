@@ -46,6 +46,10 @@
     "createUpdaterArtifacts": true,
     "active": true,
     "targets": "all",
+    "copyright": "Copyright 2026 Peter Etelej",
+    "publisher": "Peter Etelej",
+    "homepage": "https://github.com/peteretelej/WorktreeView",
+    "category": "DeveloperTool",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
