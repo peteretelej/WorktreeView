@@ -144,7 +144,7 @@ jobs:
   bump-version:
     needs: release
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -164,6 +164,18 @@ jobs:
       - name: Stamp the released version
         timeout-minutes: 2
         run: node scripts/set-version.mjs "${GITHUB_REF_NAME#v}"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        timeout-minutes: 5
+
+      - name: Refresh Cargo.lock workspace version
+        # set-version.mjs deliberately skips Cargo.lock; cargo owns the
+        # file, so the bot commit syncs the workspace entry instead of a
+        # hand-rolled bump after every release.
+        continue-on-error: true
+        timeout-minutes: 5
+        run: cargo update --workspace --manifest-path src-tauri/Cargo.toml
 
       - name: Commit and push the version bump
         # The build never depends on this commit (each leg stamped its
