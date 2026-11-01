@@ -784,7 +784,7 @@ function FileIndexPaneImpl({ base, index, loading, selectedFile, view, onView, o
         </div>
         <div className="file-list" role={view === "tree" ? "tree" : "listbox"} aria-label="Changed files" ref={listRef}
           onScroll={() => { const list = listRef.current; if (!list) return; scrollMetrics.current.scrollTop = list.scrollTop; syncRange(); }}>
-          {rows.length > 0 && <div className="file-list-spacer" style={{ height: totalHeight(rows.length, rowHeight) }}>
+          {rows.length > 0 && <div className="file-list-spacer" role="presentation" style={{ height: totalHeight(rows.length, rowHeight) }}>
             {windowRows.map((row, at) => {
               const rowIndex = start + at;
               return row.kind === "dir"
